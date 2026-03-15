@@ -8,10 +8,18 @@ pub struct DedupWindow<const N: usize> {
     buf: heapless::Deque<[u8; 32], N>,
 }
 
+impl<const N: usize> Default for DedupWindow<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> DedupWindow<N> {
     /// Create an empty window.
     pub const fn new() -> Self {
-        DedupWindow { buf: heapless::Deque::new() }
+        DedupWindow {
+            buf: heapless::Deque::new(),
+        }
     }
 
     /// Check `hash` and insert it if not seen before.
@@ -35,10 +43,14 @@ impl<const N: usize> DedupWindow<N> {
     }
 
     /// Number of hashes currently tracked.
-    pub fn len(&self) -> usize { self.buf.len() }
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
 
     /// True if the window is empty.
-    pub fn is_empty(&self) -> bool { self.buf.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -62,19 +74,28 @@ mod tests {
     #[test]
     fn evicts_oldest_when_full() {
         let mut w: DedupWindow<4> = DedupWindow::new();
-        for i in 0u8..4 { let mut h=[0u8;32]; h[0]=i; w.check_and_insert(&h); }
+        for i in 0u8..4 {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            w.check_and_insert(&h);
+        }
         // Insert a 5th — evicts first
-        let mut h5 = [0u8; 32]; h5[0] = 5;
+        let mut h5 = [0u8; 32];
+        h5[0] = 5;
         w.check_and_insert(&h5);
         // Original h0 should be gone now
-        assert!(!w.check_and_insert(&[0u8; 32]), "evicted entry must not be a duplicate");
+        assert!(
+            !w.check_and_insert(&[0u8; 32]),
+            "evicted entry must not be a duplicate"
+        );
     }
 
     #[test]
     fn different_hashes_not_duplicates() {
         let mut w: DedupWindow<16> = DedupWindow::new();
         for i in 0u8..8 {
-            let mut h = [0u8; 32]; h[0] = i;
+            let mut h = [0u8; 32];
+            h[0] = i;
             assert!(!w.check_and_insert(&h));
         }
         assert_eq!(w.len(), 8);

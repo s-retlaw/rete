@@ -20,9 +20,11 @@ use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
 use rete_core::{
     DestType, HeaderType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
 };
-use rete_stack::ReteInterface;
 pub use rete_stack::NodeEvent;
-use rete_transport::{EmbeddedTransport, IngestResult, Transport, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
+use rete_stack::ReteInterface;
+use rete_transport::{
+    EmbeddedTransport, IngestResult, Transport, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS,
+};
 
 // ---------------------------------------------------------------------------
 // Error
@@ -273,12 +275,8 @@ impl EmbassyNode {
     /// regardless of how often the recv branch wins.
     ///
     /// The `on_event` callback is invoked for each event.
-    pub async fn run<I, R, F>(
-        &mut self,
-        iface: &mut I,
-        rng: &mut R,
-        mut on_event: F,
-    ) where
+    pub async fn run<I, R, F>(&mut self, iface: &mut I, rng: &mut R, mut on_event: F)
+    where
         I: ReteInterface,
         R: RngCore + CryptoRng,
         F: FnMut(NodeEvent),
@@ -321,8 +319,7 @@ impl EmbassyNode {
                                     app_data: app_data.map(|d| d.to_vec()),
                                 });
                                 if let Some(ref msg) = self.auto_reply {
-                                    if let Some(pkt) =
-                                        self.build_data_packet(&dest_hash, msg, rng)
+                                    if let Some(pkt) = self.build_data_packet(&dest_hash, msg, rng)
                                     {
                                         let _ = iface.send(&pkt).await;
                                     }

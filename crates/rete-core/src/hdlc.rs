@@ -70,6 +70,12 @@ pub struct HdlcDecoder<const BUF_SIZE: usize> {
     escape: bool,
 }
 
+impl<const N: usize> Default for HdlcDecoder<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> HdlcDecoder<N> {
     /// Create a new decoder with an empty buffer.
     pub const fn new() -> Self {

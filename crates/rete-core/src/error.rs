@@ -30,17 +30,17 @@ pub enum Error {
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Error::PacketTooShort          => write!(f, "packet too short"),
-            Error::PacketTooLong           => write!(f, "packet exceeds MTU of 500 bytes"),
-            Error::BufferTooSmall          => write!(f, "output buffer too small"),
-            Error::PayloadTooLarge         => write!(f, "payload exceeds MDU"),
-            Error::UnknownPacketType(v)    => write!(f, "unknown packet type: {v:#04x}"),
-            Error::UnknownDestType(v)      => write!(f, "unknown destination type: {v:#04x}"),
-            Error::CryptoError             => write!(f, "cryptographic operation failed"),
-            Error::InvalidKey              => write!(f, "invalid key material"),
-            Error::InvalidSignature        => write!(f, "Ed25519 signature verification failed"),
-            Error::InvalidPadding          => write!(f, "invalid PKCS#7 padding"),
-            Error::MissingField(field)     => write!(f, "missing required field: {field}"),
+            Error::PacketTooShort => write!(f, "packet too short"),
+            Error::PacketTooLong => write!(f, "packet exceeds MTU of 500 bytes"),
+            Error::BufferTooSmall => write!(f, "output buffer too small"),
+            Error::PayloadTooLarge => write!(f, "payload exceeds MDU"),
+            Error::UnknownPacketType(v) => write!(f, "unknown packet type: {v:#04x}"),
+            Error::UnknownDestType(v) => write!(f, "unknown destination type: {v:#04x}"),
+            Error::CryptoError => write!(f, "cryptographic operation failed"),
+            Error::InvalidKey => write!(f, "invalid key material"),
+            Error::InvalidSignature => write!(f, "Ed25519 signature verification failed"),
+            Error::InvalidPadding => write!(f, "invalid PKCS#7 padding"),
+            Error::MissingField(field) => write!(f, "missing required field: {field}"),
         }
     }
 }

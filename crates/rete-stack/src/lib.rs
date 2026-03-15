@@ -16,6 +16,7 @@ use rete_core::TRUNCATED_HASH_LEN;
 ///
 /// `rete-embassy` and `rete-tokio` provide task harnesses that drive
 /// implementors of this trait.
+#[allow(async_fn_in_trait)]
 pub trait ReteInterface {
     /// The error type for send/receive failures.
     type Error: core::fmt::Debug;

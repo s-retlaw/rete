@@ -14,10 +14,10 @@ pub mod dedup;
 pub mod path;
 pub mod transport;
 
-pub use transport::{Transport, IngestResult, TickResult};
 pub use announce::{validate_announce, AnnounceError, AnnounceInfo, PendingAnnounce};
-pub use path::Path;
 pub use dedup::DedupWindow;
+pub use path::Path;
+pub use transport::{IngestResult, TickResult, Transport};
 
 /// Transport for embedded targets (conservative memory).
 pub type EmbeddedTransport = Transport<64, 16, 128>;

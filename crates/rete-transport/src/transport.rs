@@ -1,11 +1,13 @@
 //! Core Transport struct — path table, announce queue, packet processing.
 
-use heapless::FnvIndexMap;
-use rand_core::{RngCore, CryptoRng};
-use rete_core::{TRUNCATED_HASH_LEN, NAME_HASH_LEN, Packet, PacketType, PacketBuilder, DestType, Identity};
-use crate::{path::Path, announce::PendingAnnounce, dedup::DedupWindow};
 use crate::announce::validate_announce;
-use sha2::{Sha256, Digest};
+use crate::{announce::PendingAnnounce, dedup::DedupWindow, path::Path};
+use heapless::FnvIndexMap;
+use rand_core::{CryptoRng, RngCore};
+use rete_core::{
+    DestType, Identity, Packet, PacketBuilder, PacketType, NAME_HASH_LEN, TRUNCATED_HASH_LEN,
+};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Protocol constants (from Python Transport.py)
@@ -76,24 +78,27 @@ pub struct TickResult {
 /// - `MAX_PATHS`      — max learned destination paths
 /// - `MAX_ANNOUNCES`  — max pending outbound announces
 /// - `DEDUP_WINDOW`   — duplicate-detection window size
-pub struct Transport<
-    const MAX_PATHS:     usize,
-    const MAX_ANNOUNCES: usize,
-    const DEDUP_WINDOW:  usize,
-> {
-    paths:     FnvIndexMap<[u8; TRUNCATED_HASH_LEN], Path, MAX_PATHS>,
+pub struct Transport<const MAX_PATHS: usize, const MAX_ANNOUNCES: usize, const DEDUP_WINDOW: usize>
+{
+    paths: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], Path, MAX_PATHS>,
     announces: heapless::Deque<PendingAnnounce, MAX_ANNOUNCES>,
-    dedup:     DedupWindow<DEDUP_WINDOW>,
+    dedup: DedupWindow<DEDUP_WINDOW>,
     known_identities: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], [u8; 64], MAX_PATHS>,
+}
+
+impl<const P: usize, const A: usize, const D: usize> Default for Transport<P, A, D> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
     /// Create a new, empty transport.
     pub const fn new() -> Self {
         Transport {
-            paths:     FnvIndexMap::new(),
+            paths: FnvIndexMap::new(),
             announces: heapless::Deque::new(),
-            dedup:     DedupWindow::new(),
+            dedup: DedupWindow::new(),
             known_identities: FnvIndexMap::new(),
         }
     }
@@ -132,10 +137,14 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
     }
 
     /// Number of known paths.
-    pub fn path_count(&self) -> usize { self.paths.len() }
+    pub fn path_count(&self) -> usize {
+        self.paths.len()
+    }
 
     /// Number of pending announces.
-    pub fn announce_count(&self) -> usize { self.announces.len() }
+    pub fn announce_count(&self) -> usize {
+        self.announces.len()
+    }
 
     /// Look up a previously announced identity's public key by destination hash.
     pub fn recall_identity(&self, dest: &[u8; TRUNCATED_HASH_LEN]) -> Option<&[u8; 64]> {
@@ -208,7 +217,12 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
         }
     }
 
-    fn handle_announce<'a>(&mut self, pkt: &Packet<'a>, raw: &'a [u8], now: u64) -> IngestResult<'a> {
+    fn handle_announce<'a>(
+        &mut self,
+        pkt: &Packet<'a>,
+        raw: &'a [u8],
+        now: u64,
+    ) -> IngestResult<'a> {
         match validate_announce(pkt.destination_hash, pkt.payload) {
             Ok(info) => {
                 let mut dh = [0u8; TRUNCATED_HASH_LEN];
@@ -230,7 +244,10 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
                             via.copy_from_slice(tid);
                             Path::via_repeater(via, pkt.hops, now)
                         }
-                        None => Path { hops: pkt.hops, ..Path::direct(now) },
+                        None => Path {
+                            hops: pkt.hops,
+                            ..Path::direct(now)
+                        },
                     };
                     let _ = self.insert_path(dh, path);
                 }
@@ -285,11 +302,11 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
     pub fn create_announce<R: RngCore + CryptoRng>(
         identity: &Identity,
         app_name: &str,
-        aspects:  &[&str],
+        aspects: &[&str],
         app_data: Option<&[u8]>,
-        rng:      &mut R,
-        now:      u64,
-        out:      &mut [u8],
+        rng: &mut R,
+        now: u64,
+        out: &mut [u8],
     ) -> Result<usize, rete_core::Error> {
         // Compute expanded name and destination hash
         let mut name_buf = [0u8; 128];

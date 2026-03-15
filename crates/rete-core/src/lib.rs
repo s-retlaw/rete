@@ -30,8 +30,8 @@ pub mod identity;
 pub mod packet;
 
 pub use error::Error;
-pub use identity::{Identity, destination_hash, expand_name};
-pub use packet::{Packet, PacketBuilder, PacketType, HeaderType, DestType};
+pub use identity::{destination_hash, expand_name, Identity};
+pub use packet::{DestType, HeaderType, Packet, PacketBuilder, PacketType};
 
 // ---------------------------------------------------------------------------
 // Protocol constants — must match Python reference exactly

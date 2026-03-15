@@ -45,8 +45,8 @@
 //!   plaintext  = PKCS7_unpad(AES-256-CBC-decrypt(enc_key, iv, aes_body))
 //! ```
 
-use sha2::{Sha256, Digest};
-use crate::{Error, TRUNCATED_HASH_LEN, NAME_HASH_LEN};
+use crate::{Error, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
+use sha2::{Digest, Sha256};
 
 /// Token overhead: IV (16 bytes) + HMAC-SHA256 (32 bytes).
 const TOKEN_OVERHEAD: usize = 48;
@@ -55,9 +55,9 @@ const TOKEN_OVERHEAD: usize = 48;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Identity {
     /// X25519 private scalar (32 bytes).
-    pub x25519_prv:  [u8; 32],
+    pub x25519_prv: [u8; 32],
     /// X25519 public point (32 bytes).
-    pub x25519_pub:  [u8; 32],
+    pub x25519_pub: [u8; 32],
     /// Ed25519 signing key seed (32 bytes).
     pub ed25519_prv: [u8; 32],
     /// Ed25519 verifying key (32 bytes).
@@ -78,7 +78,7 @@ impl Identity {
         if pub_key.len() != 64 {
             return Err(Error::InvalidKey);
         }
-        let mut x25519_pub  = [0u8; 32];
+        let mut x25519_pub = [0u8; 32];
         let mut ed25519_pub = [0u8; 32];
         x25519_pub.copy_from_slice(&pub_key[..32]);
         ed25519_pub.copy_from_slice(&pub_key[32..64]);
@@ -102,20 +102,25 @@ impl Identity {
             return Err(Error::InvalidKey);
         }
 
-        let mut x25519_prv  = [0u8; 32];
+        let mut x25519_prv = [0u8; 32];
         let mut ed25519_prv = [0u8; 32];
         x25519_prv.copy_from_slice(&prv[0..32]);
         ed25519_prv.copy_from_slice(&prv[32..64]);
 
         // X25519: derive public key from private scalar
-        let secret     = x25519_dalek::StaticSecret::from(x25519_prv);
+        let secret = x25519_dalek::StaticSecret::from(x25519_prv);
         let x25519_pub = x25519_dalek::PublicKey::from(&secret).to_bytes();
 
         // Ed25519: derive verifying key from signing seed
-        let signing     = ed25519_dalek::SigningKey::from_bytes(&ed25519_prv);
+        let signing = ed25519_dalek::SigningKey::from_bytes(&ed25519_prv);
         let ed25519_pub = signing.verifying_key().to_bytes();
 
-        Ok(Identity { x25519_prv, x25519_pub, ed25519_prv, ed25519_pub })
+        Ok(Identity {
+            x25519_prv,
+            x25519_pub,
+            ed25519_prv,
+            ed25519_pub,
+        })
     }
 
     /// Create an Identity from a seed (for deterministic/reproducible testing).
@@ -129,7 +134,7 @@ impl Identity {
         let hash = Sha256::digest(seed);
         let mut prv = [0u8; 64];
         prv[..32].copy_from_slice(&hash);
-        let hash2 = Sha256::digest(&hash);
+        let hash2 = Sha256::digest(hash);
         prv[32..].copy_from_slice(&hash2);
         Self::from_private_key(&prv)
     }
@@ -149,7 +154,7 @@ impl Identity {
     /// `identity_hash = SHA-256(pub_key)[0:16]`
     pub fn hash(&self) -> [u8; TRUNCATED_HASH_LEN] {
         let pub_key = self.public_key();
-        let digest  = Sha256::digest(&pub_key);
+        let digest = Sha256::digest(pub_key);
         digest[..TRUNCATED_HASH_LEN].try_into().unwrap()
     }
 
@@ -176,9 +181,10 @@ impl Identity {
 
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&self.ed25519_pub)
             .map_err(|_| Error::InvalidSignature)?;
-        let sig = ed25519_dalek::Signature::from_slice(signature)
-            .map_err(|_| Error::InvalidSignature)?;
-        vk.verify(message, &sig).map_err(|_| Error::InvalidSignature)
+        let sig =
+            ed25519_dalek::Signature::from_slice(signature).map_err(|_| Error::InvalidSignature)?;
+        vk.verify(message, &sig)
+            .map_err(|_| Error::InvalidSignature)
     }
 
     /// Encrypt `plaintext` to this identity's X25519 public key.
@@ -189,42 +195,38 @@ impl Identity {
     ///
     /// # Errors
     /// [`Error::BufferTooSmall`] if `out` cannot hold the result.
-    pub fn encrypt<R>(
-        &self,
-        plaintext: &[u8],
-        rng:       &mut R,
-        out:       &mut [u8],
-    ) -> Result<usize, Error>
+    pub fn encrypt<R>(&self, plaintext: &[u8], rng: &mut R, out: &mut [u8]) -> Result<usize, Error>
     where
         R: rand_core::RngCore + rand_core::CryptoRng,
     {
+        use aes::cipher::{generic_array::GenericArray, BlockEncryptMut, KeyIvInit};
         use aes::Aes256;
-        use aes::cipher::{BlockEncryptMut, KeyIvInit, generic_array::GenericArray};
         use hmac::{Hmac, Mac};
 
         // Compute padded AES body size and total output size
-        let pad_len    = 16 - (plaintext.len() % 16);
+        let pad_len = 16 - (plaintext.len() % 16);
         let padded_len = plaintext.len() + pad_len;
-        let total_len  = 32 + TOKEN_OVERHEAD + padded_len; // ephemeral_pub + iv + aes_body + hmac
+        let total_len = 32 + TOKEN_OVERHEAD + padded_len; // ephemeral_pub + iv + aes_body + hmac
         if out.len() < total_len {
             return Err(Error::BufferTooSmall);
         }
 
         // 1. Generate ephemeral X25519 keypair
         let ephemeral_secret = x25519_dalek::EphemeralSecret::random_from_rng(&mut *rng);
-        let ephemeral_pub    = x25519_dalek::PublicKey::from(&ephemeral_secret);
+        let ephemeral_pub = x25519_dalek::PublicKey::from(&ephemeral_secret);
 
         // 2. ECDH
         let recipient_pub = x25519_dalek::PublicKey::from(self.x25519_pub);
-        let shared        = ephemeral_secret.diffie_hellman(&recipient_pub);
+        let shared = ephemeral_secret.diffie_hellman(&recipient_pub);
 
         // 3. HKDF → 64 bytes (salt = identity hash, info = empty)
         let salt = self.hash();
-        let hk   = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
         let mut derived = [0u8; 64];
-        hk.expand(b"", &mut derived).map_err(|_| Error::CryptoError)?;
+        hk.expand(b"", &mut derived)
+            .map_err(|_| Error::CryptoError)?;
 
-        let signing_key    = &derived[0..32];
+        let signing_key = &derived[0..32];
         let encryption_key = &derived[32..64];
 
         // 4. Generate random IV
@@ -253,8 +255,8 @@ impl Identity {
         }
 
         // 9. HMAC-SHA256(signing_key, iv || aes_body)
-        let mut mac = Hmac::<Sha256>::new_from_slice(signing_key)
-            .map_err(|_| Error::CryptoError)?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(signing_key).map_err(|_| Error::CryptoError)?;
         mac.update(&out[32..48 + padded_len]);
         let hmac_result = mac.finalize().into_bytes();
         out[48 + padded_len..total_len].copy_from_slice(&hmac_result);
@@ -269,8 +271,8 @@ impl Identity {
     /// # Errors
     /// [`Error::BufferTooSmall`], [`Error::CryptoError`], [`Error::InvalidPadding`]
     pub fn decrypt(&self, ciphertext: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+        use aes::cipher::{generic_array::GenericArray, BlockDecryptMut, KeyIvInit};
         use aes::Aes256;
-        use aes::cipher::{BlockDecryptMut, KeyIvInit, generic_array::GenericArray};
         use hmac::{Hmac, Mac};
 
         // Minimum: ephemeral_pub(32) + iv(16) + 1_block(16) + hmac(32) = 96
@@ -282,32 +284,33 @@ impl Identity {
         let token = &ciphertext[32..];
 
         // 1. ECDH
-        let ephemeral_pub = x25519_dalek::PublicKey::from(
-            <[u8; 32]>::try_from(ephemeral_pub_bytes).unwrap(),
-        );
+        let ephemeral_pub =
+            x25519_dalek::PublicKey::from(<[u8; 32]>::try_from(ephemeral_pub_bytes).unwrap());
         let our_secret = x25519_dalek::StaticSecret::from(self.x25519_prv);
-        let shared     = our_secret.diffie_hellman(&ephemeral_pub);
+        let shared = our_secret.diffie_hellman(&ephemeral_pub);
 
         // 2. HKDF → 64 bytes (salt = identity hash, info = empty)
         let salt = self.hash();
-        let hk   = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
         let mut derived = [0u8; 64];
-        hk.expand(b"", &mut derived).map_err(|_| Error::CryptoError)?;
+        hk.expand(b"", &mut derived)
+            .map_err(|_| Error::CryptoError)?;
 
-        let signing_key    = &derived[0..32];
+        let signing_key = &derived[0..32];
         let encryption_key = &derived[32..64];
 
         // 3. Verify HMAC
         let hmac_offset = token.len() - 32;
-        let mut mac = Hmac::<Sha256>::new_from_slice(signing_key)
-            .map_err(|_| Error::CryptoError)?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(signing_key).map_err(|_| Error::CryptoError)?;
         mac.update(&token[..hmac_offset]);
-        mac.verify_slice(&token[hmac_offset..]).map_err(|_| Error::CryptoError)?;
+        mac.verify_slice(&token[hmac_offset..])
+            .map_err(|_| Error::CryptoError)?;
 
         // 4. Extract IV and AES body
-        let iv       = &token[0..16];
+        let iv = &token[0..16];
         let aes_body = &token[16..hmac_offset];
-        if aes_body.is_empty() || aes_body.len() % 16 != 0 {
+        if aes_body.is_empty() || !aes_body.len().is_multiple_of(16) {
             return Err(Error::CryptoError);
         }
         if out.len() < aes_body.len() {
@@ -335,7 +338,7 @@ fn pkcs7_unpad(data: &[u8]) -> Result<usize, Error> {
         return Err(Error::InvalidPadding);
     }
     let pad_byte = data[data.len() - 1];
-    let pad_len  = pad_byte as usize;
+    let pad_len = pad_byte as usize;
     if pad_byte == 0 || pad_len > 16 || pad_len > data.len() {
         return Err(Error::InvalidPadding);
     }
@@ -371,7 +374,7 @@ pub fn destination_hash(
     identity_hash: Option<&[u8; TRUNCATED_HASH_LEN]>,
 ) -> [u8; TRUNCATED_HASH_LEN] {
     let name_digest = Sha256::digest(expanded_name.as_bytes());
-    let name_hash   = &name_digest[..NAME_HASH_LEN];
+    let name_hash = &name_digest[..NAME_HASH_LEN];
 
     let mut hasher = Sha256::new();
     hasher.update(name_hash);
@@ -391,18 +394,22 @@ pub fn destination_hash(
 /// [`Error::BufferTooSmall`] if `buf` cannot hold the result.
 pub fn expand_name<'a>(
     app_name: &str,
-    aspects:  &[&str],
-    buf:      &'a mut [u8],
+    aspects: &[&str],
+    buf: &'a mut [u8],
 ) -> Result<&'a str, Error> {
     let mut pos = 0;
     let b = app_name.as_bytes();
-    if pos + b.len() > buf.len() { return Err(Error::BufferTooSmall); }
+    if pos + b.len() > buf.len() {
+        return Err(Error::BufferTooSmall);
+    }
     buf[pos..pos + b.len()].copy_from_slice(b);
     pos += b.len();
 
     for asp in aspects {
         let a = asp.as_bytes();
-        if pos + 1 + a.len() > buf.len() { return Err(Error::BufferTooSmall); }
+        if pos + 1 + a.len() > buf.len() {
+            return Err(Error::BufferTooSmall);
+        }
         buf[pos] = b'.';
         pos += 1;
         buf[pos..pos + a.len()].copy_from_slice(a);
@@ -422,7 +429,10 @@ mod tests {
     #[test]
     fn expand_name_single() {
         let mut buf = [0u8; 64];
-        assert_eq!(expand_name("testapp", &["aspect1"], &mut buf).unwrap(), "testapp.aspect1");
+        assert_eq!(
+            expand_name("testapp", &["aspect1"], &mut buf).unwrap(),
+            "testapp.aspect1"
+        );
     }
 
     #[test]
@@ -437,7 +447,10 @@ mod tests {
     #[test]
     fn expand_name_none() {
         let mut buf = [0u8; 64];
-        assert_eq!(expand_name("broadcast", &[], &mut buf).unwrap(), "broadcast");
+        assert_eq!(
+            expand_name("broadcast", &[], &mut buf).unwrap(),
+            "broadcast"
+        );
     }
 
     #[test]
@@ -462,8 +475,10 @@ mod tests {
         // destination_hash_vectors[0]: alice, testapp.aspect1
         // The exact expected value comes from vectors.json
         // Verify the computation is stable (same inputs → same output)
-        let fake_id_hash = [0xfdu8, 0x9f, 0x12, 0x1e, 0x29, 0x3b, 0xf4, 0xa4,
-                            0x15, 0xdd, 0x74, 0x36, 0x6f, 0xf7, 0x5f, 0x69];
+        let fake_id_hash = [
+            0xfdu8, 0x9f, 0x12, 0x1e, 0x29, 0x3b, 0xf4, 0xa4, 0x15, 0xdd, 0x74, 0x36, 0x6f, 0xf7,
+            0x5f, 0x69,
+        ];
         let mut name_buf = [0u8; 32];
         let expanded = expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
         let h1 = destination_hash(expanded, Some(&fake_id_hash));

@@ -40,8 +40,8 @@
 //! ```
 //! The hash is invariant to hop count and transport changes.
 
-use sha2::{Sha256, Digest};
-use crate::{Error, MTU, TRUNCATED_HASH_LEN, HEADER_1_OVERHEAD, HEADER_2_OVERHEAD};
+use crate::{Error, HEADER_1_OVERHEAD, HEADER_2_OVERHEAD, MTU, TRUNCATED_HASH_LEN};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Enumerations
@@ -52,13 +52,13 @@ use crate::{Error, MTU, TRUNCATED_HASH_LEN, HEADER_1_OVERHEAD, HEADER_2_OVERHEAD
 #[repr(u8)]
 pub enum PacketType {
     /// Normal data packet.
-    Data        = 0,
+    Data = 0,
     /// Node advertisement — broadcasts identity and public key.
-    Announce    = 1,
+    Announce = 1,
     /// Request to establish a Link session.
     LinkRequest = 2,
     /// Delivery proof / acknowledgement.
-    Proof       = 3,
+    Proof = 3,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -91,11 +91,11 @@ pub enum DestType {
     /// Addressed to a single identity (encrypted).
     Single = 0,
     /// Group destination with a shared key.
-    Group  = 1,
+    Group = 1,
     /// Broadcast / plain (unencrypted).
-    Plain  = 2,
+    Plain = 2,
     /// Link-layer session endpoint.
-    Link   = 3,
+    Link = 3,
 }
 
 impl TryFrom<u8> for DestType {
@@ -122,29 +122,29 @@ impl TryFrom<u8> for DestType {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Packet<'a> {
     /// Complete raw bytes of the packet.
-    pub raw:              &'a [u8],
+    pub raw: &'a [u8],
     /// Flags byte (raw[0]).
-    pub flags:            u8,
+    pub flags: u8,
     /// Hop count (raw[1]). 0 when freshly sent.
-    pub hops:             u8,
+    pub hops: u8,
     /// Packet type (bits 1:0 of flags).
-    pub packet_type:      PacketType,
+    pub packet_type: PacketType,
     /// Header type (bits 7:6 of flags).
-    pub header_type:      HeaderType,
+    pub header_type: HeaderType,
     /// Destination type (bits 3:2 of flags).
-    pub dest_type:        DestType,
+    pub dest_type: DestType,
     /// Context flag (bit 5 of flags).
-    pub context_flag:     bool,
+    pub context_flag: bool,
     /// Transport type (bit 4 of flags).
-    pub transport_type:   u8,
+    pub transport_type: u8,
     /// Transport ID (HEADER_2 only) — 16 bytes identifying the relay node.
-    pub transport_id:     Option<&'a [u8]>,
+    pub transport_id: Option<&'a [u8]>,
     /// Destination hash — 16 bytes.
     pub destination_hash: &'a [u8],
     /// Context byte (byte immediately following destination_hash).
-    pub context:          u8,
+    pub context: u8,
     /// Payload — plaintext for PLAIN destinations; ciphertext for SINGLE.
-    pub payload:          &'a [u8],
+    pub payload: &'a [u8],
 }
 
 impl<'a> Packet<'a> {
@@ -165,18 +165,22 @@ impl<'a> Packet<'a> {
             return Err(Error::PacketTooLong);
         }
 
-        let flags          = raw[0];
-        let hops           = raw[1];
-        let header_type    = if (flags >> 6) & 0x01 == 0 { HeaderType::Header1 } else { HeaderType::Header2 };
-        let context_flag   = (flags >> 5) & 0x01 != 0;
+        let flags = raw[0];
+        let hops = raw[1];
+        let header_type = if (flags >> 6) & 0x01 == 0 {
+            HeaderType::Header1
+        } else {
+            HeaderType::Header2
+        };
+        let context_flag = (flags >> 5) & 0x01 != 0;
         let transport_type = (flags >> 4) & 0x01;
-        let dest_type      = DestType::try_from((flags >> 2) & 0x03)?;
-        let packet_type    = PacketType::try_from(flags & 0x03)?;
+        let dest_type = DestType::try_from((flags >> 2) & 0x03)?;
+        let packet_type = PacketType::try_from(flags & 0x03)?;
 
         let (transport_id, destination_hash, context, payload) = match header_type {
             HeaderType::Header1 => {
-                let dst  = &raw[2..2 + TRUNCATED_HASH_LEN];
-                let ctx  =  raw[2 + TRUNCATED_HASH_LEN];
+                let dst = &raw[2..2 + TRUNCATED_HASH_LEN];
+                let ctx = raw[2 + TRUNCATED_HASH_LEN];
                 let data = &raw[2 + TRUNCATED_HASH_LEN + 1..];
                 (None, dst, ctx, data)
             }
@@ -184,17 +188,28 @@ impl<'a> Packet<'a> {
                 if raw.len() < HEADER_2_OVERHEAD {
                     return Err(Error::PacketTooShort);
                 }
-                let tid  = &raw[2..2 + TRUNCATED_HASH_LEN];
-                let dst  = &raw[2 + TRUNCATED_HASH_LEN..2 + 2 * TRUNCATED_HASH_LEN];
-                let ctx  =  raw[2 + 2 * TRUNCATED_HASH_LEN];
+                let tid = &raw[2..2 + TRUNCATED_HASH_LEN];
+                let dst = &raw[2 + TRUNCATED_HASH_LEN..2 + 2 * TRUNCATED_HASH_LEN];
+                let ctx = raw[2 + 2 * TRUNCATED_HASH_LEN];
                 let data = &raw[2 + 2 * TRUNCATED_HASH_LEN + 1..];
                 (Some(tid), dst, ctx, data)
             }
         };
 
-        Ok(Packet { raw, flags, hops, packet_type, header_type, dest_type,
-                    context_flag, transport_type, transport_id,
-                    destination_hash, context, payload })
+        Ok(Packet {
+            raw,
+            flags,
+            hops,
+            packet_type,
+            header_type,
+            dest_type,
+            context_flag,
+            transport_type,
+            transport_id,
+            destination_hash,
+            context,
+            payload,
+        })
     }
 
     /// Write the hashable part of this packet into `buf`.
@@ -229,7 +244,8 @@ impl<'a> Packet<'a> {
     /// Invariant to hop count and transport changes.
     pub fn compute_hash(&self) -> [u8; 32] {
         let mut buf = [0u8; MTU]; // hashable_part is always ≤ MTU - 1 bytes
-        let n = self.write_hashable_part(&mut buf)
+        let n = self
+            .write_hashable_part(&mut buf)
             .expect("MTU-sized buffer is always sufficient");
         Sha256::digest(&buf[..n]).into()
     }
@@ -252,43 +268,67 @@ impl<'a> Packet<'a> {
 ///     .build()?;
 /// ```
 pub struct PacketBuilder<'a> {
-    buf:            &'a mut [u8],
-    header_type:    HeaderType,
-    packet_type:    PacketType,
-    dest_type:      DestType,
-    context_flag:   bool,
+    buf: &'a mut [u8],
+    header_type: HeaderType,
+    packet_type: PacketType,
+    dest_type: DestType,
+    context_flag: bool,
     transport_type: u8,
-    transport_id:   Option<[u8; TRUNCATED_HASH_LEN]>,
-    dest_hash:      Option<[u8; TRUNCATED_HASH_LEN]>,
-    context:        u8,
-    payload:        Option<&'a [u8]>,
-    hops:           u8,
+    transport_id: Option<[u8; TRUNCATED_HASH_LEN]>,
+    dest_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
+    context: u8,
+    payload: Option<&'a [u8]>,
+    hops: u8,
 }
 
 impl<'a> PacketBuilder<'a> {
     /// Create a builder writing into `buf`.
     pub fn new(buf: &'a mut [u8]) -> Self {
         PacketBuilder {
-            buf, hops: 0, context: 0x00, context_flag: false,
-            transport_type: 0, transport_id: None, dest_hash: None, payload: None,
+            buf,
+            hops: 0,
+            context: 0x00,
+            context_flag: false,
+            transport_type: 0,
+            transport_id: None,
+            dest_hash: None,
+            payload: None,
             header_type: HeaderType::Header1,
             packet_type: PacketType::Data,
-            dest_type:   DestType::Plain,
+            dest_type: DestType::Plain,
         }
     }
 
     /// Set the header type (default: Header1).
-    pub fn header_type(mut self, v: HeaderType) -> Self { self.header_type = v; self }
+    pub fn header_type(mut self, v: HeaderType) -> Self {
+        self.header_type = v;
+        self
+    }
     /// Set the packet type (default: Data).
-    pub fn packet_type(mut self, v: PacketType) -> Self { self.packet_type = v; self }
+    pub fn packet_type(mut self, v: PacketType) -> Self {
+        self.packet_type = v;
+        self
+    }
     /// Set the destination type (default: Plain).
-    pub fn dest_type(mut self, v: DestType)     -> Self { self.dest_type = v; self }
+    pub fn dest_type(mut self, v: DestType) -> Self {
+        self.dest_type = v;
+        self
+    }
     /// Set the context byte (default: 0x00).
-    pub fn context(mut self, v: u8)             -> Self { self.context = v; self }
+    pub fn context(mut self, v: u8) -> Self {
+        self.context = v;
+        self
+    }
     /// Set the hop count (default: 0).
-    pub fn hops(mut self, v: u8)                -> Self { self.hops = v; self }
+    pub fn hops(mut self, v: u8) -> Self {
+        self.hops = v;
+        self
+    }
     /// Set the transport type (0=BROADCAST, 1=TRANSPORT; default: 0).
-    pub fn transport_type(mut self, v: u8)      -> Self { self.transport_type = v; self }
+    pub fn transport_type(mut self, v: u8) -> Self {
+        self.transport_type = v;
+        self
+    }
 
     /// Set the destination hash (exactly 16 bytes).
     pub fn destination_hash(mut self, hash: &[u8]) -> Self {
@@ -309,7 +349,10 @@ impl<'a> PacketBuilder<'a> {
     }
 
     /// Set the payload bytes.
-    pub fn payload(mut self, data: &'a [u8]) -> Self { self.payload = Some(data); self }
+    pub fn payload(mut self, data: &'a [u8]) -> Self {
+        self.payload = Some(data);
+        self
+    }
 
     /// Serialize the packet into the buffer.
     ///
@@ -320,8 +363,10 @@ impl<'a> PacketBuilder<'a> {
     /// - [`Error::PacketTooLong`] if the result would exceed the MTU
     /// - [`Error::BufferTooSmall`] if the buffer is too small
     pub fn build(self) -> Result<usize, Error> {
-        let payload   = self.payload.unwrap_or(&[]);
-        let dest_hash = self.dest_hash.ok_or(Error::MissingField("destination_hash"))?;
+        let payload = self.payload.unwrap_or(&[]);
+        let dest_hash = self
+            .dest_hash
+            .ok_or(Error::MissingField("destination_hash"))?;
 
         let overhead = match self.header_type {
             HeaderType::Header1 => HEADER_1_OVERHEAD,
@@ -329,14 +374,18 @@ impl<'a> PacketBuilder<'a> {
         };
         let total = overhead + payload.len();
 
-        if total > MTU                { return Err(Error::PacketTooLong); }
-        if self.buf.len() < total    { return Err(Error::BufferTooSmall); }
+        if total > MTU {
+            return Err(Error::PacketTooLong);
+        }
+        if self.buf.len() < total {
+            return Err(Error::BufferTooSmall);
+        }
 
         let flags = ((self.header_type as u8) << 6)
-                  | ((self.context_flag as u8) << 5)
-                  | (self.transport_type << 4)
-                  | ((self.dest_type as u8) << 2)
-                  | (self.packet_type as u8);
+            | ((self.context_flag as u8) << 5)
+            | (self.transport_type << 4)
+            | ((self.dest_type as u8) << 2)
+            | (self.packet_type as u8);
 
         self.buf[0] = flags;
         self.buf[1] = self.hops;
@@ -348,7 +397,9 @@ impl<'a> PacketBuilder<'a> {
                 self.buf[19..total].copy_from_slice(payload);
             }
             HeaderType::Header2 => {
-                let tid = self.transport_id.ok_or(Error::MissingField("transport_id"))?;
+                let tid = self
+                    .transport_id
+                    .ok_or(Error::MissingField("transport_id"))?;
                 self.buf[2..18].copy_from_slice(&tid);
                 self.buf[18..34].copy_from_slice(&dest_hash);
                 self.buf[34] = self.context;
@@ -369,8 +420,9 @@ mod tests {
     use super::*;
 
     fn unhex(s: &str) -> alloc::vec::Vec<u8> {
-        (0..s.len()).step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap())
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
     }
 
@@ -383,14 +435,14 @@ mod tests {
         let raw = unhex("0800066951e758a2aa0068dd10ec3ee8bfbc0068656c6c6f20776f726c64");
         let pkt = Packet::parse(&raw).unwrap();
 
-        assert_eq!(pkt.flags,        0x08);
-        assert_eq!(pkt.hops,         0);
-        assert_eq!(pkt.packet_type,  PacketType::Data);
-        assert_eq!(pkt.header_type,  HeaderType::Header1);
-        assert_eq!(pkt.dest_type,    DestType::Plain);
+        assert_eq!(pkt.flags, 0x08);
+        assert_eq!(pkt.hops, 0);
+        assert_eq!(pkt.packet_type, PacketType::Data);
+        assert_eq!(pkt.header_type, HeaderType::Header1);
+        assert_eq!(pkt.dest_type, DestType::Plain);
         assert_eq!(pkt.context_flag, false);
-        assert_eq!(pkt.context,      0x00);
-        assert_eq!(pkt.payload,      b"hello world");
+        assert_eq!(pkt.context, 0x00);
+        assert_eq!(pkt.payload, b"hello world");
         assert!(pkt.transport_id.is_none());
     }
 
@@ -398,17 +450,19 @@ mod tests {
     fn flags_byte_round_trip() {
         // packet_flags_vectors — verify encode/decode symmetry
         let cases: &[(u8, u8, u8, u8, u8)] = &[
-            (0,0,0,2,0), // 0x08 PLAIN DATA
-            (0,0,0,0,1), // 0x01 SINGLE ANNOUNCE
-            (1,0,0,0,0), // 0x40 HEADER_2 SINGLE DATA
-            (0,1,0,0,0), // 0x20 context_flag set
+            (0, 0, 0, 2, 0), // 0x08 PLAIN DATA
+            (0, 0, 0, 0, 1), // 0x01 SINGLE ANNOUNCE
+            (1, 0, 0, 0, 0), // 0x40 HEADER_2 SINGLE DATA
+            (0, 1, 0, 0, 0), // 0x20 context_flag set
         ];
         for &(ht, cf, tt, dt, pt) in cases {
-            let expected = (ht<<6)|(cf<<5)|(tt<<4)|(dt<<2)|pt;
+            let expected = (ht << 6) | (cf << 5) | (tt << 4) | (dt << 2) | pt;
             assert_eq!(
-                (expected>>6)&0x01, ht, "header_type mismatch for flags={expected:#04x}"
+                (expected >> 6) & 0x01,
+                ht,
+                "header_type mismatch for flags={expected:#04x}"
             );
-            assert_eq!((expected>>2)&0x03, dt);
+            assert_eq!((expected >> 2) & 0x03, dt);
             assert_eq!(expected & 0x03, pt);
         }
     }
@@ -427,8 +481,10 @@ mod tests {
 
     #[test]
     fn build_plain_round_trip() {
-        let dest = [0x06u8,0x69,0x51,0xe7,0x58,0xa2,0xaa,0x00,
-                    0x68,0xdd,0x10,0xec,0x3e,0xe8,0xbf,0xbc];
+        let dest = [
+            0x06u8, 0x69, 0x51, 0xe7, 0x58, 0xa2, 0xaa, 0x00, 0x68, 0xdd, 0x10, 0xec, 0x3e, 0xe8,
+            0xbf, 0xbc,
+        ];
         let payload = b"hello world";
         let mut buf = [0u8; MTU];
 
@@ -440,11 +496,11 @@ mod tests {
             .unwrap();
 
         let pkt = Packet::parse(&buf[..n]).unwrap();
-        assert_eq!(pkt.packet_type,      PacketType::Data);
-        assert_eq!(pkt.dest_type,        DestType::Plain);
+        assert_eq!(pkt.packet_type, PacketType::Data);
+        assert_eq!(pkt.dest_type, DestType::Plain);
         assert_eq!(pkt.destination_hash, &dest);
-        assert_eq!(pkt.payload,          payload);
-        assert_eq!(pkt.hops,             0);
+        assert_eq!(pkt.payload, payload);
+        assert_eq!(pkt.hops, 0);
     }
 
     #[test]
@@ -455,9 +511,7 @@ mod tests {
     #[test]
     fn builder_requires_dest_hash() {
         let mut buf = [0u8; MTU];
-        let err = PacketBuilder::new(&mut buf)
-            .payload(b"test")
-            .build();
+        let err = PacketBuilder::new(&mut buf).payload(b"test").build();
         assert_eq!(err, Err(Error::MissingField("destination_hash")));
     }
 }

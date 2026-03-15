@@ -10,7 +10,7 @@
 use rete_core::Identity;
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
-use rete_tokio::{TokioNode, NodeEvent};
+use rete_tokio::{NodeEvent, TokioNode};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,28 +24,33 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     // Parse --connect <addr>
-    let addr = args.windows(2)
+    let addr = args
+        .windows(2)
         .find(|w| w[0] == "--connect")
         .map(|w| w[1].as_str());
 
     // Parse --serial <path>
-    let serial_path = args.windows(2)
+    let serial_path = args
+        .windows(2)
         .find(|w| w[0] == "--serial")
         .map(|w| w[1].as_str());
 
     // Parse --baud <rate> (default 115200, ignored for USB-CDC)
-    let baud: u32 = args.windows(2)
+    let baud: u32 = args
+        .windows(2)
         .find(|w| w[0] == "--baud")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(DEFAULT_BAUD);
 
     // Parse --identity-seed <seed> (deterministic key for testing)
-    let seed = args.windows(2)
+    let seed = args
+        .windows(2)
         .find(|w| w[0] == "--identity-seed")
         .map(|w| w[1].clone());
 
     // Parse --auto-reply <message> (send DATA after receiving an announce)
-    let auto_reply = args.windows(2)
+    let auto_reply = args
+        .windows(2)
         .find(|w| w[0] == "--auto-reply")
         .map(|w| w[1].clone());
 
@@ -53,7 +58,8 @@ async fn main() {
     let auto_reply_ping = args.iter().any(|a| a == "--auto-reply-ping");
 
     // Parse --peer-seed <seed> (pre-register peer identity from deterministic seed)
-    let peer_seed = args.windows(2)
+    let peer_seed = args
+        .windows(2)
         .find(|w| w[0] == "--peer-seed")
         .map(|w| w[1].clone());
 
@@ -137,18 +143,26 @@ async fn main() {
 
 fn on_event(event: NodeEvent) {
     match event {
-        NodeEvent::AnnounceReceived { dest_hash, identity_hash, hops, app_data } => {
+        NodeEvent::AnnounceReceived {
+            dest_hash,
+            identity_hash,
+            hops,
+            app_data,
+        } => {
             eprintln!(
                 "[rete] ANNOUNCE dest={} identity={} hops={}{}",
                 hex::encode(dest_hash),
                 hex::encode(identity_hash),
                 hops,
-                app_data.as_ref().map(|d| {
-                    match std::str::from_utf8(d) {
-                        Ok(s) => format!(" app_data=\"{s}\""),
-                        Err(_) => format!(" app_data={}", hex::encode(d)),
-                    }
-                }).unwrap_or_default(),
+                app_data
+                    .as_ref()
+                    .map(|d| {
+                        match std::str::from_utf8(d) {
+                            Ok(s) => format!(" app_data=\"{s}\""),
+                            Err(_) => format!(" app_data={}", hex::encode(d)),
+                        }
+                    })
+                    .unwrap_or_default(),
             );
             println!(
                 "ANNOUNCE:{}:{}:{}",

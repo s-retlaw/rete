@@ -3,10 +3,14 @@
 //! Provides [`TokioNode`] which drives transport + interfaces in an async
 //! event loop using `tokio::select!`.
 
-use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN, PacketBuilder, PacketType, DestType, HeaderType};
-use rete_stack::ReteInterface;
+use rete_core::{
+    DestType, HeaderType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
+};
 pub use rete_stack::NodeEvent;
-use rete_transport::{HostedTransport, Transport, IngestResult, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
+use rete_stack::ReteInterface;
+use rete_transport::{
+    HostedTransport, IngestResult, Transport, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS,
+};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -90,14 +94,19 @@ impl TokioNode {
         let peer_id_hash = peer.hash();
         let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer_id_hash));
         let now = current_time_secs();
-        self.transport.register_identity(peer_dest_hash, peer.public_key(), now);
+        self.transport
+            .register_identity(peer_dest_hash, peer.public_key(), now);
         self.last_peer = Some(peer_dest_hash);
     }
 
     /// Build an encrypted DATA packet addressed to a known destination.
     ///
     /// Uses HEADER_2 (transport) when the path was learned via a relay node.
-    fn build_data_packet(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN], plaintext: &[u8]) -> Option<Vec<u8>> {
+    fn build_data_packet(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        plaintext: &[u8],
+    ) -> Option<Vec<u8>> {
         let pub_key = self.transport.recall_identity(dest_hash)?;
         let recipient = Identity::from_public_key(pub_key).ok()?;
         let mut rng = rand::thread_rng();
@@ -150,11 +159,8 @@ impl TokioNode {
     /// - Periodically tick (expire paths, retransmit announces)
     ///
     /// The `on_event` callback is invoked for each event.
-    pub async fn run<I, F>(
-        &mut self,
-        iface: &mut I,
-        mut on_event: F,
-    ) where
+    pub async fn run<I, F>(&mut self, iface: &mut I, mut on_event: F)
+    where
         I: ReteInterface,
         F: FnMut(NodeEvent),
     {
@@ -163,10 +169,7 @@ impl TokioNode {
         if let Err(e) = iface.send(&announce).await {
             eprintln!("[rete] failed to send initial announce: {:?}", e);
         } else {
-            eprintln!(
-                "[rete] sent announce for dest {}",
-                hex(&self.dest_hash)
-            );
+            eprintln!("[rete] sent announce for dest {}", hex(&self.dest_hash));
         }
 
         // Send initial data to pre-registered peer (if configured)
@@ -180,19 +183,21 @@ impl TokioNode {
                         hex(&dest),
                         String::from_utf8_lossy(&data)
                     );
-                    println!("DATA_SENT:{}:{}", hex(&dest), String::from_utf8_lossy(&data));
+                    println!(
+                        "DATA_SENT:{}:{}",
+                        hex(&dest),
+                        String::from_utf8_lossy(&data)
+                    );
                 }
             } else {
                 eprintln!("[rete] initial send failed: peer not registered");
             }
         }
 
-        let mut announce_timer = tokio::time::interval(
-            std::time::Duration::from_secs(ANNOUNCE_INTERVAL_SECS),
-        );
-        let mut tick_timer = tokio::time::interval(
-            std::time::Duration::from_secs(TICK_INTERVAL_SECS),
-        );
+        let mut announce_timer =
+            tokio::time::interval(std::time::Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
+        let mut tick_timer =
+            tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
         // Skip the immediate first tick (we just sent the announce)
         announce_timer.tick().await;
         tick_timer.tick().await;

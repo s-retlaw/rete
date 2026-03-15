@@ -1,7 +1,7 @@
 //! Validate all rete-core identity/crypto functions against the Python-generated
 //! test vectors in tests/interop/vectors.json.
 
-use rete_core::{Identity, destination_hash, expand_name};
+use rete_core::{destination_hash, expand_name, Identity};
 use serde_json::Value;
 
 /// Load the test vectors JSON.
@@ -23,15 +23,15 @@ fn unhex(s: &str) -> Vec<u8> {
 fn identity_key_derivation() {
     let v = vectors();
     for iv in v["identity_vectors"].as_array().unwrap() {
-        let label      = iv["seed_label"].as_str().unwrap();
-        let prv_hex    = iv["private_key_hex"].as_str().unwrap();
-        let pub_hex    = iv["public_key_hex"].as_str().unwrap();
-        let x_pub_hex  = iv["x25519_pub_hex"].as_str().unwrap();
+        let label = iv["seed_label"].as_str().unwrap();
+        let prv_hex = iv["private_key_hex"].as_str().unwrap();
+        let pub_hex = iv["public_key_hex"].as_str().unwrap();
+        let x_pub_hex = iv["x25519_pub_hex"].as_str().unwrap();
         let ed_pub_hex = iv["ed25519_pub_hex"].as_str().unwrap();
-        let hash_hex   = iv["identity_hash_hex"].as_str().unwrap();
+        let hash_hex = iv["identity_hash_hex"].as_str().unwrap();
 
         let prv = unhex(prv_hex);
-        let id  = Identity::from_private_key(&prv)
+        let id = Identity::from_private_key(&prv)
             .unwrap_or_else(|e| panic!("from_private_key failed for '{label}': {e}"));
 
         // Public key must match
@@ -70,9 +70,13 @@ fn identity_key_derivation() {
 fn destination_hash_vectors() {
     let v = vectors();
     for dv in v["destination_hash_vectors"].as_array().unwrap() {
-        let app_name     = dv["app_name"].as_str().unwrap();
-        let aspects: Vec<&str> = dv["aspects"].as_array().unwrap()
-            .iter().map(|a| a.as_str().unwrap()).collect();
+        let app_name = dv["app_name"].as_str().unwrap();
+        let aspects: Vec<&str> = dv["aspects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
         let expanded_exp = dv["expanded_name"].as_str().unwrap();
         let name_hash_hex = dv["name_hash_hex"].as_str().unwrap();
         let dest_hash_hex = dv["dest_hash_hex"].as_str().unwrap();
@@ -80,7 +84,10 @@ fn destination_hash_vectors() {
         // Test expand_name
         let mut buf = [0u8; 128];
         let expanded = expand_name(app_name, &aspects, &mut buf).unwrap();
-        assert_eq!(expanded, expanded_exp, "expand_name mismatch for {app_name}");
+        assert_eq!(
+            expanded, expanded_exp,
+            "expand_name mismatch for {app_name}"
+        );
 
         // Test name_hash intermediate
         use sha2::Digest;
@@ -118,15 +125,15 @@ fn destination_hash_vectors() {
 fn signing_vectors() {
     let v = vectors();
     for sv in v["signing_vectors"].as_array().unwrap() {
-        let desc       = sv["_description"].as_str().unwrap();
-        let verify_ok  = sv["verify_result"].as_bool().unwrap();
+        let desc = sv["_description"].as_str().unwrap();
+        let verify_ok = sv["verify_result"].as_bool().unwrap();
 
         if verify_ok {
             // Sign test: verify our signature matches
             let ed_prv_hex = sv["ed25519_prv_hex"].as_str().unwrap();
             let ed_pub_hex = sv["ed25519_pub_hex"].as_str().unwrap();
-            let msg_hex    = sv["message_hex"].as_str().unwrap();
-            let sig_hex    = sv["signature_hex"].as_str().unwrap();
+            let msg_hex = sv["message_hex"].as_str().unwrap();
+            let sig_hex = sv["signature_hex"].as_str().unwrap();
 
             // Build identity with just the Ed25519 keys (X25519 doesn't matter)
             let ed_prv = unhex(ed_prv_hex);
@@ -139,26 +146,21 @@ fn signing_vectors() {
             // Override ed25519_pub with expected value (X25519 derivation sets different pub)
             id.ed25519_pub.copy_from_slice(&ed_pub);
 
-            let msg      = unhex(msg_hex);
+            let msg = unhex(msg_hex);
             let expected = unhex(sig_hex);
 
             // Sign
             let sig = id.sign(&msg).unwrap();
-            assert_eq!(
-                hex::encode(sig),
-                sig_hex,
-                "sign mismatch: {desc}"
-            );
+            assert_eq!(hex::encode(sig), sig_hex, "sign mismatch: {desc}");
 
             // Verify should pass
-            id.verify(&msg, &expected).unwrap_or_else(|e| {
-                panic!("verify should pass: {desc}: {e}")
-            });
+            id.verify(&msg, &expected)
+                .unwrap_or_else(|e| panic!("verify should pass: {desc}: {e}"));
         } else {
             // Tampered message test: verify should fail
-            let ed_pub_hex   = sv["ed25519_pub_hex"].as_str().unwrap();
+            let ed_pub_hex = sv["ed25519_pub_hex"].as_str().unwrap();
             let tampered_hex = sv["tampered_message_hex"].as_str().unwrap();
-            let sig_hex      = sv["signature_hex"].as_str().unwrap();
+            let sig_hex = sv["signature_hex"].as_str().unwrap();
 
             let ed_pub = unhex(ed_pub_hex);
             let tampered = unhex(tampered_hex);
@@ -189,9 +191,9 @@ fn signing_vectors() {
 fn encryption_decrypt_vectors() {
     let v = vectors();
     for ev in v["encryption_vectors"].as_array().unwrap() {
-        let desc    = ev["_description"].as_str().unwrap();
-        let pt_hex  = ev["plaintext_hex"].as_str().unwrap();
-        let ct_hex  = ev["ciphertext_hex"].as_str().unwrap();
+        let desc = ev["_description"].as_str().unwrap();
+        let pt_hex = ev["plaintext_hex"].as_str().unwrap();
+        let ct_hex = ev["ciphertext_hex"].as_str().unwrap();
 
         // Build full identity (decrypt uses self.hash() as HKDF salt)
         let alice_iv = &v["identity_vectors"][0];
@@ -202,7 +204,8 @@ fn encryption_decrypt_vectors() {
         let expected_pt = unhex(pt_hex);
 
         let mut out = vec![0u8; ct.len()];
-        let pt_len = id.decrypt(&ct, &mut out)
+        let pt_len = id
+            .decrypt(&ct, &mut out)
             .unwrap_or_else(|e| panic!("decrypt failed: {desc}: {e}"));
 
         assert_eq!(
@@ -219,14 +222,19 @@ fn encryption_decrypt_vectors() {
 
 #[test]
 fn encryption_round_trip() {
-    use rand_core::{RngCore, CryptoRng};
+    use rand_core::{CryptoRng, RngCore};
 
     // Simple deterministic RNG for testing
     struct TestRng(u64);
     impl RngCore for TestRng {
-        fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+        fn next_u32(&mut self) -> u32 {
+            self.next_u64() as u32
+        }
         fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0
         }
         fn fill_bytes(&mut self, dest: &mut [u8]) {
@@ -234,7 +242,7 @@ fn encryption_round_trip() {
             while i < dest.len() {
                 let v = self.next_u64().to_le_bytes();
                 let n = core::cmp::min(8, dest.len() - i);
-                dest[i..i+n].copy_from_slice(&v[..n]);
+                dest[i..i + n].copy_from_slice(&v[..n]);
                 i += n;
             }
         }
@@ -246,7 +254,11 @@ fn encryption_round_trip() {
     impl CryptoRng for TestRng {}
 
     let v = vectors();
-    let alice_prv = unhex(v["identity_vectors"][0]["private_key_hex"].as_str().unwrap());
+    let alice_prv = unhex(
+        v["identity_vectors"][0]["private_key_hex"]
+            .as_str()
+            .unwrap(),
+    );
     let id = Identity::from_private_key(&alice_prv).unwrap();
 
     let mut rng = TestRng(42);
@@ -285,36 +297,39 @@ fn announce_signature_vectors() {
 
         // Only test vectors that have private keys (for signing)
         if let Some(prv_hex) = av.get("private_key_hex").and_then(|v| v.as_str()) {
-            let sig_hex    = av["signature_hex"].as_str().unwrap();
+            let sig_hex = av["signature_hex"].as_str().unwrap();
             let signed_hex = av["signed_data_hex"].as_str().unwrap();
-            let pub_hex    = av["public_key_hex"].as_str().unwrap();
+            let pub_hex = av["public_key_hex"].as_str().unwrap();
 
-            let prv     = unhex(prv_hex);
-            let id      = Identity::from_private_key(&prv).unwrap();
-            let signed  = unhex(signed_hex);
+            let prv = unhex(prv_hex);
+            let id = Identity::from_private_key(&prv).unwrap();
+            let signed = unhex(signed_hex);
             let sig_exp = unhex(sig_hex);
 
             // Verify public key matches
-            assert_eq!(hex::encode(id.public_key()), pub_hex, "pubkey mismatch: {desc}");
+            assert_eq!(
+                hex::encode(id.public_key()),
+                pub_hex,
+                "pubkey mismatch: {desc}"
+            );
 
             // Sign and compare
             let sig = id.sign(&signed).unwrap();
             assert_eq!(hex::encode(sig), sig_hex, "announce sig mismatch: {desc}");
 
             // Verify should pass
-            id.verify(&signed, &sig_exp).unwrap_or_else(|e| {
-                panic!("announce verify failed: {desc}: {e}")
-            });
+            id.verify(&signed, &sig_exp)
+                .unwrap_or_else(|e| panic!("announce verify failed: {desc}: {e}"));
         }
 
         // All vectors have signatures we can verify with public key
         if let Some(sig_hex) = av.get("signature_hex").and_then(|v| v.as_str()) {
             let signed_hex = av["signed_data_hex"].as_str().unwrap();
-            let pub_hex    = av["public_key_hex"].as_str().unwrap();
+            let pub_hex = av["public_key_hex"].as_str().unwrap();
 
             let pub_key = unhex(pub_hex);
-            let signed  = unhex(signed_hex);
-            let sig     = unhex(sig_hex);
+            let signed = unhex(signed_hex);
+            let sig = unhex(sig_hex);
 
             // Create identity from public key only
             let mut id = Identity {
@@ -326,9 +341,8 @@ fn announce_signature_vectors() {
             id.x25519_pub.copy_from_slice(&pub_key[..32]);
             id.ed25519_pub.copy_from_slice(&pub_key[32..64]);
 
-            id.verify(&signed, &sig).unwrap_or_else(|e| {
-                panic!("announce pubkey verify failed: {desc}: {e}")
-            });
+            id.verify(&signed, &sig)
+                .unwrap_or_else(|e| panic!("announce pubkey verify failed: {desc}: {e}"));
         }
     }
 }

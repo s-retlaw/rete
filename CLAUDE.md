@@ -3,6 +3,10 @@
 Reticulum Network Stack (RNS) implementation in Rust — `no_std`, runtime-agnostic,
 validated against the Python reference.
 
+## Git workflow
+
+Do NOT commit or push unless explicitly asked by the user.
+
 ---
 
 ## Reference material
