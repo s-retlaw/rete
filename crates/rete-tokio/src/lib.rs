@@ -26,6 +26,12 @@ pub struct TokioNode {
     dest_hash: [u8; TRUNCATED_HASH_LEN],
     /// Optional auto-reply message sent after receiving an announce.
     auto_reply: Option<Vec<u8>>,
+    /// When true, echo received DATA back to sender with "echo:" prefix.
+    echo_data: bool,
+    /// Dest hash of the most recently announced peer (echo target).
+    last_peer: Option<[u8; TRUNCATED_HASH_LEN]>,
+    /// Initial data to send right after the first announce (to a pre-registered peer).
+    initial_send: Option<(Vec<u8>, [u8; TRUNCATED_HASH_LEN])>,
 }
 
 impl TokioNode {
@@ -44,6 +50,9 @@ impl TokioNode {
             aspects: aspects.iter().map(|s| s.to_string()).collect(),
             dest_hash,
             auto_reply: None,
+            echo_data: false,
+            last_peer: None,
+            initial_send: None,
         }
     }
 
@@ -55,6 +64,34 @@ impl TokioNode {
     /// Set an auto-reply message sent to any peer that announces.
     pub fn set_auto_reply(&mut self, msg: Option<Vec<u8>>) {
         self.auto_reply = msg;
+    }
+
+    /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
+    pub fn set_echo_data(&mut self, echo: bool) {
+        self.echo_data = echo;
+    }
+
+    /// Queue a data message to send immediately after the initial announce.
+    ///
+    /// Requires `register_peer` to have been called first so the peer's
+    /// identity is known for encryption.
+    pub fn send_on_start(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN], data: Vec<u8>) {
+        self.initial_send = Some((data, dest_hash));
+    }
+
+    /// Pre-register a peer's identity for sending DATA without waiting for an announce.
+    ///
+    /// Computes the peer's dest hash from the given app_name + aspects and registers
+    /// their public key in the transport table.
+    pub fn register_peer(&mut self, peer: &Identity, app_name: &str, aspects: &[&str]) {
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
+            .expect("app_name + aspects must fit in 128 bytes");
+        let peer_id_hash = peer.hash();
+        let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer_id_hash));
+        let now = current_time_secs();
+        self.transport.register_identity(peer_dest_hash, peer.public_key(), now);
+        self.last_peer = Some(peer_dest_hash);
     }
 
     /// Build an encrypted DATA packet addressed to a known destination.
@@ -132,6 +169,24 @@ impl TokioNode {
             );
         }
 
+        // Send initial data to pre-registered peer (if configured)
+        if let Some((data, dest)) = self.initial_send.take() {
+            if let Some(pkt) = self.build_data_packet(&dest, &data) {
+                if let Err(e) = iface.send(&pkt).await {
+                    eprintln!("[rete] initial send failed: {:?}", e);
+                } else {
+                    eprintln!(
+                        "[rete] sent initial DATA to {}: {}",
+                        hex(&dest),
+                        String::from_utf8_lossy(&data)
+                    );
+                    println!("DATA_SENT:{}:{}", hex(&dest), String::from_utf8_lossy(&data));
+                }
+            } else {
+                eprintln!("[rete] initial send failed: peer not registered");
+            }
+        }
+
         let mut announce_timer = tokio::time::interval(
             std::time::Duration::from_secs(ANNOUNCE_INTERVAL_SECS),
         );
@@ -156,6 +211,7 @@ impl TokioNode {
                             let now = current_time_secs();
                             match self.transport.ingest(&mut pkt_buf[..len], now) {
                                 IngestResult::AnnounceReceived { dest_hash, identity_hash, hops, app_data } => {
+                                    self.last_peer = Some(dest_hash);
                                     on_event(NodeEvent::AnnounceReceived {
                                         dest_hash,
                                         identity_hash,
@@ -182,6 +238,17 @@ impl TokioNode {
                                     } else {
                                         payload.to_vec()
                                     };
+                                    // Echo data back to sender if echo mode is on
+                                    if self.echo_data {
+                                        if let Some(peer) = self.last_peer {
+                                            let mut echo_msg = Vec::with_capacity(5 + decrypted.len());
+                                            echo_msg.extend_from_slice(b"echo:");
+                                            echo_msg.extend_from_slice(&decrypted);
+                                            if let Some(pkt) = self.build_data_packet(&peer, &echo_msg) {
+                                                let _ = iface.send(&pkt).await;
+                                            }
+                                        }
+                                    }
                                     on_event(NodeEvent::DataReceived {
                                         dest_hash,
                                         payload: decrypted,

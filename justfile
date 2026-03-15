@@ -82,17 +82,43 @@ run-linux-tcp *ARGS:
 # End-to-end test: ESP32-C6 <-> Linux over serial
 # --------------------------------------------------------------------------
 
-# Flash ESP32-C6, wait for boot, run Linux node to exchange messages
-e2e-esp32c6: flash-esp32c6
-    @echo ""
-    @echo "=== ESP32-C6 flashed. Waiting for boot... ==="
-    @sleep 2
-    @echo "=== Starting Linux node (20s timeout) ==="
-    @echo "=== Expect: DATA with 'hello from esp32' ==="
-    @echo ""
-    timeout 20 cargo run -p rete-example-linux -- \
-        --serial {{serial_port}} --auto-reply "hello from linux" \
-        || true
+# Flash ESP32-C6, exchange data with echo, verify round-trip
+e2e-esp32c6: build-esp32c6
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Pre-build Linux binary so it starts instantly after flash
+    cargo build -p rete-example-linux
+    # Flash ESP32
+    espflash flash --port {{serial_port}} \
+        {{esp32c6_dir}}/target/{{esp32c6_target}}/release/rete-esp32c6-serial
+    echo ""
+    echo "=== ESP32-C6 flashed ==="
+    echo "=== Flow: Linux sends ping:<timestamp> → ESP32 echoes back echo:ping:<timestamp> ==="
+    echo ""
+    # Start Linux node immediately — catches ESP32 boot + initial announce.
+    # HDLC decoder ignores bootloader/log output on serial.
+    sleep 0.5
+    OUTPUT=$(timeout 30 cargo run -p rete-example-linux -- \
+        --serial {{serial_port}} --auto-reply-ping \
+        --peer-seed rete-esp32c6-serial \
+        2>&1 || true)
+    echo "$OUTPUT"
+    echo ""
+    # Extract the ping timestamp from the log
+    PING=$(echo "$OUTPUT" | grep -oP 'will send on start: \Kping:\d+' || true)
+    if [ -z "$PING" ]; then
+        echo "=== FAIL: could not find ping message ==="
+        exit 1
+    fi
+    echo "=== Sent: $PING ==="
+    # Check the echoed DATA contains "echo:<original ping>"
+    if echo "$OUTPUT" | grep -q "DATA:.*:echo:$PING"; then
+        ECHO_LINE=$(echo "$OUTPUT" | grep "DATA:.*:echo:$PING")
+        echo "=== PASS: ESP32 echoed back: $ECHO_LINE ==="
+    else
+        echo "=== FAIL: expected DATA containing 'echo:$PING' ==="
+        exit 1
+    fi
 
 # --------------------------------------------------------------------------
 # Test vectors

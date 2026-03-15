@@ -143,6 +143,10 @@ pub struct EmbassyNode {
     dest_hash: [u8; TRUNCATED_HASH_LEN],
     /// Optional auto-reply message sent after receiving an announce.
     auto_reply: Option<Vec<u8>>,
+    /// When true, echo received DATA back to sender with "echo:" prefix.
+    echo_data: bool,
+    /// Dest hash of the most recently announced peer (echo target).
+    last_peer: Option<[u8; TRUNCATED_HASH_LEN]>,
     /// Epoch offset: seconds to add to monotonic uptime to approximate Unix time.
     /// Set via [`set_epoch_offset`] after obtaining wall-clock time (e.g. from NTP).
     /// Used only for announce timestamp bytes; path expiry uses monotonic time.
@@ -165,6 +169,8 @@ impl EmbassyNode {
             aspects: aspects.iter().map(|s| String::from(*s)).collect(),
             dest_hash,
             auto_reply: None,
+            echo_data: false,
+            last_peer: None,
             epoch_offset: 0,
         }
     }
@@ -177,6 +183,11 @@ impl EmbassyNode {
     /// Set an auto-reply message sent to any peer that announces.
     pub fn set_auto_reply(&mut self, msg: Option<Vec<u8>>) {
         self.auto_reply = msg;
+    }
+
+    /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
+    pub fn set_echo_data(&mut self, echo: bool) {
+        self.echo_data = echo;
     }
 
     /// Set the epoch offset so announce timestamps approximate Unix time.
@@ -302,6 +313,7 @@ impl EmbassyNode {
                                 hops,
                                 app_data,
                             } => {
+                                self.last_peer = Some(dest_hash);
                                 on_event(NodeEvent::AnnounceReceived {
                                     dest_hash,
                                     identity_hash,
@@ -326,6 +338,19 @@ impl EmbassyNode {
                                 } else {
                                     payload.to_vec()
                                 };
+                                // Echo data back to sender if echo mode is on
+                                if self.echo_data {
+                                    if let Some(peer) = self.last_peer {
+                                        let mut echo_msg = Vec::with_capacity(5 + decrypted.len());
+                                        echo_msg.extend_from_slice(b"echo:");
+                                        echo_msg.extend_from_slice(&decrypted);
+                                        if let Some(pkt) =
+                                            self.build_data_packet(&peer, &echo_msg, rng)
+                                        {
+                                            let _ = iface.send(&pkt).await;
+                                        }
+                                    }
+                                }
                                 on_event(NodeEvent::DataReceived {
                                     dest_hash,
                                     payload: decrypted,

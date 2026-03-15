@@ -68,7 +68,7 @@ async fn main(_spawner: Spawner) -> ! {
     let identity = rete_core::Identity::from_seed(b"rete-esp32c6-serial").expect("invalid key");
 
     let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]);
-    node.set_auto_reply(Some(b"hello from esp32".to_vec()));
+    node.set_echo_data(true);
     let dh = node.dest_hash();
     println!(
         "[rete-serial] dest: {:02x}{:02x}{:02x}{:02x}",

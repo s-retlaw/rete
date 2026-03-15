@@ -142,6 +142,20 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
         self.known_identities.get(dest)
     }
 
+    /// Pre-register a peer's identity and path (for use with deterministic seeds).
+    ///
+    /// This allows sending encrypted DATA to a peer whose announce hasn't been
+    /// received yet — useful for point-to-point links with known identities.
+    pub fn register_identity(
+        &mut self,
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        pub_key: [u8; 64],
+        now: u64,
+    ) {
+        let _ = self.known_identities.insert(dest_hash, pub_key);
+        let _ = self.paths.insert(dest_hash, Path::direct(now));
+    }
+
     // -----------------------------------------------------------------------
     // Packet ingestion
     // -----------------------------------------------------------------------

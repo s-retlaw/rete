@@ -12,6 +12,8 @@ use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
 use rete_tokio::{TokioNode, NodeEvent};
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 const DEFAULT_ADDR: &str = "127.0.0.1:4242";
 const DEFAULT_BAUD: u32 = 115200;
 const APP_NAME: &str = "rete";
@@ -47,6 +49,14 @@ async fn main() {
         .find(|w| w[0] == "--auto-reply")
         .map(|w| w[1].clone());
 
+    // --auto-reply-ping: send "ping:<unix_timestamp>" on announce receipt
+    let auto_reply_ping = args.iter().any(|a| a == "--auto-reply-ping");
+
+    // Parse --peer-seed <seed> (pre-register peer identity from deterministic seed)
+    let peer_seed = args.windows(2)
+        .find(|w| w[0] == "--peer-seed")
+        .map(|w| w[1].clone());
+
     // Create or derive identity
     let identity = if let Some(seed_str) = seed {
         Identity::from_seed(seed_str.as_bytes()).expect("invalid derived key")
@@ -62,6 +72,37 @@ async fn main() {
 
     // Create node
     let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
+
+    // Pre-register peer identity (so we can send DATA without waiting for announce)
+    if let Some(ref ps) = peer_seed {
+        let peer = Identity::from_seed(ps.as_bytes()).expect("invalid peer seed");
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name(APP_NAME, ASPECTS, &mut name_buf).unwrap();
+        let peer_dest = rete_core::destination_hash(expanded, Some(&peer.hash()));
+        eprintln!("[rete] pre-registered peer: {}", hex::encode(peer_dest));
+        node.register_peer(&peer, APP_NAME, ASPECTS);
+
+        // If --auto-reply-ping, send the ping to the pre-registered peer immediately
+        if auto_reply_ping {
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let msg = format!("ping:{ts}");
+            eprintln!("[rete] will send on start: {msg}");
+            node.send_on_start(peer_dest, msg.into_bytes());
+        }
+    } else if auto_reply_ping {
+        // No peer-seed: fall back to sending ping on announce receipt
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let msg = format!("ping:{ts}");
+        eprintln!("[rete] auto-reply-ping: {msg}");
+        node.set_auto_reply(Some(msg.into_bytes()));
+    }
+
     if let Some(msg) = auto_reply {
         node.set_auto_reply(Some(msg.into_bytes()));
     }
