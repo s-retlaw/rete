@@ -16,3 +16,10 @@ embassy-time    = { workspace = true }
 embassy-futures = { workspace = true }
 embedded-io-async = { workspace = true }
 rand_core       = { workspace = true }
+
+[dev-dependencies]
+embassy-executor  = { workspace = true, features = ["arch-std", "executor-thread"] }
+embassy-time      = { workspace = true, features = ["mock-driver"] }
+critical-section  = { version = "1", features = ["std"] }
+tokio             = { workspace = true }
+rand              = "0.8"

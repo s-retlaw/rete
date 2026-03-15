@@ -17,3 +17,4 @@ rand_core = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 hex        = "0.4"
+rand       = "0.8"

@@ -5,7 +5,8 @@ use crate::{announce::PendingAnnounce, dedup::DedupWindow, path::Path};
 use heapless::FnvIndexMap;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    DestType, Identity, Packet, PacketBuilder, PacketType, NAME_HASH_LEN, TRUNCATED_HASH_LEN,
+    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, NAME_HASH_LEN,
+    TRUNCATED_HASH_LEN,
 };
 use sha2::{Digest, Sha256};
 
@@ -21,6 +22,22 @@ pub const PATHFINDER_R: u8 = 1;
 
 /// Path expiry time in seconds (7 days).
 pub const PATH_EXPIRES: u64 = 604800;
+
+/// Reverse table entry timeout in seconds (8 minutes).
+pub const REVERSE_TIMEOUT: u64 = 480;
+
+// ---------------------------------------------------------------------------
+// ReverseEntry — tracks forwarded packets for reply routing
+// ---------------------------------------------------------------------------
+
+/// An entry in the reverse table, keyed by truncated packet hash.
+///
+/// Used to route replies back along the path the original packet traversed.
+#[derive(Debug, Clone)]
+pub struct ReverseEntry {
+    /// Monotonic timestamp when this entry was created.
+    pub timestamp: u64,
+}
 
 // ---------------------------------------------------------------------------
 // IngestResult — what to do after processing an inbound packet
@@ -84,6 +101,12 @@ pub struct Transport<const MAX_PATHS: usize, const MAX_ANNOUNCES: usize, const D
     announces: heapless::Deque<PendingAnnounce, MAX_ANNOUNCES>,
     dedup: DedupWindow<DEDUP_WINDOW>,
     known_identities: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], [u8; 64], MAX_PATHS>,
+    /// Identity hash of this node (enables HEADER_2 forwarding when set).
+    local_identity_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
+    /// Reverse table: truncated packet hash → entry (for reply routing).
+    reverse_table: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ReverseEntry, MAX_PATHS>,
+    /// Dedup window for announce random_hashes (replay detection).
+    announce_dedup: DedupWindow<DEDUP_WINDOW>,
 }
 
 impl<const P: usize, const A: usize, const D: usize> Default for Transport<P, A, D> {
@@ -100,6 +123,9 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
             announces: heapless::Deque::new(),
             dedup: DedupWindow::new(),
             known_identities: FnvIndexMap::new(),
+            local_identity_hash: None,
+            reverse_table: FnvIndexMap::new(),
+            announce_dedup: DedupWindow::new(),
         }
     }
 
@@ -165,6 +191,24 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
         let _ = self.paths.insert(dest_hash, Path::direct(now));
     }
 
+    /// Set the local identity hash, enabling HEADER_2 forwarding.
+    ///
+    /// When set, packets with `transport_id == local_identity_hash` will be
+    /// forwarded to their destination via the path table.
+    pub fn set_local_identity(&mut self, hash: [u8; TRUNCATED_HASH_LEN]) {
+        self.local_identity_hash = Some(hash);
+    }
+
+    /// Look up a reverse table entry by truncated packet hash.
+    pub fn get_reverse(&self, hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&ReverseEntry> {
+        self.reverse_table.get(hash)
+    }
+
+    /// Number of reverse table entries.
+    pub fn reverse_count(&self) -> usize {
+        self.reverse_table.len()
+    }
+
     // -----------------------------------------------------------------------
     // Packet ingestion
     // -----------------------------------------------------------------------
@@ -173,10 +217,12 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
     ///
     /// Parses the packet, checks for duplicates, and dispatches by type:
     /// - **ANNOUNCE**: validate signature + dest hash, learn path
-    /// - **DATA**: return for local delivery
+    /// - **DATA**: return for local delivery or forward via HEADER_2
     ///
     /// `now` is the current monotonic time in seconds.
     pub fn ingest<'a>(&mut self, raw: &'a mut [u8], now: u64) -> IngestResult<'a> {
+        let len = raw.len();
+
         // Parse
         let pkt = match Packet::parse(raw) {
             Ok(p) => p,
@@ -189,6 +235,63 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
         // Dedup check
         if self.is_duplicate(&pkt_hash) {
             return IngestResult::Duplicate;
+        }
+
+        // Check HEADER_2 forwarding: only if we're a transport node and
+        // transport_id matches our identity. Non-matching HEADER_2 packets
+        // fall through to normal processing (announces, local DATA delivery).
+        if pkt.header_type == HeaderType::Header2 {
+            if let Some(local_id) = self.local_identity_hash {
+                if let Some(tid) = pkt.transport_id {
+                    let mut tid_arr = [0u8; TRUNCATED_HASH_LEN];
+                    tid_arr.copy_from_slice(tid);
+
+                    if tid_arr == local_id {
+                        // This packet is addressed to us as relay — forward it
+                        let mut dest = [0u8; TRUNCATED_HASH_LEN];
+                        dest.copy_from_slice(pkt.destination_hash);
+
+                        // Increment hops
+                        raw[1] = raw[1].saturating_add(1);
+
+                        // Record in reverse table (truncated packet hash)
+                        let mut trunc_hash = [0u8; TRUNCATED_HASH_LEN];
+                        trunc_hash.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
+                        let _ = self
+                            .reverse_table
+                            .insert(trunc_hash, ReverseEntry { timestamp: now });
+
+                        // Look up path to destination
+                        return match self.paths.get(&dest) {
+                            Some(path) if path.hops > 1 => {
+                                // Multi-hop: overwrite transport_id with next-hop
+                                if let Some(via) = path.via {
+                                    raw[2..18].copy_from_slice(&via);
+                                }
+                                IngestResult::Forward { raw: &raw[..len] }
+                            }
+                            Some(path) if path.hops <= 1 => {
+                                // Last hop: convert HEADER_2 → HEADER_1
+                                // Clear header_type and transport_type, keep lower nibble
+                                let new_flags = raw[0] & 0x0F;
+                                raw[0] = new_flags;
+                                // Shift dest_hash + context + payload left by 16 bytes
+                                // (removing the transport_id field)
+                                raw.copy_within(18..len, 2);
+                                IngestResult::Forward {
+                                    raw: &raw[..len - TRUNCATED_HASH_LEN],
+                                }
+                            }
+                            _ => {
+                                // No path to destination
+                                IngestResult::Invalid
+                            }
+                        };
+                    }
+                    // transport_id doesn't match us — fall through to normal processing
+                }
+            }
+            // Not a transport node, or transport_id doesn't match — fall through
         }
 
         // Increment hops
@@ -225,6 +328,16 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
     ) -> IngestResult<'a> {
         match validate_announce(pkt.destination_hash, pkt.payload) {
             Ok(info) => {
+                // Announce replay detection: check dest_hash + random_hash combo
+                let mut replay_key = [0u8; 32];
+                replay_key[..TRUNCATED_HASH_LEN].copy_from_slice(pkt.destination_hash);
+                replay_key[TRUNCATED_HASH_LEN..TRUNCATED_HASH_LEN + 10]
+                    .copy_from_slice(info.random_hash);
+                // Hash the replay key to get a stable 32-byte dedup key
+                let replay_hash: [u8; 32] = Sha256::digest(replay_key).into();
+                if self.announce_dedup.check_and_insert(&replay_hash) {
+                    return IngestResult::Duplicate;
+                }
                 let mut dh = [0u8; TRUNCATED_HASH_LEN];
                 dh.copy_from_slice(pkt.destination_hash);
 
@@ -393,6 +506,17 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
         let expired_count = expired.len();
         for dest in &expired {
             self.paths.remove(dest);
+        }
+
+        // Expire old reverse table entries
+        let mut expired_reverse = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
+        for (hash, entry) in self.reverse_table.iter() {
+            if now.saturating_sub(entry.timestamp) > REVERSE_TIMEOUT {
+                let _ = expired_reverse.push(*hash);
+            }
+        }
+        for hash in &expired_reverse {
+            self.reverse_table.remove(hash);
         }
 
         TickResult {
