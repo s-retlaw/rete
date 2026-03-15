@@ -20,7 +20,9 @@ pub mod transport;
 
 pub use announce::{validate_announce, AnnounceError, AnnounceInfo, PendingAnnounce};
 pub use buffer::{StreamBuffer, StreamDataMessage};
-pub use channel::{Channel, ChannelEnvelope, DEFAULT_WINDOW, ENVELOPE_HEADER_SIZE, MSG_TYPE_STREAM};
+pub use channel::{
+    Channel, ChannelEnvelope, DEFAULT_WINDOW, ENVELOPE_HEADER_SIZE, MSG_TYPE_STREAM,
+};
 pub use dedup::DedupWindow;
 pub use link::{compute_link_id, Link, LinkRole, LinkState, TeardownReason};
 pub use path::Path;

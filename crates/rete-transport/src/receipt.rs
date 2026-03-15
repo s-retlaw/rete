@@ -191,8 +191,7 @@ mod tests {
         assert!(table.register(packet_hash, identity.public_key(), 100, 30));
         assert_eq!(table.len(), 1);
 
-        let trunc: [u8; TRUNCATED_HASH_LEN] =
-            packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
+        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
         let receipt = table.get(&trunc).unwrap();
         assert_eq!(receipt.packet_hash, packet_hash);
         assert_eq!(receipt.status, ReceiptStatus::Sent);
@@ -205,8 +204,7 @@ mod tests {
         let packet_hash = [0x42u8; 32];
 
         table.register(packet_hash, identity.public_key(), 100, 30);
-        let trunc: [u8; TRUNCATED_HASH_LEN] =
-            packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
+        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
 
         // Build explicit proof: packet_hash[32] || signature[64]
         let sig = identity.sign(&packet_hash).unwrap();
@@ -226,8 +224,7 @@ mod tests {
         let packet_hash = [0x42u8; 32];
 
         table.register(packet_hash, identity.public_key(), 100, 30);
-        let trunc: [u8; TRUNCATED_HASH_LEN] =
-            packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
+        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
 
         // Build implicit proof: signature[64] only
         let sig = identity.sign(&packet_hash).unwrap();
@@ -243,8 +240,7 @@ mod tests {
         let packet_hash = [0x42u8; 32];
 
         table.register(packet_hash, identity.public_key(), 100, 30);
-        let trunc: [u8; TRUNCATED_HASH_LEN] =
-            packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
+        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
 
         // Corrupt signature
         let mut sig = identity.sign(&packet_hash).unwrap();
@@ -263,8 +259,7 @@ mod tests {
         let packet_hash = [0x42u8; 32];
 
         table.register(packet_hash, identity.public_key(), 100, 30);
-        let trunc: [u8; TRUNCATED_HASH_LEN] =
-            packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
+        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
 
         // Before timeout
         let expired = table.tick(129);

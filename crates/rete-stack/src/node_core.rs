@@ -145,13 +145,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     }
 
     /// Pre-register a peer's identity for sending DATA without waiting for an announce.
-    pub fn register_peer(
-        &mut self,
-        peer: &Identity,
-        app_name: &str,
-        aspects: &[&str],
-        now: u64,
-    ) {
+    pub fn register_peer(&mut self, peer: &Identity, app_name: &str, aspects: &[&str], now: u64) {
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
             .expect("app_name + aspects must fit in 128 bytes");
@@ -233,7 +227,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         let mut pkt_buf = [0u8; MTU];
         pkt_buf[..len].copy_from_slice(raw);
 
-        match self.transport.ingest_on(&mut pkt_buf[..len], now, iface, rng, &self.identity) {
+        match self
+            .transport
+            .ingest_on(&mut pkt_buf[..len], now, iface, rng, &self.identity)
+        {
             IngestResult::AnnounceReceived {
                 dest_hash,
                 identity_hash,
@@ -410,8 +407,7 @@ mod tests {
     fn node_core_new_computes_dest_hash() {
         let core = make_core(b"dest-hash-test");
         let mut name_buf = [0u8; 128];
-        let expanded =
-            rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
+        let expanded = rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
         let expected = rete_core::destination_hash(expanded, Some(&core.identity.hash()));
         assert_eq!(*core.dest_hash(), expected);
     }
@@ -445,7 +441,10 @@ mod tests {
 
         // Recipient should be able to decrypt
         let mut dec_buf = [0u8; MTU];
-        let n = receiver.identity.decrypt(parsed.payload, &mut dec_buf).unwrap();
+        let n = receiver
+            .identity
+            .decrypt(parsed.payload, &mut dec_buf)
+            .unwrap();
         assert_eq!(&dec_buf[..n], b"hello");
     }
 
@@ -507,7 +506,9 @@ mod tests {
         let node_id = Identity::from_seed(b"proof-node").unwrap();
         let recipient = Identity::from_public_key(&node_id.public_key()).unwrap();
         let mut ct_buf = [0u8; MTU];
-        let ct_len = recipient.encrypt(b"proof me", &mut rng, &mut ct_buf).unwrap();
+        let ct_len = recipient
+            .encrypt(b"proof me", &mut rng, &mut ct_buf)
+            .unwrap();
 
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
@@ -531,10 +532,7 @@ mod tests {
             })
             .collect();
         assert_eq!(proof_packets.len(), 1, "should generate one proof packet");
-        assert_eq!(
-            proof_packets[0].routing,
-            PacketRouting::SourceInterface
-        );
+        assert_eq!(proof_packets[0].routing, PacketRouting::SourceInterface);
     }
 
     #[test]
@@ -607,7 +605,10 @@ mod tests {
             .unwrap();
 
         let outcome = core.handle_ingest(&buf[..n], 100, 0, &mut rng);
-        assert!(outcome.event.is_none(), "forward should not produce an event");
+        assert!(
+            outcome.event.is_none(),
+            "forward should not produce an event"
+        );
         assert_eq!(outcome.packets.len(), 1);
         assert_eq!(outcome.packets[0].routing, PacketRouting::AllExceptSource);
     }
@@ -632,8 +633,7 @@ mod tests {
 
         let peer = Identity::from_seed(b"known-peer").unwrap();
         let mut name_buf = [0u8; 128];
-        let expanded =
-            rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
+        let expanded = rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
         let peer_dest = rete_core::destination_hash(expanded, Some(&peer.hash()));
 
         core.register_peer(&peer, "testapp", &["aspect1"], 100);

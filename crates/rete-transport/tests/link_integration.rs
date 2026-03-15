@@ -34,8 +34,7 @@ fn build_link_request(
     identity: &Identity,
     rng: &mut impl rand_core::CryptoRngCore,
 ) -> (Vec<u8>, [u8; 64]) {
-    let (_, request_payload) =
-        Link::new_initiator(*dest_hash, &identity.ed25519_pub, rng, 100);
+    let (_, request_payload) = Link::new_initiator(*dest_hash, &identity.ed25519_pub, rng, 100);
 
     let mut buf = [0u8; MTU];
     let n = PacketBuilder::new(&mut buf)
@@ -78,8 +77,7 @@ fn full_handshake() -> (
     };
 
     // Initiator sets up its link (manually, since it needs the raw packet)
-    let (mut init_link, _) =
-        Link::new_initiator(resp_dest, &init_id.ed25519_pub, &mut rng, 100);
+    let (mut init_link, _) = Link::new_initiator(resp_dest, &init_id.ed25519_pub, &mut rng, 100);
     // Recompute from the same raw packet
     init_link.set_link_id(link_id);
 
@@ -282,9 +280,7 @@ fn keepalive_request_response() {
         .unwrap();
     let mut ka_buf = ka;
     match resp_t.ingest(&mut ka_buf, 200, &mut rng, &resp_id) {
-        IngestResult::LinkData {
-            data, context, ..
-        } => {
+        IngestResult::LinkData { data, context, .. } => {
             assert_eq!(context, CONTEXT_KEEPALIVE);
             assert_eq!(data, &[0xFE]); // response byte
         }
@@ -305,9 +301,7 @@ fn linkclose_tears_down() {
     let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
 
     // Initiator closes link
-    let close = init_t
-        .build_linkclose_packet(&link_id, &mut rng)
-        .unwrap();
+    let close = init_t.build_linkclose_packet(&link_id, &mut rng).unwrap();
     // Initiator's link should be removed
     assert_eq!(init_t.link_count(), 0);
 
@@ -353,8 +347,7 @@ fn invalid_lrproof_rejected() {
 
     let mut name_buf = [0u8; 128];
     let expanded = rete_core::expand_name("testapp", &["link"], &mut name_buf).unwrap();
-    let resp_dest =
-        rete_core::destination_hash(expanded, Some(&resp_id.hash()));
+    let resp_dest = rete_core::destination_hash(expanded, Some(&resp_id.hash()));
 
     let mut init_t = TestTransport::new();
     // Register a WRONG identity for the responder dest
@@ -452,13 +445,16 @@ fn channel_data_over_link() {
 
     // Send data with CONTEXT_CHANNEL
     let pkt = init_t
-        .build_link_data_packet(&link_id, b"channel msg", rete_core::CONTEXT_CHANNEL, &mut rng)
+        .build_link_data_packet(
+            &link_id,
+            b"channel msg",
+            rete_core::CONTEXT_CHANNEL,
+            &mut rng,
+        )
         .unwrap();
     let mut buf = pkt;
     match resp_t.ingest(&mut buf, 103, &mut rng, &resp_id) {
-        IngestResult::LinkData {
-            data, context, ..
-        } => {
+        IngestResult::LinkData { data, context, .. } => {
             assert_eq!(data, b"channel msg");
             assert_eq!(context, rete_core::CONTEXT_CHANNEL);
         }
@@ -473,7 +469,9 @@ fn initiate_link_returns_request() {
     let dest_hash = [0xAA; TRUNCATED_HASH_LEN];
 
     let mut t = TestTransport::new();
-    let (pkt, link_id) = t.initiate_link(dest_hash, &identity, &mut rng, 100).unwrap();
+    let (pkt, link_id) = t
+        .initiate_link(dest_hash, &identity, &mut rng, 100)
+        .unwrap();
 
     // Should be a parseable LINKREQUEST
     let parsed = Packet::parse(&pkt).unwrap();

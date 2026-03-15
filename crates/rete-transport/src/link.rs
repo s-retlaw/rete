@@ -367,8 +367,7 @@ impl Link {
         {
             self.state = LinkState::Stale;
         }
-        if self.state == LinkState::Stale
-            && now.saturating_sub(self.last_inbound) > self.stale_time
+        if self.state == LinkState::Stale && now.saturating_sub(self.last_inbound) > self.stale_time
         {
             self.state = LinkState::Closed;
             return true;
@@ -480,8 +479,8 @@ mod tests {
         let link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
 
         // Initiator derives same key
-        let shared = initiator_secret
-            .diffie_hellman(&x25519_dalek::PublicKey::from(link.our_x25519_pub));
+        let shared =
+            initiator_secret.diffie_hellman(&x25519_dalek::PublicKey::from(link.our_x25519_pub));
         let hk = hkdf::Hkdf::<Sha256>::new(Some(&link_id), shared.as_bytes());
         let mut derived = [0u8; 64];
         hk.expand(b"", &mut derived).unwrap();
@@ -489,14 +488,18 @@ mod tests {
 
         // Both should encrypt/decrypt symmetrically
         let mut ct = [0u8; 256];
-        let ct_len = link.encrypt(b"hello from responder", &mut rng, &mut ct).unwrap();
+        let ct_len = link
+            .encrypt(b"hello from responder", &mut rng, &mut ct)
+            .unwrap();
 
         let mut pt = [0u8; 256];
         let pt_len = initiator_token.decrypt(&ct[..ct_len], &mut pt).unwrap();
         assert_eq!(&pt[..pt_len], b"hello from responder");
 
         // And the other direction
-        let ct_len2 = initiator_token.encrypt(b"hello from initiator", &mut rng, &mut ct).unwrap();
+        let ct_len2 = initiator_token
+            .encrypt(b"hello from initiator", &mut rng, &mut ct)
+            .unwrap();
         let pt_len2 = link.decrypt(&ct[..ct_len2], &mut pt).unwrap();
         assert_eq!(&pt[..pt_len2], b"hello from initiator");
     }
@@ -552,12 +555,8 @@ mod tests {
 
         // Initiator creates link
         let initiator_identity = Identity::from_seed(b"initiator-full").unwrap();
-        let (mut initiator_link, request_payload) = Link::new_initiator(
-            dest_hash,
-            &initiator_identity.ed25519_pub,
-            &mut rng,
-            100,
-        );
+        let (mut initiator_link, request_payload) =
+            Link::new_initiator(dest_hash, &initiator_identity.ed25519_pub, &mut rng, 100);
 
         // Build LINKREQUEST packet to compute link_id
         let mut pkt_buf = [0u8; MTU];
@@ -573,8 +572,7 @@ mod tests {
         initiator_link.set_link_id(link_id);
 
         // Responder receives LINKREQUEST
-        let responder_link =
-            Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
+        let responder_link = Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
 
         // Responder builds proof
         let proof_payload = responder_link.build_proof(&responder_identity).unwrap();
@@ -608,12 +606,8 @@ mod tests {
         let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
 
         let initiator_identity = Identity::from_seed(b"initiator-bad-sig").unwrap();
-        let (mut initiator_link, request_payload) = Link::new_initiator(
-            dest_hash,
-            &initiator_identity.ed25519_pub,
-            &mut rng,
-            100,
-        );
+        let (mut initiator_link, request_payload) =
+            Link::new_initiator(dest_hash, &initiator_identity.ed25519_pub, &mut rng, 100);
 
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
@@ -627,8 +621,7 @@ mod tests {
         let link_id = compute_link_id(&pkt_buf[..pkt_len]).unwrap();
         initiator_link.set_link_id(link_id);
 
-        let responder_link =
-            Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
+        let responder_link = Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
 
         // Sign with wrong identity
         let proof_payload = responder_link.build_proof(&wrong_identity).unwrap();
@@ -645,8 +638,7 @@ mod tests {
         let identity = Identity::from_seed(b"initiator-pending").unwrap();
         let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
 
-        let (link, payload) =
-            Link::new_initiator(dest_hash, &identity.ed25519_pub, &mut rng, 100);
+        let (link, payload) = Link::new_initiator(dest_hash, &identity.ed25519_pub, &mut rng, 100);
 
         assert_eq!(link.state, LinkState::Pending);
         assert_eq!(link.role, LinkRole::Initiator);
@@ -733,12 +725,8 @@ mod tests {
         let initiator_identity = Identity::from_seed(b"initiator-data").unwrap();
         let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
 
-        let (mut initiator, request_payload) = Link::new_initiator(
-            dest_hash,
-            &initiator_identity.ed25519_pub,
-            &mut rng,
-            100,
-        );
+        let (mut initiator, request_payload) =
+            Link::new_initiator(dest_hash, &initiator_identity.ed25519_pub, &mut rng, 100);
 
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
@@ -752,8 +740,7 @@ mod tests {
         let link_id = compute_link_id(&pkt_buf[..pkt_len]).unwrap();
         initiator.set_link_id(link_id);
 
-        let responder =
-            Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
+        let responder = Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
         let proof = responder.build_proof(&responder_identity).unwrap();
         initiator
             .validate_proof(&proof, &responder_identity)

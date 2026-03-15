@@ -110,7 +110,9 @@ fn transport_without_identity_never_forwards() {
     let tid = [0xBB; TRUNCATED_HASH_LEN];
     let mut raw2 = build_header2_data(&tid, &dest, b"test");
     match t.ingest(&mut raw2, 100, &mut rng, &identity) {
-        IngestResult::LocalData { dest_hash, payload, .. } => {
+        IngestResult::LocalData {
+            dest_hash, payload, ..
+        } => {
             assert_eq!(dest_hash, dest);
             assert_eq!(payload, b"test");
         }
@@ -143,7 +145,9 @@ fn header1_data_local_delivery() {
     let dest = [0xAA; TRUNCATED_HASH_LEN];
     let mut raw = build_header1_data(&dest, b"local delivery");
     match t.ingest(&mut raw, 100, &mut rng, &identity) {
-        IngestResult::LocalData { dest_hash, payload, .. } => {
+        IngestResult::LocalData {
+            dest_hash, payload, ..
+        } => {
             assert_eq!(dest_hash, dest);
             assert_eq!(payload, b"local delivery");
         }
@@ -164,7 +168,9 @@ fn header2_data_other_transport_id_falls_through() {
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let mut raw = build_header2_data(&other_tid, &dest, b"not for relay");
     match t.ingest(&mut raw, 100, &mut rng, &identity) {
-        IngestResult::LocalData { dest_hash, payload, .. } => {
+        IngestResult::LocalData {
+            dest_hash, payload, ..
+        } => {
             assert_eq!(dest_hash, dest);
             assert_eq!(payload, b"not for relay");
         }
@@ -515,7 +521,8 @@ fn ingest_local_data_includes_packet_hash() {
 fn proof_packet_structure() {
     // Build a PROOF packet and verify its structure
     let packet_hash = [0xABu8; 32];
-    let trunc_hash: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
+    let trunc_hash: [u8; TRUNCATED_HASH_LEN] =
+        packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
     let signature = [0xCDu8; 64];
 
     // PROOF payload: packet_hash[32] || signature[64] (explicit proof)

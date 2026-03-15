@@ -196,8 +196,7 @@ impl Channel {
 
     /// Mark a message as delivered (confirmed by proof).
     pub fn mark_delivered(&mut self, sequence: u16) {
-        self.tx_pending
-            .retain(|m| m.envelope.sequence != sequence);
+        self.tx_pending.retain(|m| m.envelope.sequence != sequence);
     }
 
     /// Get pending messages that need retransmission.

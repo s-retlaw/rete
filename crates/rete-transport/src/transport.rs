@@ -34,8 +34,7 @@ pub const REVERSE_TIMEOUT: u64 = 480;
 ///
 /// Precomputed: `destination_hash("rnstransport.path.request", None)`.
 pub const PATH_REQUEST_DEST: [u8; TRUNCATED_HASH_LEN] = [
-    0x6b, 0x9f, 0x66, 0x01, 0x4d, 0x98, 0x53, 0xfa, 0xab, 0x22, 0x0f, 0xba, 0x47, 0xd0, 0x27,
-    0x61,
+    0x6b, 0x9f, 0x66, 0x01, 0x4d, 0x98, 0x53, 0xfa, 0xab, 0x22, 0x0f, 0xba, 0x47, 0xd0, 0x27, 0x61,
 ];
 
 // ---------------------------------------------------------------------------
@@ -685,9 +684,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             CONTEXT_LRRTT => {
                 // RTT measurement — activates responder link (no data needed)
                 link.activate(now);
-                IngestResult::LinkEstablished {
-                    link_id: *link_id,
-                }
+                IngestResult::LinkEstablished { link_id: *link_id }
             }
             CONTEXT_KEEPALIVE => {
                 if let Some(response_byte) = link.handle_keepalive(&dec_buf[..dec_len], now) {
@@ -877,8 +874,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         payload[..32].copy_from_slice(packet_hash);
         payload[32..96].copy_from_slice(&signature);
 
-        let trunc: [u8; TRUNCATED_HASH_LEN] =
-            packet_hash[..TRUNCATED_HASH_LEN].try_into().ok()?;
+        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().ok()?;
 
         let mut buf = [0u8; rete_core::MTU];
         let n = PacketBuilder::new(&mut buf)

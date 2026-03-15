@@ -83,7 +83,9 @@ impl TokioNode {
         let mut rng = rand::thread_rng();
 
         // Send initial announce
-        let announce = self.core.build_announce(None, &mut rng, current_time_secs());
+        let announce = self
+            .core
+            .build_announce(None, &mut rng, current_time_secs());
         if let Err(e) = iface.send(&announce).await {
             eprintln!("[rete] failed to send initial announce: {:?}", e);
         } else {
@@ -203,7 +205,9 @@ impl TokioNode {
         let mut rng = rand::thread_rng();
 
         // Send initial announce to all interfaces
-        let announce = self.core.build_announce(None, &mut rng, current_time_secs());
+        let announce = self
+            .core
+            .build_announce(None, &mut rng, current_time_secs());
         for tx in &iface_senders {
             let _ = tx.send(announce.clone()).await;
         }
