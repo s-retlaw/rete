@@ -334,7 +334,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             IngestResult::LinkRequestReceived { link_id, proof_raw } => IngestOutcome {
                 event: Some(NodeEvent::LinkEstablished { link_id }),
                 packets: vec![OutboundPacket {
-                    data: proof_raw.to_vec(),
+                    data: proof_raw,
                     routing: PacketRouting::SourceInterface,
                 }],
             },
@@ -349,7 +349,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             } => IngestOutcome {
                 event: Some(NodeEvent::LinkData {
                     link_id,
-                    data: data.to_vec(),
+                    data,
                     context,
                 }),
                 packets: Vec::new(),
@@ -377,6 +377,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         IngestOutcome {
             event: Some(NodeEvent::Tick {
                 expired_paths: result.expired_paths,
+                closed_links: result.closed_links,
             }),
             packets,
         }
@@ -617,7 +618,7 @@ mod tests {
 
         let outcome = core.handle_tick(1000);
         match outcome.event {
-            Some(NodeEvent::Tick { expired_paths }) => {
+            Some(NodeEvent::Tick { expired_paths, .. }) => {
                 assert_eq!(expired_paths, 0);
             }
             other => panic!("expected Tick, got {:?}", other),

@@ -162,14 +162,23 @@ impl TokioNode {
 }
 
 /// Dispatch outbound packets on a single interface.
+///
+/// `AllExceptSource` is a no-op with one interface (the only interface IS the source),
+/// preventing forwarded packets from being sent back where they came from.
 async fn dispatch_single<I: ReteInterface>(
     iface: &mut I,
     packets: &[OutboundPacket],
-    _source_iface: u8,
+    source_iface: u8,
 ) {
     for pkt in packets {
-        // With a single interface, all routing modes result in sending on the same iface
-        let _ = iface.send(&pkt.data).await;
+        match pkt.routing {
+            PacketRouting::AllExceptSource if source_iface == 0 => {
+                // Single interface is the source — don't send back
+            }
+            _ => {
+                let _ = iface.send(&pkt.data).await;
+            }
+        }
     }
 }
 

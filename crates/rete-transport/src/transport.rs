@@ -328,19 +328,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         if !link.is_active() {
             return None;
         }
-        let mut ct_buf = [0u8; rete_core::MTU];
-        let ct_len = link.encrypt(plaintext, rng, &mut ct_buf).ok()?;
-
-        let mut pkt_buf = [0u8; rete_core::MTU];
-        let pkt_len = PacketBuilder::new(&mut pkt_buf)
-            .packet_type(PacketType::Data)
-            .dest_type(DestType::Link)
-            .destination_hash(link_id)
-            .context(context)
-            .payload(&ct_buf[..ct_len])
-            .build()
-            .ok()?;
-        Some(pkt_buf[..pkt_len].to_vec())
+        Self::build_link_packet(link, link_id, plaintext, context, rng)
     }
 
     /// Build an LRRTT measurement packet for a link (initiator sends after proof).
@@ -351,19 +339,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
         let link = self.links.get(link_id)?;
-        let mut ct_buf = [0u8; rete_core::MTU];
-        let ct_len = link.encrypt(rtt_bytes, rng, &mut ct_buf).ok()?;
-
-        let mut pkt_buf = [0u8; rete_core::MTU];
-        let pkt_len = PacketBuilder::new(&mut pkt_buf)
-            .packet_type(PacketType::Data)
-            .dest_type(DestType::Link)
-            .destination_hash(link_id)
-            .context(CONTEXT_LRRTT)
-            .payload(&ct_buf[..ct_len])
-            .build()
-            .ok()?;
-        Some(pkt_buf[..pkt_len].to_vec())
+        Self::build_link_packet(link, link_id, rtt_bytes, CONTEXT_LRRTT, rng)
     }
 
     /// Build a keepalive request/response packet for a link.
@@ -377,16 +353,26 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         if !link.is_active() {
             return None;
         }
-        let payload = if request { &[0xFF][..] } else { &[0xFE][..] };
-        let mut ct_buf = [0u8; rete_core::MTU];
-        let ct_len = link.encrypt(payload, rng, &mut ct_buf).ok()?;
+        let payload: &[u8] = if request { &[0xFF] } else { &[0xFE] };
+        Self::build_link_packet(link, link_id, payload, CONTEXT_KEEPALIVE, rng)
+    }
 
+    /// Encrypt plaintext and build a link DATA packet. Shared by all link packet builders.
+    fn build_link_packet<R: RngCore + CryptoRng>(
+        link: &Link,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        plaintext: &[u8],
+        context: u8,
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let mut ct_buf = [0u8; rete_core::MTU];
+        let ct_len = link.encrypt(plaintext, rng, &mut ct_buf).ok()?;
         let mut pkt_buf = [0u8; rete_core::MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
             .destination_hash(link_id)
-            .context(CONTEXT_KEEPALIVE)
+            .context(context)
             .payload(&ct_buf[..ct_len])
             .build()
             .ok()?;
@@ -539,7 +525,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 // Link data handling: dest_type == Link
                 if pkt.dest_type == DestType::Link {
-                    return self.handle_link_data(&dh, pkt.context, pkt.payload, now, rng);
+                    return self.handle_link_data(&dh, pkt.context, pkt.payload, now);
                 }
 
                 IngestResult::LocalData {
@@ -676,51 +662,47 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         IngestResult::LinkEstablished { link_id: *link_id }
     }
 
-    fn handle_link_data<'a, R: RngCore + CryptoRng>(
+    fn handle_link_data<'a>(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         context: u8,
         ciphertext: &[u8],
         now: u64,
-        _rng: &mut R,
     ) -> IngestResult<'a> {
         let link = match self.links.get_mut(link_id) {
             Some(l) => l,
             None => return IngestResult::Invalid,
         };
 
-        // Decrypt payload
+        // Decrypt payload into stack buffer (heap alloc deferred to branches that need it)
         let mut dec_buf = [0u8; rete_core::MTU];
         let dec_len = match link.decrypt(ciphertext, &mut dec_buf) {
             Ok(n) => n,
             Err(_) => return IngestResult::Invalid,
         };
-        let decrypted = dec_buf[..dec_len].to_vec();
 
         match context {
             CONTEXT_LRRTT => {
-                // RTT measurement — activates responder link
+                // RTT measurement — activates responder link (no data needed)
                 link.activate(now);
                 IngestResult::LinkEstablished {
                     link_id: *link_id,
                 }
             }
             CONTEXT_KEEPALIVE => {
-                if let Some(response_byte) = link.handle_keepalive(&decrypted, now) {
-                    // Return the keepalive data with the response byte
+                if let Some(response_byte) = link.handle_keepalive(&dec_buf[..dec_len], now) {
                     IngestResult::LinkData {
                         link_id: *link_id,
                         data: alloc::vec![response_byte],
                         context: CONTEXT_KEEPALIVE,
                     }
                 } else {
-                    // Keepalive response received, no action needed
                     IngestResult::Duplicate
                 }
             }
             CONTEXT_LINKCLOSE => {
                 let lid = *link_id;
-                if link.handle_close(&decrypted) {
+                if link.handle_close(&dec_buf[..dec_len]) {
                     self.links.remove(&lid);
                     IngestResult::LinkClosed { link_id: lid }
                 } else {
@@ -728,14 +710,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 }
             }
             _ => {
-                // Regular link data (CONTEXT_NONE, CONTEXT_CHANNEL, etc.)
+                // Regular link data — only this branch allocates
                 if !link.is_active() {
                     return IngestResult::Invalid;
                 }
                 link.touch_inbound(now);
                 IngestResult::LinkData {
                     link_id: *link_id,
-                    data: decrypted,
+                    data: dec_buf[..dec_len].to_vec(),
                     context,
                 }
             }

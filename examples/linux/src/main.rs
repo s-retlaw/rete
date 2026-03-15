@@ -250,7 +250,7 @@ fn on_event(event: NodeEvent) {
             eprintln!("[rete] LINK closed: {}", hex::encode(link_id));
             println!("LINK_CLOSED:{}", hex::encode(link_id));
         }
-        NodeEvent::Tick { expired_paths } => {
+        NodeEvent::Tick { expired_paths, .. } => {
             if expired_paths > 0 {
                 eprintln!("[rete] tick: expired {expired_paths} paths");
             }

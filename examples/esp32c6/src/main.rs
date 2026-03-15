@@ -165,7 +165,7 @@ async fn main(spawner: Spawner) -> ! {
                 println!("[rete] DATA: {} bytes", payload.len());
             }
         }
-        NodeEvent::Tick { expired_paths } => {
+        NodeEvent::Tick { expired_paths, .. } => {
             if expired_paths > 0 {
                 println!("[rete] tick: expired {} paths", expired_paths);
             }

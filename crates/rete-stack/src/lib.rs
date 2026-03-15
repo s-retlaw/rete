@@ -93,6 +93,8 @@ pub enum NodeEvent {
     Tick {
         /// Number of paths expired.
         expired_paths: usize,
+        /// Number of links closed due to staleness.
+        closed_links: usize,
     },
 }
 

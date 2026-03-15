@@ -92,7 +92,7 @@ async fn main(_spawner: Spawner) -> ! {
                 println!("[rete-serial] DATA: {} bytes", payload.len());
             }
         }
-        NodeEvent::Tick { expired_paths } => {
+        NodeEvent::Tick { expired_paths, .. } => {
             if expired_paths > 0 {
                 println!("[rete-serial] tick: expired {}", expired_paths);
             }
