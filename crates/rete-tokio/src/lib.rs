@@ -108,7 +108,7 @@ impl TokioNode {
                         Ok(data) => {
                             let now = current_time_secs();
                             let outcome = self.core.handle_ingest(data, now, 0, &mut rng);
-                            dispatch_single(iface, &outcome.packets, 0).await;
+                            dispatch_single(iface, &outcome.packets).await;
                             if let Some(event) = outcome.event {
                                 on_event(event);
                             }
@@ -128,7 +128,7 @@ impl TokioNode {
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();
                     let outcome = self.core.handle_tick(now);
-                    dispatch_single(iface, &outcome.packets, 0).await;
+                    dispatch_single(iface, &outcome.packets).await;
                     if let Some(event) = outcome.event {
                         on_event(event);
                     }
@@ -140,22 +140,14 @@ impl TokioNode {
 
 /// Dispatch outbound packets on a single interface.
 ///
-/// `AllExceptSource` is a no-op with one interface (the only interface IS the source),
-/// preventing forwarded packets from being sent back where they came from.
-async fn dispatch_single<I: ReteInterface>(
-    iface: &mut I,
-    packets: &[OutboundPacket],
-    source_iface: u8,
-) {
+/// `AllExceptSource` is a no-op: the only interface IS the source,
+/// so forwarded packets must not be sent back where they came from.
+async fn dispatch_single<I: ReteInterface>(iface: &mut I, packets: &[OutboundPacket]) {
     for pkt in packets {
-        match pkt.routing {
-            PacketRouting::AllExceptSource if source_iface == 0 => {
-                // Single interface is the source — don't send back
-            }
-            _ => {
-                let _ = iface.send(&pkt.data).await;
-            }
+        if pkt.routing == PacketRouting::AllExceptSource {
+            continue;
         }
+        let _ = iface.send(&pkt.data).await;
     }
 }
 

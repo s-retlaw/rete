@@ -19,7 +19,7 @@ use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
 use rete_core::{Identity, MTU};
 pub use rete_stack::NodeEvent;
 pub use rete_stack::ProofStrategy;
-use rete_stack::{EmbeddedNodeCore, ReteInterface};
+use rete_stack::{EmbeddedNodeCore, PacketRouting, ReteInterface};
 use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 // ---------------------------------------------------------------------------
@@ -192,6 +192,10 @@ impl EmbassyNode {
                         let now = Instant::now().as_secs();
                         let outcome = self.core.handle_ingest(data, now, 0, rng);
                         for pkt in &outcome.packets {
+                            // Single interface: skip AllExceptSource (would echo back to source)
+                            if pkt.routing == PacketRouting::AllExceptSource {
+                                continue;
+                            }
                             let _ = iface.send(&pkt.data).await;
                         }
                         if let Some(event) = outcome.event {
