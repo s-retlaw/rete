@@ -63,6 +63,21 @@ test-e2e-relay:
     cargo build -p rete-example-linux
     cd tests/interop && uv run python relay_interop.py
 
+# E2E transport relay interop (Rust as multi-interface transport relay)
+test-e2e-transport-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python transport_relay_interop.py
+
+# E2E path request interop (Rust responds to path requests)
+test-e2e-path-request:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python path_request_interop.py
+
+# E2E proof routing interop (proofs route back through Rust relay)
+test-e2e-proof-routing:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python proof_routing_interop.py
+
 # All software tests (unit + E2E, no hardware)
 test-all:
     #!/usr/bin/env bash
@@ -110,15 +125,29 @@ test-all:
     echo ""
 
     # --- E2E tests ---
-    E2E_OUTPUT=$(cd tests/interop && uv run python live_interop.py 2>&1)
-    E2E_RC=$?
-    echo "$E2E_OUTPUT"
+    E2E_ANY_FAIL=0
 
-    # Parse E2E results
-    E2E_PASS=$(echo "$E2E_OUTPUT" | grep -oP '\d+(?=/\d+ passed)' || echo "0")
-    E2E_TOTAL=$(echo "$E2E_OUTPUT" | grep -oP '(?<=Results: )\d+/\d+' | head -1 | cut -d/ -f2)
-    E2E_TOTAL=${E2E_TOTAL:-0}
-    E2E_FAIL=$((E2E_TOTAL - E2E_PASS))
+    # Helper to run one E2E suite and parse results
+    run_e2e() {
+        local label="$1" script="$2"
+        local output rc
+        output=$(cd tests/interop && uv run python "$script" 2>&1)
+        rc=$?
+        echo "$output"
+        local p t f
+        p=$(echo "$output" | grep -oP '\d+(?=/\d+ passed)' || echo "0")
+        t=$(echo "$output" | grep -oP '(?<=Results: )\d+/\d+' | head -1 | cut -d/ -f2)
+        t=${t:-0}; f=$((t - p))
+        eval "${label}_PASS=$p"; eval "${label}_FAIL=$f"
+        [ "$rc" -ne 0 ] && E2E_ANY_FAIL=1
+        echo ""
+    }
+
+    run_e2e LIVE live_interop.py
+    run_e2e RELAY relay_interop.py
+    run_e2e TRANSPORT transport_relay_interop.py
+    run_e2e PATHREQ path_request_interop.py
+    run_e2e PROOF proof_routing_interop.py
 
     # --- Combined summary ---
     echo ""
@@ -132,17 +161,25 @@ test-all:
     printf "  %-30s %s passed, %s failed%s\n" "unit total" "$UNIT_PASS" "$UNIT_FAIL" "$IGN_TOTAL"
     echo ""
     echo "  E2E tests:"
-    printf "  %-30s %s passed, %s failed\n" "live-interop" "$E2E_PASS" "$E2E_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "live-interop" "$LIVE_PASS" "$LIVE_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "relay-interop" "$RELAY_PASS" "$RELAY_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "transport-relay-interop" "$TRANSPORT_PASS" "$TRANSPORT_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "path-request-interop" "$PATHREQ_PASS" "$PATHREQ_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "proof-routing-interop" "$PROOF_PASS" "$PROOF_FAIL"
+    E2E_PASS=$((LIVE_PASS + RELAY_PASS + TRANSPORT_PASS + PATHREQ_PASS + PROOF_PASS))
+    E2E_FAIL=$((LIVE_FAIL + RELAY_FAIL + TRANSPORT_FAIL + PATHREQ_FAIL + PROOF_FAIL))
+    echo ""
+    printf "  %-30s %s passed, %s failed\n" "e2e total" "$E2E_PASS" "$E2E_FAIL"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))
-    if [ "$ALL_FAIL" -eq 0 ]; then
+    if [ "$ALL_FAIL" -eq 0 ] && [ "$E2E_ANY_FAIL" -eq 0 ]; then
         echo "  ALL: $ALL_PASS passed, $ALL_FAIL failed ✓"
     else
         echo "  ALL: $ALL_PASS passed, $ALL_FAIL failed ✗"
     fi
     echo "═══════════════════════════════════════════════════"
-    exit $((UNIT_RC + E2E_RC))
+    exit $((UNIT_RC + E2E_ANY_FAIL))
 
 # Check all workspace crates compile
 check:

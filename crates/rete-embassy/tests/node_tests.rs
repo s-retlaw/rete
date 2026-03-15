@@ -81,7 +81,7 @@ fn make_node(seed: &[u8]) -> EmbassyNode {
 fn build_announce(identity: &Identity) -> Vec<u8> {
     let mut rng = rand::thread_rng();
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         identity,
         "testapp",
         &["aspect1"],
@@ -153,7 +153,7 @@ async fn embassy_node_receives_announce() {
     let expanded = rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
     let peer_dest = rete_core::destination_hash(expanded, Some(&peer_hash));
     assert!(
-        node.transport.get_path(&peer_dest).is_some(),
+        node.core.transport.get_path(&peer_dest).is_some(),
         "path to peer should be learned"
     );
 }

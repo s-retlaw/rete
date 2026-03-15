@@ -10,22 +10,17 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use embassy_futures::select::{select3, Either3};
 use embassy_time::{Duration, Instant, Timer};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
-use rete_core::{
-    DestType, HeaderType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
-};
+use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN};
 pub use rete_stack::NodeEvent;
 pub use rete_stack::ProofStrategy;
-use rete_stack::ReteInterface;
-use rete_transport::{
-    EmbeddedTransport, IngestResult, Transport, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS,
-};
+use rete_stack::{EmbeddedNodeCore, ReteInterface};
+use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 // ---------------------------------------------------------------------------
 // Error
@@ -131,94 +126,50 @@ where
 
 /// A Reticulum node for Embassy-based targets.
 ///
-/// Owns the transport state machine and drives one or more interfaces.
-/// Uses [`EmbeddedTransport`] (conservative memory) suitable for MCUs.
+/// Thin wrapper around [`EmbeddedNodeCore`] that provides the Embassy async
+/// event loop with `select3` and timer management.
 pub struct EmbassyNode {
-    /// The local identity for this node.
-    pub identity: Identity,
-    /// Transport state (path table, announce queue, dedup).
-    pub transport: EmbeddedTransport,
-    /// Application name for our destination.
-    app_name: String,
-    /// Destination aspects.
-    aspects: Vec<String>,
-    /// Our destination hash.
-    dest_hash: [u8; TRUNCATED_HASH_LEN],
-    /// Optional auto-reply message sent after receiving an announce.
-    auto_reply: Option<Vec<u8>>,
-    /// When true, echo received DATA back to sender with "echo:" prefix.
-    echo_data: bool,
-    /// Dest hash of the most recently announced peer (echo target).
-    last_peer: Option<[u8; TRUNCATED_HASH_LEN]>,
+    /// Shared node logic (identity, transport, packet processing).
+    pub core: EmbeddedNodeCore,
     /// Epoch offset: seconds to add to monotonic uptime to approximate Unix time.
-    /// Set via [`set_epoch_offset`] after obtaining wall-clock time (e.g. from NTP).
-    /// Used only for announce timestamp bytes; path expiry uses monotonic time.
     epoch_offset: u64,
-    /// Proof generation strategy for incoming data packets.
-    proof_strategy: ProofStrategy,
 }
 
 impl EmbassyNode {
     /// Create a new node with the given identity and destination.
     pub fn new(identity: Identity, app_name: &str, aspects: &[&str]) -> Self {
-        let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-            .expect("app_name + aspects must fit in 128 bytes");
-        let id_hash = identity.hash();
-        let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
-
-        let mut transport = Transport::new();
-        transport.add_local_destination(dest_hash);
-
         EmbassyNode {
-            identity,
-            transport,
-            app_name: String::from(app_name),
-            aspects: aspects.iter().map(|s| String::from(*s)).collect(),
-            dest_hash,
-            auto_reply: None,
-            echo_data: false,
-            last_peer: None,
+            core: EmbeddedNodeCore::new(identity, app_name, aspects),
             epoch_offset: 0,
-            proof_strategy: ProofStrategy::ProveNone,
         }
     }
 
     /// Enable transport mode: forward HEADER_2 packets for other nodes.
     pub fn enable_transport(&mut self) {
-        self.transport.set_local_identity(self.identity.hash());
+        self.core.enable_transport();
     }
 
     /// Returns our destination hash.
     pub fn dest_hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
-        &self.dest_hash
+        self.core.dest_hash()
     }
 
     /// Set an auto-reply message sent to any peer that announces.
     pub fn set_auto_reply(&mut self, msg: Option<Vec<u8>>) {
-        self.auto_reply = msg;
+        self.core.set_auto_reply(msg);
     }
 
     /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
     pub fn set_echo_data(&mut self, echo: bool) {
-        self.echo_data = echo;
+        self.core.set_echo_data(echo);
     }
 
     /// Set the proof generation strategy for incoming data packets.
     pub fn set_proof_strategy(&mut self, strategy: ProofStrategy) {
-        self.proof_strategy = strategy;
+        self.core.set_proof_strategy(strategy);
     }
 
     /// Set the epoch offset so announce timestamps approximate Unix time.
-    ///
-    /// Call this after obtaining wall-clock time (e.g. from NTP or SNTP):
-    /// ```ignore
-    /// let unix_now: u64 = /* seconds since 1970-01-01 from NTP */;
-    /// node.set_epoch_offset(unix_now - embassy_time::Instant::now().as_secs());
-    /// ```
-    ///
-    /// If not set, announce timestamps use monotonic uptime (seconds since boot).
-    /// Path expiry and announce backoff always use monotonic time regardless.
     pub fn set_epoch_offset(&mut self, offset: u64) {
         self.epoch_offset = offset;
     }
@@ -228,70 +179,17 @@ impl EmbassyNode {
         Instant::now().as_secs().wrapping_add(self.epoch_offset)
     }
 
-    /// Build an encrypted DATA packet addressed to a known destination.
-    fn build_data_packet<R: RngCore + CryptoRng>(
-        &self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
-        plaintext: &[u8],
-        rng: &mut R,
-    ) -> Option<Vec<u8>> {
-        let pub_key = self.transport.recall_identity(dest_hash)?;
-        let recipient = Identity::from_public_key(pub_key).ok()?;
-        let mut ct_buf = [0u8; MTU];
-        let ct_len = recipient.encrypt(plaintext, rng, &mut ct_buf).ok()?;
-        let via = self.transport.get_path(dest_hash).and_then(|p| p.via);
-        let mut pkt_buf = [0u8; MTU];
-        let builder = PacketBuilder::new(&mut pkt_buf)
-            .packet_type(PacketType::Data)
-            .dest_type(DestType::Single)
-            .destination_hash(dest_hash)
-            .context(0x00)
-            .payload(&ct_buf[..ct_len]);
-        let builder = if let Some(transport_id) = via {
-            builder
-                .header_type(HeaderType::Header2)
-                .transport_type(1)
-                .transport_id(&transport_id)
-        } else {
-            builder
-        };
-        let pkt_len = builder.build().ok()?;
-        Some(pkt_buf[..pkt_len].to_vec())
-    }
-
     /// Build and return a raw announce packet for this node.
     pub fn build_announce<R: RngCore + CryptoRng>(
         &self,
         app_data: Option<&[u8]>,
         rng: &mut R,
     ) -> Vec<u8> {
-        let aspects_refs: Vec<&str> = self.aspects.iter().map(|s| s.as_str()).collect();
         let now = self.announce_time();
-        let mut buf = [0u8; MTU];
-        let n = Transport::<1024, 256, 4096>::create_announce(
-            &self.identity,
-            &self.app_name,
-            &aspects_refs,
-            app_data,
-            rng,
-            now,
-            &mut buf,
-        )
-        .expect("announce creation should not fail");
-        buf[..n].to_vec()
+        self.core.build_announce(app_data, rng, now)
     }
 
     /// Run the main event loop with a single interface.
-    ///
-    /// Uses `embassy_futures::select::select3` over three branches:
-    /// - Receive packets from the interface -> ingest -> emit events
-    /// - Periodically re-announce
-    /// - Periodically tick (expire paths, retransmit announces)
-    ///
-    /// Timers use absolute deadlines (`Timer::at`) so they fire on schedule
-    /// regardless of how often the recv branch wins.
-    ///
-    /// The `on_event` callback is invoked for each event.
     pub async fn run<I, R, F>(&mut self, iface: &mut I, rng: &mut R, mut on_event: F)
     where
         I: ReteInterface,
@@ -303,7 +201,6 @@ impl EmbassyNode {
         let _ = iface.send(&announce).await;
 
         let mut recv_buf = [0u8; MTU];
-        let mut pkt_buf = [0u8; MTU];
         let mut next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
         let mut next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
 
@@ -317,97 +214,31 @@ impl EmbassyNode {
             {
                 Either3::First(result) => match result {
                     Ok(data) => {
-                        let len = data.len();
-                        pkt_buf[..len].copy_from_slice(data);
-
                         let now = Instant::now().as_secs();
-                        match self.transport.ingest(&mut pkt_buf[..len], now) {
-                            IngestResult::AnnounceReceived {
-                                dest_hash,
-                                identity_hash,
-                                hops,
-                                app_data,
-                            } => {
-                                self.last_peer = Some(dest_hash);
-                                on_event(NodeEvent::AnnounceReceived {
-                                    dest_hash,
-                                    identity_hash,
-                                    hops,
-                                    app_data: app_data.map(|d| d.to_vec()),
-                                });
-                                if let Some(ref msg) = self.auto_reply {
-                                    if let Some(pkt) = self.build_data_packet(&dest_hash, msg, rng)
-                                    {
-                                        let _ = iface.send(&pkt).await;
-                                    }
-                                }
-                                // Immediately flush pending announces (retransmissions)
-                                let pending = self.transport.pending_outbound(now);
-                                for ann_raw in pending {
-                                    let _ = iface.send(&ann_raw).await;
-                                }
-                            }
-                            IngestResult::LocalData { dest_hash, payload, packet_hash } => {
-                                let decrypted = if dest_hash == self.dest_hash {
-                                    let mut dec_buf = [0u8; MTU];
-                                    match self.identity.decrypt(payload, &mut dec_buf) {
-                                        Ok(n) => dec_buf[..n].to_vec(),
-                                        Err(_) => payload.to_vec(),
-                                    }
-                                } else {
-                                    payload.to_vec()
-                                };
-                                // Generate proof if strategy requires it
-                                if self.proof_strategy == ProofStrategy::ProveAll {
-                                    if let Some(proof) = Transport::<64, 16, 128>::build_proof_packet(&self.identity, &packet_hash) {
-                                        let _ = iface.send(&proof).await;
-                                    }
-                                }
-                                // Echo data back to sender if echo mode is on
-                                if self.echo_data {
-                                    if let Some(peer) = self.last_peer {
-                                        let mut echo_msg = Vec::with_capacity(5 + decrypted.len());
-                                        echo_msg.extend_from_slice(b"echo:");
-                                        echo_msg.extend_from_slice(&decrypted);
-                                        if let Some(pkt) =
-                                            self.build_data_packet(&peer, &echo_msg, rng)
-                                        {
-                                            let _ = iface.send(&pkt).await;
-                                        }
-                                    }
-                                }
-                                on_event(NodeEvent::DataReceived {
-                                    dest_hash,
-                                    payload: decrypted,
-                                });
-                            }
-                            IngestResult::Forward { raw, .. } => {
-                                let _ = iface.send(raw).await;
-                            }
-                            IngestResult::Duplicate | IngestResult::Invalid | IngestResult::LinkRequestReceived { .. } | IngestResult::LinkEstablished { .. } | IngestResult::LinkData { .. } | IngestResult::LinkClosed { .. } => {}
+                        let outcome = self.core.handle_ingest(data, now, 0, rng);
+                        for pkt in &outcome.packets {
+                            let _ = iface.send(&pkt.data).await;
+                        }
+                        if let Some(event) = outcome.event {
+                            on_event(event);
                         }
                     }
                     Err(_) => break,
                 },
                 Either3::Second(()) => {
-                    // Periodic announce
                     next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
                     let announce = self.build_announce(None, rng);
                     let _ = iface.send(&announce).await;
                 }
                 Either3::Third(()) => {
-                    // Periodic tick
                     next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
                     let now = Instant::now().as_secs();
-                    let result = self.transport.tick(now);
-                    on_event(NodeEvent::Tick {
-                        expired_paths: result.expired_paths,
-                    });
-
-                    // Send pending outbound announces
-                    let pending = self.transport.pending_outbound(now);
-                    for ann_raw in pending {
-                        let _ = iface.send(&ann_raw).await;
+                    let outcome = self.core.handle_tick(now);
+                    for pkt in &outcome.packets {
+                        let _ = iface.send(&pkt.data).await;
+                    }
+                    if let Some(event) = outcome.event {
+                        on_event(event);
                     }
                 }
             }

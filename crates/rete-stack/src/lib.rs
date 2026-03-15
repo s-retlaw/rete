@@ -10,6 +10,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "alloc")]
 use rete_core::TRUNCATED_HASH_LEN;
 
 /// Physical layer interface — implemented by all transport adapters.
@@ -94,3 +95,11 @@ pub enum NodeEvent {
         expired_paths: usize,
     },
 }
+
+#[cfg(feature = "alloc")]
+pub mod node_core;
+
+#[cfg(feature = "alloc")]
+pub use node_core::{
+    EmbeddedNodeCore, HostedNodeCore, IngestOutcome, NodeCore, OutboundPacket, PacketRouting,
+};

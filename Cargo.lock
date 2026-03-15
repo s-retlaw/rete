@@ -821,6 +821,8 @@ name = "rete-stack"
 version = "0.1.0"
 dependencies = [
  "embedded-io-async",
+ "rand",
+ "rand_core",
  "rete-core",
  "rete-transport",
 ]

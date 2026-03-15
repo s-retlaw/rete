@@ -1,4 +1,4 @@
-//! rete-transport — Reticulum routing, path tables, and announce handling.
+//! rete-transport — Reticulum routing, path tables, announce handling, and links.
 //!
 //! Fully synchronous — the async runtime drives it by calling `tick()`
 //! periodically and passing inbound packets to `ingest()`.
@@ -30,10 +30,12 @@ pub use transport::{
 };
 
 /// Transport for embedded targets (conservative memory).
-pub type EmbeddedTransport = Transport<64, 16, 128>;
+/// Generics: MAX_PATHS=64, MAX_ANNOUNCES=16, DEDUP_WINDOW=128, MAX_LINKS=4
+pub type EmbeddedTransport = Transport<64, 16, 128, 4>;
 
 /// Transport for hosted/gateway targets.
-pub type HostedTransport = Transport<1024, 256, 4096>;
+/// Generics: MAX_PATHS=1024, MAX_ANNOUNCES=256, DEDUP_WINDOW=4096, MAX_LINKS=32
+pub type HostedTransport = Transport<1024, 256, 4096, 32>;
 
 /// Default announce interval in seconds.
 pub const ANNOUNCE_INTERVAL_SECS: u64 = 300;

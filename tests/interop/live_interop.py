@@ -342,7 +342,7 @@ print("PY_DONE", flush=True)
                 print(f"  Rust DATA lines: {rust_data_lines}")
             failed += 1
 
-        # --- Additional assertions (Sprint 6) ---
+        # --- Additional assertions ---
 
         # Duplicate announce rejection: verify no single identity was announced
         # more than once. Multiple announces from DIFFERENT identities is fine
@@ -372,6 +372,29 @@ print("PY_DONE", flush=True)
             passed += 1
         else:
             print("[interop] FAIL: No path learned (no announce received)")
+            failed += 1
+
+        # Self-announce filtering (Sprint 1): The Rust node's own dest hash
+        # must NEVER appear in its ANNOUNCE output. rnsd may echo our announce
+        # back, but the self-announce filter should silently drop it.
+        rust_dest_hex = None
+        for line in rust_err_output.split("\n"):
+            if "destination hash:" in line:
+                rust_dest_hex = line.strip().split("destination hash: ")[-1]
+                break
+        if rust_dest_hex:
+            self_announce_lines = [l for l in announce_lines
+                                   if l.startswith(f"ANNOUNCE:{rust_dest_hex}:")]
+            if len(self_announce_lines) == 0:
+                print(f"[interop] PASS: Self-announce filtered (own dest {rust_dest_hex[:16]}... never in ANNOUNCE output)")
+                passed += 1
+            else:
+                print(f"[interop] FAIL: Self-announce NOT filtered — found {len(self_announce_lines)} ANNOUNCE lines with own dest hash")
+                for line in self_announce_lines:
+                    print(f"  {line}")
+                failed += 1
+        else:
+            print("[interop] FAIL: Could not determine Rust dest hash from stderr")
             failed += 1
 
     finally:

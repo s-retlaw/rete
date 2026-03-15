@@ -1,5 +1,8 @@
 //! Path table entries — learned routes to destinations.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use rete_core::TRUNCATED_HASH_LEN;
 
 /// A learned path to a destination.
@@ -13,6 +16,8 @@ pub struct Path {
     pub last_snr: i8,
     /// Hop count to destination.
     pub hops: u8,
+    /// Cached raw announce packet (for path request responses).
+    pub announce_raw: Option<Vec<u8>>,
 }
 
 impl Path {
@@ -23,6 +28,7 @@ impl Path {
             learned_at,
             last_snr: 0,
             hops: 1,
+            announce_raw: None,
         }
     }
 
@@ -33,6 +39,7 @@ impl Path {
             learned_at,
             last_snr: 0,
             hops,
+            announce_raw: None,
         }
     }
 }

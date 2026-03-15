@@ -21,7 +21,7 @@ fn build_header1_proof(dest_hash: &[u8; TRUNCATED_HASH_LEN], payload: &[u8]) -> 
 }
 
 /// Small transport suitable for tests.
-type TestTransport = Transport<64, 16, 128>;
+type TestTransport = Transport<64, 16, 128, 4>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,9 +96,11 @@ fn insert_path(
 #[test]
 fn transport_without_identity_never_forwards() {
     let mut t = TestTransport::new();
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xAA; TRUNCATED_HASH_LEN];
     let mut raw = build_header1_data(&dest, b"test payload");
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::LocalData { .. } => {} // expected for HEADER_1 DATA
         other => panic!("expected LocalData, got {:?}", other),
     }
@@ -107,7 +109,7 @@ fn transport_without_identity_never_forwards() {
     // (not forwarding, but local delivery) — matches Python RNS behavior
     let tid = [0xBB; TRUNCATED_HASH_LEN];
     let mut raw2 = build_header2_data(&tid, &dest, b"test");
-    match t.ingest(&mut raw2, 100) {
+    match t.ingest(&mut raw2, 100, &mut rng, &identity) {
         IngestResult::LocalData { dest_hash, payload, .. } => {
             assert_eq!(dest_hash, dest);
             assert_eq!(payload, b"test");
@@ -119,13 +121,15 @@ fn transport_without_identity_never_forwards() {
 #[test]
 fn set_local_identity_enables_forwarding() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     // Insert a multi-hop path to the destination
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
 
     let mut raw = build_header2_data(&local_hash, &dest, b"forward me");
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::Forward { .. } => {} // expected
         other => panic!("expected Forward, got {:?}", other),
     }
@@ -134,9 +138,11 @@ fn set_local_identity_enables_forwarding() {
 #[test]
 fn header1_data_local_delivery() {
     let (mut t, _) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xAA; TRUNCATED_HASH_LEN];
     let mut raw = build_header1_data(&dest, b"local delivery");
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::LocalData { dest_hash, payload, .. } => {
             assert_eq!(dest_hash, dest);
             assert_eq!(payload, b"local delivery");
@@ -152,10 +158,12 @@ fn header2_data_other_transport_id_falls_through() {
     // Python RNS behavior where non-matching HEADER_2 packets are still
     // processed for announces and local DATA.
     let (mut t, _local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let other_tid = [0xFF; TRUNCATED_HASH_LEN]; // not our identity
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let mut raw = build_header2_data(&other_tid, &dest, b"not for relay");
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::LocalData { dest_hash, payload, .. } => {
             assert_eq!(dest_hash, dest);
             assert_eq!(payload, b"not for relay");
@@ -171,12 +179,14 @@ fn header2_data_other_transport_id_falls_through() {
 #[test]
 fn header2_forward_multihop() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
 
     let mut raw = build_header2_data(&local_hash, &dest, b"multihop");
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::Forward { raw: fwd, .. } => {
             // Should still be HEADER_2
             let pkt = Packet::parse(fwd).unwrap();
@@ -193,12 +203,14 @@ fn header2_forward_multihop() {
 #[test]
 fn header2_forward_lasthop() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     // Direct path: hops=1, no via
     insert_path(&mut t, dest, None, 1, 100);
 
     let mut raw = build_header2_data(&local_hash, &dest, b"last hop");
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::Forward { raw: fwd, .. } => {
             let pkt = Packet::parse(fwd).unwrap();
             // Should be converted to HEADER_1
@@ -216,9 +228,11 @@ fn header2_forward_lasthop() {
 #[test]
 fn header2_forward_no_path() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xEE; TRUNCATED_HASH_LEN]; // no path to this
     let mut raw = build_header2_data(&local_hash, &dest, b"nowhere");
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::Invalid => {} // expected
         other => panic!("expected Invalid, got {:?}", other),
     }
@@ -227,13 +241,15 @@ fn header2_forward_no_path() {
 #[test]
 fn forwarded_hops_incremented() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
 
     let mut raw = build_header2_data(&local_hash, &dest, b"hops test");
     let original_hops = raw[1];
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::Forward { raw: fwd, .. } => {
             let pkt = Packet::parse(fwd).unwrap();
             assert_eq!(pkt.hops, original_hops + 1);
@@ -245,12 +261,14 @@ fn forwarded_hops_incremented() {
 #[test]
 fn header2_to_header1_flags_correct() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, None, 1, 100);
 
     let mut raw = build_header2_data(&local_hash, &dest, b"flags test");
     let original_lower_nibble = raw[0] & 0x0F;
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::Forward { raw: fwd, .. } => {
             let flags = fwd[0];
             // header_type should be 0 (HEADER_1)
@@ -271,6 +289,8 @@ fn header2_to_header1_flags_correct() {
 #[test]
 fn forwarded_packet_hash_stable() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
@@ -279,7 +299,7 @@ fn forwarded_packet_hash_stable() {
     let original_hash = Packet::parse(&raw).unwrap().compute_hash();
 
     let mut raw_mut = raw.clone();
-    match t.ingest(&mut raw_mut, 100) {
+    match t.ingest(&mut raw_mut, 100, &mut rng, &identity) {
         IngestResult::Forward { raw: fwd, .. } => {
             let fwd_hash = Packet::parse(fwd).unwrap().compute_hash();
             assert_eq!(
@@ -298,6 +318,8 @@ fn forwarded_packet_hash_stable() {
 #[test]
 fn reverse_entry_created_on_forward() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
@@ -306,7 +328,7 @@ fn reverse_entry_created_on_forward() {
 
     let mut raw = build_header2_data(&local_hash, &dest, b"reverse test");
     let pkt_hash = Packet::parse(&raw).unwrap().compute_hash();
-    let _ = t.ingest(&mut raw, 100);
+    let _ = t.ingest(&mut raw, 100, &mut rng, &identity);
 
     assert_eq!(t.reverse_count(), 1);
 
@@ -318,13 +340,15 @@ fn reverse_entry_created_on_forward() {
 #[test]
 fn reverse_table_lookup() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
 
     let mut raw = build_header2_data(&local_hash, &dest, b"lookup test");
     let pkt_hash = Packet::parse(&raw).unwrap().compute_hash();
-    let _ = t.ingest(&mut raw, 200);
+    let _ = t.ingest(&mut raw, 200, &mut rng, &identity);
 
     let trunc: [u8; TRUNCATED_HASH_LEN] = pkt_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
     let entry = t.get_reverse(&trunc).unwrap();
@@ -334,12 +358,14 @@ fn reverse_table_lookup() {
 #[test]
 fn reverse_table_expiry() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
 
     let mut raw = build_header2_data(&local_hash, &dest, b"expiry test");
-    let _ = t.ingest(&mut raw, 100);
+    let _ = t.ingest(&mut raw, 100, &mut rng, &identity);
     assert_eq!(t.reverse_count(), 1);
 
     // Tick at a time before expiry — entry should remain
@@ -360,10 +386,11 @@ fn announce_replay_same_random_hash_rejected() {
     let announcer = Identity::from_seed(b"announcer-node").unwrap();
     let mut t = TestTransport::new();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     // Create an announce
     let mut buf1 = [0u8; MTU];
-    let n1 = Transport::<64, 16, 128>::create_announce(
+    let n1 = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -376,7 +403,7 @@ fn announce_replay_same_random_hash_rejected() {
 
     // First ingest should succeed
     let mut pkt1 = buf1[..n1].to_vec();
-    match t.ingest(&mut pkt1, 1000) {
+    match t.ingest(&mut pkt1, 1000, &mut rng, &identity) {
         IngestResult::AnnounceReceived { .. } => {} // expected
         other => panic!("expected AnnounceReceived, got {:?}", other),
     }
@@ -384,7 +411,7 @@ fn announce_replay_same_random_hash_rejected() {
     // Re-ingest same announce (exact same bytes, so same random_hash)
     // Must copy from original buf since ingest mutates
     let mut pkt2 = buf1[..n1].to_vec();
-    match t.ingest(&mut pkt2, 1001) {
+    match t.ingest(&mut pkt2, 1001, &mut rng, &identity) {
         IngestResult::Duplicate => {} // expected — packet dedup catches this since same bytes
         other => panic!("expected Duplicate, got {:?}", other),
     }
@@ -421,10 +448,11 @@ fn announce_different_random_hash_accepted() {
     let announcer = Identity::from_seed(b"announcer-node-2").unwrap();
     let mut t = TestTransport::new();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     // Create first announce
     let mut buf1 = [0u8; MTU];
-    let n1 = Transport::<64, 16, 128>::create_announce(
+    let n1 = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -435,14 +463,14 @@ fn announce_different_random_hash_accepted() {
     )
     .unwrap();
     let mut pkt1 = buf1[..n1].to_vec();
-    match t.ingest(&mut pkt1, 1000) {
+    match t.ingest(&mut pkt1, 1000, &mut rng, &identity) {
         IngestResult::AnnounceReceived { .. } => {} // expected
         other => panic!("expected AnnounceReceived, got {:?}", other),
     }
 
     // Create second announce (different random_hash due to different rng state + time)
     let mut buf2 = [0u8; MTU];
-    let n2 = Transport::<64, 16, 128>::create_announce(
+    let n2 = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -453,7 +481,7 @@ fn announce_different_random_hash_accepted() {
     )
     .unwrap();
     let mut pkt2 = buf2[..n2].to_vec();
-    match t.ingest(&mut pkt2, 2000) {
+    match t.ingest(&mut pkt2, 2000, &mut rng, &identity) {
         IngestResult::AnnounceReceived { .. } => {} // expected — different random_hash
         other => panic!("expected AnnounceReceived, got {:?}", other),
     }
@@ -466,13 +494,15 @@ fn announce_different_random_hash_accepted() {
 #[test]
 fn ingest_local_data_includes_packet_hash() {
     let mut t = TestTransport::new();
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xAA; TRUNCATED_HASH_LEN];
     let raw = build_header1_data(&dest, b"hash test");
     // Compute expected hash before ingest (ingest increments hops but hash is hop-invariant)
     let expected_hash = Packet::parse(&raw).unwrap().compute_hash();
 
     let mut raw_mut = raw.clone();
-    match t.ingest(&mut raw_mut, 100) {
+    match t.ingest(&mut raw_mut, 100, &mut rng, &identity) {
         IngestResult::LocalData { packet_hash, .. } => {
             assert_eq!(packet_hash, expected_hash);
             assert_eq!(packet_hash.len(), 32, "packet hash must be full 32 bytes");
@@ -529,12 +559,14 @@ fn proof_signature_valid() {
 #[test]
 fn header2_forward_lasthop_payload_intact() {
     let (mut t, local_hash) = make_relay_transport(b"relay-node");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, None, 1, 100);
 
     let payload = b"payload integrity check";
     let mut raw = build_header2_data(&local_hash, &dest, payload);
-    match t.ingest(&mut raw, 100) {
+    match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::Forward { raw: fwd, .. } => {
             let pkt = Packet::parse(fwd).unwrap();
             assert_eq!(
@@ -551,9 +583,10 @@ fn header1_announce_still_works_with_identity_set() {
     let (mut t, _) = make_relay_transport(b"relay-node");
     let announcer = Identity::from_seed(b"test-announcer").unwrap();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -565,7 +598,7 @@ fn header1_announce_still_works_with_identity_set() {
     .unwrap();
 
     let mut pkt = buf[..n].to_vec();
-    match t.ingest(&mut pkt, 1000) {
+    match t.ingest(&mut pkt, 1000, &mut rng, &identity) {
         IngestResult::AnnounceReceived { hops, .. } => {
             assert_eq!(hops, 1); // hops incremented from 0 to 1
         }
@@ -576,17 +609,19 @@ fn header1_announce_still_works_with_identity_set() {
 #[test]
 fn dedup_prevents_double_processing() {
     let mut t = TestTransport::new();
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xAA; TRUNCATED_HASH_LEN];
     let raw = build_header1_data(&dest, b"dedup test");
 
     let mut raw1 = raw.clone();
-    match t.ingest(&mut raw1, 100) {
+    match t.ingest(&mut raw1, 100, &mut rng, &identity) {
         IngestResult::LocalData { .. } => {} // first time: accepted
         other => panic!("expected LocalData, got {:?}", other),
     }
 
     let mut raw2 = raw.clone();
-    match t.ingest(&mut raw2, 100) {
+    match t.ingest(&mut raw2, 100, &mut rng, &identity) {
         IngestResult::Duplicate => {} // second time: dedup
         other => panic!("expected Duplicate, got {:?}", other),
     }
@@ -601,6 +636,7 @@ fn self_announce_filtered() {
     let announcer = Identity::from_seed(b"self-node").unwrap();
     let mut t = TestTransport::new();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     // Compute the destination hash for this identity
     let mut name_buf = [0u8; 128];
@@ -613,7 +649,7 @@ fn self_announce_filtered() {
 
     // Create an announce for this identity
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -625,7 +661,7 @@ fn self_announce_filtered() {
     .unwrap();
 
     let mut pkt = buf[..n].to_vec();
-    match t.ingest(&mut pkt, 1000) {
+    match t.ingest(&mut pkt, 1000, &mut rng, &identity) {
         IngestResult::Duplicate => {} // filtered as self-announce
         other => panic!("expected Duplicate, got {:?}", other),
     }
@@ -636,6 +672,7 @@ fn self_announce_no_path_stored() {
     let announcer = Identity::from_seed(b"self-node-2").unwrap();
     let mut t = TestTransport::new();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut name_buf = [0u8; 128];
     let expanded = rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
@@ -645,7 +682,7 @@ fn self_announce_no_path_stored() {
     t.add_local_destination(dest_hash);
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -657,7 +694,7 @@ fn self_announce_no_path_stored() {
     .unwrap();
 
     let mut pkt = buf[..n].to_vec();
-    let _ = t.ingest(&mut pkt, 1000);
+    let _ = t.ingest(&mut pkt, 1000, &mut rng, &identity);
 
     assert!(
         t.get_path(&dest_hash).is_none(),
@@ -670,6 +707,7 @@ fn self_announce_no_retransmission() {
     let announcer = Identity::from_seed(b"self-node-3").unwrap();
     let mut t = TestTransport::new();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut name_buf = [0u8; 128];
     let expanded = rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
@@ -679,7 +717,7 @@ fn self_announce_no_retransmission() {
     t.add_local_destination(dest_hash);
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -691,7 +729,7 @@ fn self_announce_no_retransmission() {
     .unwrap();
 
     let mut pkt = buf[..n].to_vec();
-    let _ = t.ingest(&mut pkt, 1000);
+    let _ = t.ingest(&mut pkt, 1000, &mut rng, &identity);
 
     assert_eq!(
         t.announce_count(),
@@ -706,6 +744,7 @@ fn foreign_announce_still_accepted() {
     let local = Identity::from_seed(b"local-node").unwrap();
     let mut t = TestTransport::new();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     // Register local destination
     let mut name_buf = [0u8; 128];
@@ -716,7 +755,7 @@ fn foreign_announce_still_accepted() {
 
     // Create announce from a different identity
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -728,7 +767,7 @@ fn foreign_announce_still_accepted() {
     .unwrap();
 
     let mut pkt = buf[..n].to_vec();
-    match t.ingest(&mut pkt, 1000) {
+    match t.ingest(&mut pkt, 1000, &mut rng, &identity) {
         IngestResult::AnnounceReceived { .. } => {} // expected
         other => panic!("expected AnnounceReceived, got {:?}", other),
     }
@@ -741,6 +780,8 @@ fn foreign_announce_still_accepted() {
 #[test]
 fn proof_routed_via_reverse_table() {
     let (mut t, local_hash) = make_relay_transport(b"relay-proof-1");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
@@ -748,7 +789,7 @@ fn proof_routed_via_reverse_table() {
     // Forward a HEADER_2 DATA to create a reverse entry
     let mut data = build_header2_data(&local_hash, &dest, b"proof routing test");
     let pkt_hash = Packet::parse(&data).unwrap().compute_hash();
-    match t.ingest(&mut data, 100) {
+    match t.ingest(&mut data, 100, &mut rng, &identity) {
         IngestResult::Forward { .. } => {}
         other => panic!("expected Forward for DATA, got {:?}", other),
     }
@@ -758,7 +799,7 @@ fn proof_routed_via_reverse_table() {
 
     // Now ingest a PROOF with dest_hash = truncated packet hash
     let mut proof = build_header1_proof(&trunc, b"proof-payload");
-    match t.ingest(&mut proof, 101) {
+    match t.ingest(&mut proof, 101, &mut rng, &identity) {
         IngestResult::Forward { .. } => {} // routed via reverse table
         other => panic!("expected Forward for PROOF, got {:?}", other),
     }
@@ -767,18 +808,20 @@ fn proof_routed_via_reverse_table() {
 #[test]
 fn proof_consumes_reverse_entry() {
     let (mut t, local_hash) = make_relay_transport(b"relay-proof-2");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xCC; TRUNCATED_HASH_LEN];
     let next_hop = [0xDD; TRUNCATED_HASH_LEN];
     insert_path(&mut t, dest, Some(next_hop), 3, 100);
 
     let mut data = build_header2_data(&local_hash, &dest, b"consume test");
     let pkt_hash = Packet::parse(&data).unwrap().compute_hash();
-    let _ = t.ingest(&mut data, 100);
+    let _ = t.ingest(&mut data, 100, &mut rng, &identity);
     assert_eq!(t.reverse_count(), 1);
 
     let trunc: [u8; TRUNCATED_HASH_LEN] = pkt_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
     let mut proof = build_header1_proof(&trunc, b"proof");
-    let _ = t.ingest(&mut proof, 101);
+    let _ = t.ingest(&mut proof, 101, &mut rng, &identity);
 
     assert_eq!(
         t.reverse_count(),
@@ -790,10 +833,12 @@ fn proof_consumes_reverse_entry() {
 #[test]
 fn proof_no_reverse_entry_dropped() {
     let (mut t, _) = make_relay_transport(b"relay-proof-3");
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     let unknown_hash = [0xFF; TRUNCATED_HASH_LEN];
 
     let mut proof = build_header1_proof(&unknown_hash, b"orphan proof");
-    match t.ingest(&mut proof, 100) {
+    match t.ingest(&mut proof, 100, &mut rng, &identity) {
         IngestResult::Invalid => {} // no reverse entry
         other => panic!("expected Invalid, got {:?}", other),
     }
@@ -802,11 +847,13 @@ fn proof_no_reverse_entry_dropped() {
 #[test]
 fn proof_without_transport_passes_through() {
     let mut t = TestTransport::new();
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
     // No local_identity_hash set (not a transport node)
     let some_hash = [0xAA; TRUNCATED_HASH_LEN];
 
     let mut proof = build_header1_proof(&some_hash, b"passthrough proof");
-    match t.ingest(&mut proof, 100) {
+    match t.ingest(&mut proof, 100, &mut rng, &identity) {
         IngestResult::Forward { .. } => {} // generic forward
         other => panic!("expected Forward, got {:?}", other),
     }
@@ -821,9 +868,10 @@ fn announce_rebroadcast_as_header2_when_transport() {
     let (mut t, local_hash) = make_relay_transport(b"relay-rebroadcast-1");
     let announcer = Identity::from_seed(b"announcer-rebroadcast-1").unwrap();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -835,7 +883,7 @@ fn announce_rebroadcast_as_header2_when_transport() {
     .unwrap();
 
     let mut pkt = buf[..n].to_vec();
-    match t.ingest(&mut pkt, 1000) {
+    match t.ingest(&mut pkt, 1000, &mut rng, &identity) {
         IngestResult::AnnounceReceived { .. } => {}
         other => panic!("expected AnnounceReceived, got {:?}", other),
     }
@@ -865,9 +913,10 @@ fn announce_rebroadcast_keeps_header1_without_transport() {
     // No transport mode
     let announcer = Identity::from_seed(b"announcer-rebroadcast-2").unwrap();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -879,7 +928,7 @@ fn announce_rebroadcast_keeps_header1_without_transport() {
     .unwrap();
 
     let mut pkt = buf[..n].to_vec();
-    match t.ingest(&mut pkt, 1000) {
+    match t.ingest(&mut pkt, 1000, &mut rng, &identity) {
         IngestResult::AnnounceReceived { .. } => {}
         other => panic!("expected AnnounceReceived, got {:?}", other),
     }
@@ -901,9 +950,10 @@ fn rebroadcast_hops_preserved() {
     let (mut t, _) = make_relay_transport(b"relay-rebroadcast-3");
     let announcer = Identity::from_seed(b"announcer-rebroadcast-3").unwrap();
     let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128>::create_announce(
+    let n = Transport::<64, 16, 128, 4>::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -915,7 +965,7 @@ fn rebroadcast_hops_preserved() {
     .unwrap();
 
     let mut pkt = buf[..n].to_vec();
-    let _ = t.ingest(&mut pkt, 1000);
+    let _ = t.ingest(&mut pkt, 1000, &mut rng, &identity);
 
     let pending = t.pending_outbound(1000);
     assert!(!pending.is_empty());
