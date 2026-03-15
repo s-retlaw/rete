@@ -693,7 +693,6 @@ dependencies = [
  "rete-stack",
  "rete-tokio",
  "rete-transport",
- "sha2",
  "tokio",
 ]
 

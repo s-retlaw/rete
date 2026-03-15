@@ -24,20 +24,11 @@ use esp_backtrace as _;
 use esp_hal::uart::{self, Uart};
 use esp_hal::{clock::CpuClock, ram, timer::timg::TimerGroup};
 use esp_println::println;
-use rand_core::{CryptoRng, RngCore};
 use rete_embassy::{EmbassyHdlcInterface, EmbassyNode, NodeEvent};
-use sha2::{Digest, Sha256};
 
-struct EspRng(esp_hal::rng::Rng);
-impl RngCore for EspRng {
-    fn next_u32(&mut self) -> u32 { self.0.random() }
-    fn next_u64(&mut self) -> u64 { (self.next_u32() as u64) << 32 | self.next_u32() as u64 }
-    fn fill_bytes(&mut self, dest: &mut [u8]) { self.0.read(dest) }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest); Ok(())
-    }
-}
-impl CryptoRng for EspRng {}
+#[path = "../rng.rs"]
+mod rng;
+use rng::EspRng;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -74,15 +65,10 @@ async fn main(_spawner: Spawner) -> ! {
 
     // Deterministic identity for reproducible testing
     println!("[rete-serial] creating identity");
-    let hash = Sha256::digest(b"rete-esp32c6-serial");
-    let mut prv = [0u8; 64];
-    prv[..32].copy_from_slice(&hash);
-    let hash2 = Sha256::digest(&hash);
-    prv[32..].copy_from_slice(&hash2);
-    let identity = rete_core::Identity::from_private_key(&prv).expect("invalid key");
+    let identity = rete_core::Identity::from_seed(b"rete-esp32c6-serial").expect("invalid key");
 
     let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]);
-    node.set_auto_reply(Some(alloc::vec![b'h', b'e', b'l', b'l', b'o', b' ', b'f', b'r', b'o', b'm', b' ', b'e', b's', b'p', b'3', b'2']));
+    node.set_auto_reply(Some(b"hello from esp32".to_vec()));
     let dh = node.dest_hash();
     println!(
         "[rete-serial] dest: {:02x}{:02x}{:02x}{:02x}",

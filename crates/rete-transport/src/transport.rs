@@ -296,7 +296,7 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
 
         // Build signed_data: dest_hash || pub_key || name_hash || random_hash [|| app_data]
         let pub_key = identity.public_key();
-        let mut signed_data = [0u8; 500];
+        let mut signed_data = [0u8; rete_core::MTU];
         let mut pos = 0;
         signed_data[pos..pos + TRUNCATED_HASH_LEN].copy_from_slice(&dest_hash);
         pos += TRUNCATED_HASH_LEN;
@@ -315,7 +315,7 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
         let signature = identity.sign(&signed_data[..pos])?;
 
         // Build announce payload: pub_key || name_hash || random_hash || signature [|| app_data]
-        let mut payload = [0u8; 500];
+        let mut payload = [0u8; rete_core::MTU];
         let mut ppos = 0;
         payload[ppos..ppos + 64].copy_from_slice(&pub_key);
         ppos += 64;

@@ -1,52 +1,19 @@
 //! rete-tokio — Tokio runtime harness for Reticulum.
 //!
-//! Provides [`ReteNode`] which drives transport + interfaces in an async
+//! Provides [`TokioNode`] which drives transport + interfaces in an async
 //! event loop using `tokio::select!`.
 
 use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN, PacketBuilder, PacketType, DestType, HeaderType};
 use rete_stack::ReteInterface;
-use rete_transport::{HostedTransport, Transport, IngestResult};
+pub use rete_stack::NodeEvent;
+use rete_transport::{HostedTransport, Transport, IngestResult, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Default announce interval in seconds.
-pub const ANNOUNCE_INTERVAL_SECS: u64 = 300;
-
-/// Tick interval in seconds (path expiry, announce retransmission).
-pub const TICK_INTERVAL_SECS: u64 = 60;
-
-/// Event emitted by the node's run loop.
-#[derive(Debug)]
-pub enum NodeEvent {
-    /// A valid announce was received.
-    AnnounceReceived {
-        /// Destination hash of the announcing identity.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        /// Identity hash of the announcer.
-        identity_hash: [u8; TRUNCATED_HASH_LEN],
-        /// Hop count at time of receipt.
-        hops: u8,
-        /// Application data from the announce (owned copy).
-        app_data: Option<Vec<u8>>,
-    },
-    /// A data packet addressed to one of our destinations was received.
-    DataReceived {
-        /// Destination hash the packet was addressed to.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        /// Payload data (owned copy).
-        payload: Vec<u8>,
-    },
-    /// Periodic tick completed.
-    Tick {
-        /// Number of paths expired.
-        expired_paths: usize,
-    },
-}
 
 /// A Reticulum node running on the Tokio runtime.
 ///
 /// Owns the transport state machine and drives one or more interfaces.
-pub struct ReteNode {
+pub struct TokioNode {
     /// The local identity for this node.
     pub identity: Identity,
     /// Transport state (path table, announce queue, dedup).
@@ -61,7 +28,7 @@ pub struct ReteNode {
     auto_reply: Option<Vec<u8>>,
 }
 
-impl ReteNode {
+impl TokioNode {
     /// Create a new node with the given identity and destination.
     pub fn new(identity: Identity, app_name: &str, aspects: &[&str]) -> Self {
         let mut name_buf = [0u8; 128];
@@ -70,7 +37,7 @@ impl ReteNode {
         let id_hash = identity.hash();
         let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
 
-        ReteNode {
+        TokioNode {
             identity,
             transport: Transport::new(),
             app_name: app_name.to_string(),

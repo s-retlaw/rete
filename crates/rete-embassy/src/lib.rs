@@ -16,21 +16,13 @@ use alloc::vec::Vec;
 use embassy_futures::select::{select3, Either3};
 use embassy_time::{Duration, Instant, Timer};
 use rand_core::{CryptoRng, RngCore};
-use rete_core::hdlc::{self, HdlcDecoder};
+use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
 use rete_core::{
     DestType, HeaderType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
 };
 use rete_stack::ReteInterface;
-use rete_transport::{EmbeddedTransport, IngestResult, Transport};
-
-/// Default announce interval in seconds.
-pub const ANNOUNCE_INTERVAL_SECS: u64 = 300;
-
-/// Tick interval in seconds (path expiry, announce retransmission).
-pub const TICK_INTERVAL_SECS: u64 = 60;
-
-/// Maximum HDLC-encoded frame size (worst case: every byte escaped + 2 flags).
-const MAX_ENCODED: usize = MTU * 2 + 2;
+pub use rete_stack::NodeEvent;
+use rete_transport::{EmbeddedTransport, IngestResult, Transport, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 // ---------------------------------------------------------------------------
 // Error
@@ -128,38 +120,6 @@ where
             self.read_len = n;
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// NodeEvent
-// ---------------------------------------------------------------------------
-
-/// Event emitted by the node's run loop.
-#[derive(Debug)]
-pub enum NodeEvent {
-    /// A valid announce was received.
-    AnnounceReceived {
-        /// Destination hash of the announcing identity.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        /// Identity hash of the announcer.
-        identity_hash: [u8; TRUNCATED_HASH_LEN],
-        /// Hop count at time of receipt.
-        hops: u8,
-        /// Application data from the announce (owned copy).
-        app_data: Option<Vec<u8>>,
-    },
-    /// A data packet addressed to one of our destinations was received.
-    DataReceived {
-        /// Destination hash the packet was addressed to.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        /// Payload data (owned copy).
-        payload: Vec<u8>,
-    },
-    /// Periodic tick completed.
-    Tick {
-        /// Number of paths expired.
-        expired_paths: usize,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +277,7 @@ impl EmbassyNode {
         let _ = iface.send(&announce).await;
 
         let mut recv_buf = [0u8; MTU];
+        let mut pkt_buf = [0u8; MTU];
         let mut next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
         let mut next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
 
@@ -331,7 +292,6 @@ impl EmbassyNode {
                 Either3::First(result) => match result {
                     Ok(data) => {
                         let len = data.len();
-                        let mut pkt_buf = [0u8; MTU];
                         pkt_buf[..len].copy_from_slice(data);
 
                         let now = Instant::now().as_secs();

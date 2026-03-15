@@ -118,6 +118,22 @@ impl Identity {
         Ok(Identity { x25519_prv, x25519_pub, ed25519_prv, ed25519_pub })
     }
 
+    /// Create an Identity from a seed (for deterministic/reproducible testing).
+    ///
+    /// Derives a 64-byte private key via double SHA-256:
+    /// `prv[0:32] = SHA-256(seed)`, `prv[32:64] = SHA-256(prv[0:32])`.
+    ///
+    /// # Errors
+    /// [`Error::InvalidKey`] if key derivation fails.
+    pub fn from_seed(seed: &[u8]) -> Result<Self, Error> {
+        let hash = Sha256::digest(seed);
+        let mut prv = [0u8; 64];
+        prv[..32].copy_from_slice(&hash);
+        let hash2 = Sha256::digest(&hash);
+        prv[32..].copy_from_slice(&hash2);
+        Self::from_private_key(&prv)
+    }
+
     /// Returns the combined 64-byte public key.
     ///
     /// Format: `X25519_pub[0:32] || Ed25519_pub[32:64]`

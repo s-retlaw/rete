@@ -10,8 +10,7 @@
 use rete_core::Identity;
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
-use rete_tokio::{ReteNode, NodeEvent};
-use sha2::{Sha256, Digest};
+use rete_tokio::{TokioNode, NodeEvent};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:4242";
 const DEFAULT_BAUD: u32 = 115200;
@@ -50,16 +49,8 @@ async fn main() {
 
     // Create or derive identity
     let identity = if let Some(seed_str) = seed {
-        // Deterministic identity from seed (for reproducible testing)
-        let hash = Sha256::digest(seed_str.as_bytes());
-        let mut prv = [0u8; 64];
-        prv[..32].copy_from_slice(&hash);
-        // Use a different hash for ed25519 half
-        let hash2 = Sha256::digest(&hash);
-        prv[32..].copy_from_slice(&hash2);
-        Identity::from_private_key(&prv).expect("invalid derived key")
+        Identity::from_seed(seed_str.as_bytes()).expect("invalid derived key")
     } else {
-        // Random identity
         let mut rng = rand::thread_rng();
         let mut prv = [0u8; 64];
         rand::RngCore::fill_bytes(&mut rng, &mut prv);
@@ -70,7 +61,7 @@ async fn main() {
     eprintln!("[rete] identity hash: {}", hex::encode(id_hash));
 
     // Create node
-    let mut node = ReteNode::new(identity, APP_NAME, ASPECTS);
+    let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
     if let Some(msg) = auto_reply {
         node.set_auto_reply(Some(msg.into_bytes()));
     }

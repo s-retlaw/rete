@@ -3,19 +3,18 @@
 //! Connects to a Python `rnsd` or another Reticulum TCP transport node.
 //! Packets are framed using HDLC byte-stuffing (FLAG=0x7E, ESC=0x7D).
 
-use rete_core::hdlc::{self, HdlcDecoder};
+use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
 use rete_stack::ReteInterface;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-
-/// Maximum HDLC-encoded frame size (worst case: every byte escaped + 2 flags).
-const MAX_ENCODED: usize = rete_core::MTU * 2 + 2;
 
 /// TCP interface for Reticulum — HDLC-framed packets over a TCP stream.
 pub struct TcpInterface {
     stream: TcpStream,
     decoder: HdlcDecoder<{ rete_core::MTU }>,
     read_buf: [u8; 1024],
+    read_pos: usize,
+    read_len: usize,
 }
 
 /// Errors from the TCP interface.
@@ -53,6 +52,8 @@ impl TcpInterface {
             stream,
             decoder: HdlcDecoder::new(),
             read_buf: [0u8; 1024],
+            read_pos: 0,
+            read_len: 0,
         })
     }
 
@@ -62,6 +63,8 @@ impl TcpInterface {
             stream,
             decoder: HdlcDecoder::new(),
             read_buf: [0u8; 1024],
+            read_pos: 0,
+            read_len: 0,
         }
     }
 }
@@ -79,14 +82,11 @@ impl ReteInterface for TcpInterface {
 
     async fn recv<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a [u8], Self::Error> {
         loop {
-            let n = self.stream.read(&mut self.read_buf).await?;
-            if n == 0 {
-                return Err(TcpError::Disconnected);
-            }
-
-            for i in 0..n {
-                if self.decoder.feed(self.read_buf[i]) {
-                    // Complete frame available
+            // Drain leftover bytes from previous read
+            while self.read_pos < self.read_len {
+                let byte = self.read_buf[self.read_pos];
+                self.read_pos += 1;
+                if self.decoder.feed(byte) {
                     if let Some(frame) = self.decoder.frame() {
                         let len = frame.len();
                         if len <= buf.len() {
@@ -97,6 +97,14 @@ impl ReteInterface for TcpInterface {
                     }
                 }
             }
+
+            // Read more from transport
+            let n = self.stream.read(&mut self.read_buf).await?;
+            if n == 0 {
+                return Err(TcpError::Disconnected);
+            }
+            self.read_pos = 0;
+            self.read_len = n;
         }
     }
 }

@@ -8,6 +8,10 @@ repository.workspace = true
 keywords.workspace   = true
 categories.workspace = true
 
+[features]
+default = ["alloc"]
+alloc = []
+
 [dependencies]
 rete-core = { workspace = true }
 rete-transport = { workspace = true }

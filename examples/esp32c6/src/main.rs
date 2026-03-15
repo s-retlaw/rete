@@ -28,36 +28,9 @@ use esp_radio::{
     Controller,
     wifi::{ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent, WifiStaState},
 };
-use rand_core::{CryptoRng, RngCore};
+mod rng;
+use rng::EspRng;
 use rete_embassy::{EmbassyHdlcInterface, EmbassyNode, NodeEvent};
-use sha2::{Digest, Sha256};
-
-/// Wrapper around ESP32 hardware RNG implementing rand_core 0.6 traits.
-///
-/// The ESP32-C6 HW RNG is cryptographically secure when WiFi is active
-/// (the radio provides a hardware entropy source).
-struct EspRng(esp_hal::rng::Rng);
-
-impl RngCore for EspRng {
-    fn next_u32(&mut self) -> u32 {
-        self.0.random()
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        (self.next_u32() as u64) << 32 | self.next_u32() as u64
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.0.read(dest)
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-impl CryptoRng for EspRng {}
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -156,15 +129,9 @@ async fn main(spawner: Spawner) -> ! {
     let mut iface = EmbassyHdlcInterface::new(socket);
 
     // WARNING: Deterministic identity for reproducible interop testing.
-    // Every device running this firmware has the same private key.
-    // For production, generate from hardware RNG: rng.fill_bytes(&mut prv);
+    // For production, generate from hardware RNG instead.
     println!("[rete] WARNING: using fixed test key (not for production)");
-    let hash = Sha256::digest(b"rete-esp32c6-example");
-    let mut prv = [0u8; 64];
-    prv[..32].copy_from_slice(&hash);
-    let hash2 = Sha256::digest(&hash);
-    prv[32..].copy_from_slice(&hash2);
-    let identity = rete_core::Identity::from_private_key(&prv).expect("invalid derived key");
+    let identity = rete_core::Identity::from_seed(b"rete-esp32c6-example").expect("invalid key");
 
     let id_hash = identity.hash();
     println!(

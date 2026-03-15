@@ -6,13 +6,10 @@
 //! Non-HDLC bytes (bootloader output, log messages) on the serial line are
 //! silently ignored by the HDLC decoder.
 
-use rete_core::hdlc::{self, HdlcDecoder};
+use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
 use rete_stack::ReteInterface;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_serial::SerialStream;
-
-/// Maximum HDLC-encoded frame size (worst case: every byte escaped + 2 flags).
-const MAX_ENCODED: usize = rete_core::MTU * 2 + 2;
 
 /// Serial interface for Reticulum — HDLC-framed packets over a serial port.
 pub struct SerialInterface {

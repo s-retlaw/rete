@@ -24,3 +24,9 @@ pub type EmbeddedTransport = Transport<64, 16, 128>;
 
 /// Transport for hosted/gateway targets.
 pub type HostedTransport = Transport<1024, 256, 4096>;
+
+/// Default announce interval in seconds.
+pub const ANNOUNCE_INTERVAL_SECS: u64 = 300;
+
+/// Tick interval in seconds (path expiry, announce retransmission).
+pub const TICK_INTERVAL_SECS: u64 = 60;

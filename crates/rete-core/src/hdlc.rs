@@ -17,6 +17,9 @@ pub const ESC: u8 = 0x7D;
 /// XOR mask applied to escaped bytes.
 pub const ESC_MASK: u8 = 0x20;
 
+/// Maximum HDLC-encoded frame size (worst case: every byte escaped + 2 flags).
+pub const MAX_ENCODED: usize = crate::MTU * 2 + 2;
+
 /// HDLC-encode `data` into `out`.
 ///
 /// Writes `FLAG || escaped(data) || FLAG` and returns the number of bytes

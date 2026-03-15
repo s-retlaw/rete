@@ -77,7 +77,7 @@ pub fn validate_announce<'a>(
 
     // Build signed_data: dest_hash || pub_key || name_hash || random_hash [|| app_data]
     // Max: 16 + 64 + 10 + 10 + (MTU - 148) ≈ 452
-    let mut signed_data = [0u8; 500];
+    let mut signed_data = [0u8; rete_core::MTU];
     let mut pos = 0;
     signed_data[pos..pos + TRUNCATED_HASH_LEN].copy_from_slice(&computed_dest);
     pos += TRUNCATED_HASH_LEN;
