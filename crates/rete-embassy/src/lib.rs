@@ -21,6 +21,7 @@ use rete_core::{
     DestType, HeaderType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
 };
 pub use rete_stack::NodeEvent;
+pub use rete_stack::ProofStrategy;
 use rete_stack::ReteInterface;
 use rete_transport::{
     EmbeddedTransport, IngestResult, Transport, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS,
@@ -153,6 +154,8 @@ pub struct EmbassyNode {
     /// Set via [`set_epoch_offset`] after obtaining wall-clock time (e.g. from NTP).
     /// Used only for announce timestamp bytes; path expiry uses monotonic time.
     epoch_offset: u64,
+    /// Proof generation strategy for incoming data packets.
+    proof_strategy: ProofStrategy,
 }
 
 impl EmbassyNode {
@@ -164,9 +167,12 @@ impl EmbassyNode {
         let id_hash = identity.hash();
         let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
 
+        let mut transport = Transport::new();
+        transport.add_local_destination(dest_hash);
+
         EmbassyNode {
             identity,
-            transport: Transport::new(),
+            transport,
             app_name: String::from(app_name),
             aspects: aspects.iter().map(|s| String::from(*s)).collect(),
             dest_hash,
@@ -174,7 +180,13 @@ impl EmbassyNode {
             echo_data: false,
             last_peer: None,
             epoch_offset: 0,
+            proof_strategy: ProofStrategy::ProveNone,
         }
+    }
+
+    /// Enable transport mode: forward HEADER_2 packets for other nodes.
+    pub fn enable_transport(&mut self) {
+        self.transport.set_local_identity(self.identity.hash());
     }
 
     /// Returns our destination hash.
@@ -190,6 +202,11 @@ impl EmbassyNode {
     /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
     pub fn set_echo_data(&mut self, echo: bool) {
         self.echo_data = echo;
+    }
+
+    /// Set the proof generation strategy for incoming data packets.
+    pub fn set_proof_strategy(&mut self, strategy: ProofStrategy) {
+        self.proof_strategy = strategy;
     }
 
     /// Set the epoch offset so announce timestamps approximate Unix time.
@@ -324,8 +341,13 @@ impl EmbassyNode {
                                         let _ = iface.send(&pkt).await;
                                     }
                                 }
+                                // Immediately flush pending announces (retransmissions)
+                                let pending = self.transport.pending_outbound(now);
+                                for ann_raw in pending {
+                                    let _ = iface.send(&ann_raw).await;
+                                }
                             }
-                            IngestResult::LocalData { dest_hash, payload } => {
+                            IngestResult::LocalData { dest_hash, payload, packet_hash } => {
                                 let decrypted = if dest_hash == self.dest_hash {
                                     let mut dec_buf = [0u8; MTU];
                                     match self.identity.decrypt(payload, &mut dec_buf) {
@@ -335,6 +357,12 @@ impl EmbassyNode {
                                 } else {
                                     payload.to_vec()
                                 };
+                                // Generate proof if strategy requires it
+                                if self.proof_strategy == ProofStrategy::ProveAll {
+                                    if let Some(proof) = Transport::<64, 16, 128>::build_proof_packet(&self.identity, &packet_hash) {
+                                        let _ = iface.send(&proof).await;
+                                    }
+                                }
                                 // Echo data back to sender if echo mode is on
                                 if self.echo_data {
                                     if let Some(peer) = self.last_peer {
@@ -353,10 +381,10 @@ impl EmbassyNode {
                                     payload: decrypted,
                                 });
                             }
-                            IngestResult::Forward { raw } => {
+                            IngestResult::Forward { raw, .. } => {
                                 let _ = iface.send(raw).await;
                             }
-                            IngestResult::Duplicate | IngestResult::Invalid => {}
+                            IngestResult::Duplicate | IngestResult::Invalid | IngestResult::LinkRequestReceived { .. } | IngestResult::LinkEstablished { .. } | IngestResult::LinkData { .. } | IngestResult::LinkClosed { .. } => {}
                         }
                     }
                     Err(_) => break,

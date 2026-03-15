@@ -28,6 +28,18 @@ pub trait ReteInterface {
     async fn recv<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a [u8], Self::Error>;
 }
 
+/// Proof generation strategy for incoming data packets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProofStrategy {
+    /// Never generate proofs automatically.
+    #[default]
+    ProveNone,
+    /// Automatically prove all received data packets.
+    ProveAll,
+    /// Only prove packets for specific destinations (application decides).
+    ProveApp,
+}
+
 /// Event emitted by a node's run loop.
 ///
 /// Used by both `rete-tokio` and `rete-embassy` runtime harnesses.
@@ -51,6 +63,30 @@ pub enum NodeEvent {
         dest_hash: [u8; TRUNCATED_HASH_LEN],
         /// Payload data (owned copy).
         payload: alloc::vec::Vec<u8>,
+    },
+    /// A proof was received for a packet we sent.
+    ProofReceived {
+        /// The full 32-byte packet hash the proof covers.
+        packet_hash: [u8; 32],
+    },
+    /// A link was established.
+    LinkEstablished {
+        /// The link_id (16 bytes).
+        link_id: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// Decrypted data received on an active link.
+    LinkData {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Decrypted payload data.
+        data: alloc::vec::Vec<u8>,
+        /// Context byte.
+        context: u8,
+    },
+    /// A link was closed.
+    LinkClosed {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
     },
     /// Periodic tick completed.
     Tick {

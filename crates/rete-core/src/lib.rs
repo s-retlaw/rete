@@ -28,10 +28,16 @@ pub mod error;
 pub mod hdlc;
 pub mod identity;
 pub mod packet;
+pub mod token;
 
 pub use error::Error;
 pub use identity::{destination_hash, expand_name, Identity};
-pub use packet::{DestType, HeaderType, Packet, PacketBuilder, PacketType};
+pub use packet::{
+    DestType, HeaderType, Packet, PacketBuilder, PacketType, CONTEXT_CHANNEL, CONTEXT_KEEPALIVE,
+    CONTEXT_LINKCLOSE, CONTEXT_LINKIDENTIFY, CONTEXT_LINKPROOF, CONTEXT_LRPROOF, CONTEXT_LRRTT,
+    CONTEXT_NONE,
+};
+pub use token::Token;
 
 // ---------------------------------------------------------------------------
 // Protocol constants — must match Python reference exactly

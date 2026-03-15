@@ -843,11 +843,14 @@ version = "0.1.0"
 dependencies = [
  "heapless",
  "hex",
+ "hkdf",
  "rand",
  "rand_core",
  "rete-core",
  "serde_json",
  "sha2",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

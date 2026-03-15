@@ -2,7 +2,7 @@
 
 use crate::announce::validate_announce;
 use crate::{announce::PendingAnnounce, dedup::DedupWindow, path::Path};
-use heapless::FnvIndexMap;
+use heapless::{FnvIndexMap, FnvIndexSet};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, NAME_HASH_LEN,
@@ -17,14 +17,25 @@ use sha2::{Digest, Sha256};
 /// Announce retransmission delay base (seconds).
 pub const PATHFINDER_G: u64 = 5;
 
-/// Maximum retransmission count.
+/// Maximum retransmission count per announce.
 pub const PATHFINDER_R: u8 = 1;
+
+/// Maximum hop count for announce retransmission.
+pub const PATHFINDER_M: u8 = 128;
 
 /// Path expiry time in seconds (7 days).
 pub const PATH_EXPIRES: u64 = 604800;
 
 /// Reverse table entry timeout in seconds (8 minutes).
 pub const REVERSE_TIMEOUT: u64 = 480;
+
+/// Destination hash for `rnstransport.path.request` (PLAIN, no identity).
+///
+/// Precomputed: `destination_hash("rnstransport.path.request", None)`.
+pub const PATH_REQUEST_DEST: [u8; TRUNCATED_HASH_LEN] = [
+    0x6b, 0x9f, 0x66, 0x01, 0x4d, 0x98, 0x53, 0xfa, 0xab, 0x22, 0x0f, 0xba, 0x47, 0xd0, 0x27,
+    0x61,
+];
 
 // ---------------------------------------------------------------------------
 // ReverseEntry — tracks forwarded packets for reply routing
@@ -37,6 +48,10 @@ pub const REVERSE_TIMEOUT: u64 = 480;
 pub struct ReverseEntry {
     /// Monotonic timestamp when this entry was created.
     pub timestamp: u64,
+    /// Interface index the original packet was received on.
+    pub received_on: u8,
+    /// Interface index the packet was forwarded to (0 for broadcast).
+    pub forwarded_to: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +67,8 @@ pub enum IngestResult<'a> {
         dest_hash: [u8; TRUNCATED_HASH_LEN],
         /// Payload data.
         payload: &'a [u8],
+        /// Full 32-byte packet hash (for proof generation).
+        packet_hash: [u8; 32],
     },
     /// A valid announce was received and its path has been learned.
     AnnounceReceived {
@@ -68,6 +85,34 @@ pub enum IngestResult<'a> {
     Forward {
         /// Raw packet bytes (with hops incremented).
         raw: &'a [u8],
+        /// Interface index the packet was received on (for exclusion).
+        source_iface: u8,
+    },
+    /// A LINKREQUEST was received for one of our destinations.
+    LinkRequestReceived {
+        /// The computed link_id (16 bytes).
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The LRPROOF response to send back (raw packet bytes).
+        proof_raw: &'a [u8],
+    },
+    /// A link handshake completed (LRRTT processed).
+    LinkEstablished {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// Decrypted data received on an active link.
+    LinkData {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Decrypted payload data.
+        data: &'a [u8],
+        /// The context byte from the packet.
+        context: u8,
+    },
+    /// A link was closed (teardown or timeout).
+    LinkClosed {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
     },
     /// Packet was a duplicate and should be dropped.
     Duplicate,
@@ -107,6 +152,8 @@ pub struct Transport<const MAX_PATHS: usize, const MAX_ANNOUNCES: usize, const D
     reverse_table: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ReverseEntry, MAX_PATHS>,
     /// Dedup window for announce random_hashes (replay detection).
     announce_dedup: DedupWindow<DEDUP_WINDOW>,
+    /// Destination hashes registered as local (self-announce filtering).
+    local_destinations: FnvIndexSet<[u8; TRUNCATED_HASH_LEN], 8>,
 }
 
 impl<const P: usize, const A: usize, const D: usize> Default for Transport<P, A, D> {
@@ -126,7 +173,20 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
             local_identity_hash: None,
             reverse_table: FnvIndexMap::new(),
             announce_dedup: DedupWindow::new(),
+            local_destinations: FnvIndexSet::new(),
         }
+    }
+
+    /// Register a destination hash as belonging to this node.
+    ///
+    /// Announces for local destinations will be filtered (self-announce).
+    pub fn add_local_destination(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN]) {
+        let _ = self.local_destinations.insert(dest_hash);
+    }
+
+    /// Check whether a destination hash is registered as local.
+    pub fn is_local_destination(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+        self.local_destinations.contains(dest_hash)
     }
 
     /// Look up a learned path to `dest`.
@@ -213,14 +273,22 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
     // Packet ingestion
     // -----------------------------------------------------------------------
 
-    /// Process an inbound raw packet.
+    /// Process an inbound raw packet (single-interface convenience wrapper).
+    ///
+    /// Equivalent to `ingest_on(raw, now, 0)`.
+    pub fn ingest<'a>(&mut self, raw: &'a mut [u8], now: u64) -> IngestResult<'a> {
+        self.ingest_on(raw, now, 0)
+    }
+
+    /// Process an inbound raw packet received on interface `iface`.
     ///
     /// Parses the packet, checks for duplicates, and dispatches by type:
-    /// - **ANNOUNCE**: validate signature + dest hash, learn path
-    /// - **DATA**: return for local delivery or forward via HEADER_2
+    /// - **ANNOUNCE**: validate signature + dest hash, learn path, queue retransmission
+    /// - **DATA**: return for local delivery, handle path requests, or forward
+    /// - **PROOF**: route via reverse table or forward
     ///
     /// `now` is the current monotonic time in seconds.
-    pub fn ingest<'a>(&mut self, raw: &'a mut [u8], now: u64) -> IngestResult<'a> {
+    pub fn ingest_on<'a>(&mut self, raw: &'a mut [u8], now: u64, iface: u8) -> IngestResult<'a> {
         let len = raw.len();
 
         // Parse
@@ -259,7 +327,7 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
                         trunc_hash.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
                         let _ = self
                             .reverse_table
-                            .insert(trunc_hash, ReverseEntry { timestamp: now });
+                            .insert(trunc_hash, ReverseEntry { timestamp: now, received_on: iface, forwarded_to: 0 });
 
                         // Look up path to destination
                         return match self.paths.get(&dest) {
@@ -268,7 +336,7 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
                                 if let Some(via) = path.via {
                                     raw[2..18].copy_from_slice(&via);
                                 }
-                                IngestResult::Forward { raw: &raw[..len] }
+                                IngestResult::Forward { raw: &raw[..len], source_iface: iface }
                             }
                             Some(path) if path.hops <= 1 => {
                                 // Last hop: convert HEADER_2 → HEADER_1
@@ -280,6 +348,7 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
                                 raw.copy_within(18..len, 2);
                                 IngestResult::Forward {
                                     raw: &raw[..len - TRUNCATED_HASH_LEN],
+                                    source_iface: iface,
                                 }
                             }
                             _ => {
@@ -308,15 +377,33 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
             PacketType::Data => {
                 let mut dh = [0u8; TRUNCATED_HASH_LEN];
                 dh.copy_from_slice(pkt.destination_hash);
+                // Path request handling: transport nodes respond with cached announces
+                if self.local_identity_hash.is_some() && dh == PATH_REQUEST_DEST {
+                    return self.handle_path_request(pkt.payload, now);
+                }
                 IngestResult::LocalData {
                     dest_hash: dh,
                     payload: pkt.payload,
+                    packet_hash: pkt_hash,
                 }
             }
-            _ => {
-                // LinkRequest, Proof — treat as forward for now
-                IngestResult::Forward { raw }
+            PacketType::Proof => {
+                if self.local_identity_hash.is_some() {
+                    // Route proof via reverse table (one-shot: consume entry).
+                    // The proof goes to all interfaces except where it arrived,
+                    // which includes the interface the original DATA came from.
+                    let mut dh = [0u8; TRUNCATED_HASH_LEN];
+                    dh.copy_from_slice(pkt.destination_hash);
+                    if self.reverse_table.remove(&dh).is_some() {
+                        IngestResult::Forward { raw, source_iface: iface }
+                    } else {
+                        IngestResult::Invalid
+                    }
+                } else {
+                    IngestResult::Forward { raw, source_iface: iface }
+                }
             }
+            PacketType::LinkRequest => IngestResult::Forward { raw, source_iface: iface },
         }
     }
 
@@ -326,6 +413,13 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
         raw: &'a [u8],
         now: u64,
     ) -> IngestResult<'a> {
+        // Self-announce filtering: drop announces for our own destinations
+        let mut dh_check = [0u8; TRUNCATED_HASH_LEN];
+        dh_check.copy_from_slice(pkt.destination_hash);
+        if self.is_local_destination(&dh_check) {
+            return IngestResult::Duplicate;
+        }
+
         match validate_announce(pkt.destination_hash, pkt.payload) {
             Ok(info) => {
                 // Announce replay detection: check dest_hash + random_hash combo
@@ -351,7 +445,7 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
                 };
 
                 if should_update {
-                    let path = match pkt.transport_id {
+                    let mut path = match pkt.transport_id {
                         Some(tid) => {
                             let mut via = [0u8; TRUNCATED_HASH_LEN];
                             via.copy_from_slice(tid);
@@ -362,6 +456,8 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
                             ..Path::direct(now)
                         },
                     };
+                    // Cache announce raw bytes for path request responses
+                    path.announce_raw = Some(raw.to_vec());
                     let _ = self.insert_path(dh, path);
                 }
 
@@ -370,10 +466,45 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
                 pk.copy_from_slice(info.pub_key);
                 let _ = self.known_identities.insert(dh, pk);
 
-                // Queue for retransmission if hops < threshold
-                if pkt.hops <= PATHFINDER_R {
-                    let mut ann_raw = heapless::Vec::new();
-                    if ann_raw.extend_from_slice(raw).is_ok() {
+                // Queue for retransmission if hops within max range
+                if pkt.hops < PATHFINDER_M {
+                    // When transport mode is on, rebuild as HEADER_2 with our
+                    // transport_id so downstream nodes learn the relay path.
+                    let retransmit_raw = if let Some(local_id) = self.local_identity_hash {
+                        let mut rebuild_buf = [0u8; rete_core::MTU];
+                        let result = PacketBuilder::new(&mut rebuild_buf)
+                            .header_type(HeaderType::Header2)
+                            .transport_type(1)
+                            .packet_type(pkt.packet_type)
+                            .dest_type(pkt.dest_type)
+                            .hops(pkt.hops)
+                            .transport_id(&local_id)
+                            .destination_hash(pkt.destination_hash)
+                            .context(pkt.context)
+                            .payload(pkt.payload)
+                            .build();
+                        match result {
+                            Ok(n) => {
+                                let mut v = heapless::Vec::new();
+                                let _ = v.extend_from_slice(&rebuild_buf[..n]);
+                                Some(v)
+                            }
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    let ann_raw = match retransmit_raw {
+                        Some(v) => v,
+                        None => {
+                            let mut v = heapless::Vec::new();
+                            let _ = v.extend_from_slice(raw);
+                            v
+                        }
+                    };
+
+                    if !ann_raw.is_empty() {
                         let pending = PendingAnnounce {
                             dest_hash: dh,
                             raw: ann_raw,
@@ -394,6 +525,70 @@ impl<const P: usize, const A: usize, const D: usize> Transport<P, A, D> {
             }
             Err(_) => IngestResult::Invalid,
         }
+    }
+
+    /// Handle a path request: if we have a cached announce for the requested
+    /// destination, queue it for immediate retransmission.
+    fn handle_path_request<'a>(&mut self, payload: &[u8], _now: u64) -> IngestResult<'a> {
+        if payload.len() < TRUNCATED_HASH_LEN {
+            return IngestResult::Invalid;
+        }
+        let mut requested = [0u8; TRUNCATED_HASH_LEN];
+        requested.copy_from_slice(&payload[..TRUNCATED_HASH_LEN]);
+
+        if let Some(path) = self.paths.get(&requested) {
+            if let Some(ref cached) = path.announce_raw {
+                let mut raw = heapless::Vec::new();
+                if raw.extend_from_slice(cached).is_ok() {
+                    let pending = PendingAnnounce {
+                        dest_hash: requested,
+                        raw,
+                        tx_count: 0,
+                        last_tx_at: 0,
+                        local: true, // immediate send
+                    };
+                    let _ = self.queue_announce(pending);
+                }
+            }
+        }
+
+        // Consumed — no further processing needed
+        IngestResult::Duplicate
+    }
+
+    // -----------------------------------------------------------------------
+    // Proof packet construction
+    // -----------------------------------------------------------------------
+
+    /// Build a PROOF packet for a received data packet.
+    ///
+    /// The proof payload is `packet_hash[32] || signature[64]` (explicit proof).
+    /// Destination hash of the PROOF is `packet_hash[0:16]`.
+    ///
+    /// This is a static method — runtime-agnostic, usable from both TokioNode
+    /// and EmbassyNode.
+    pub fn build_proof_packet(
+        identity: &Identity,
+        packet_hash: &[u8; 32],
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let signature = identity.sign(packet_hash).ok()?;
+        let mut payload = [0u8; 96];
+        payload[..32].copy_from_slice(packet_hash);
+        payload[32..96].copy_from_slice(&signature);
+
+        let trunc: [u8; TRUNCATED_HASH_LEN] =
+            packet_hash[..TRUNCATED_HASH_LEN].try_into().ok()?;
+
+        let mut buf = [0u8; rete_core::MTU];
+        let n = PacketBuilder::new(&mut buf)
+            .packet_type(PacketType::Proof)
+            .dest_type(DestType::Single)
+            .destination_hash(&trunc)
+            .context(0x00)
+            .payload(&payload)
+            .build()
+            .ok()?;
+        Some(buf[..n].to_vec())
     }
 
     // -----------------------------------------------------------------------

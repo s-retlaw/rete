@@ -44,6 +44,27 @@ use crate::{Error, HEADER_1_OVERHEAD, HEADER_2_OVERHEAD, MTU, TRUNCATED_HASH_LEN
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
+// Context byte constants (from Python RNS)
+// ---------------------------------------------------------------------------
+
+/// Normal data — no special context.
+pub const CONTEXT_NONE: u8 = 0x00;
+/// Channel message envelope.
+pub const CONTEXT_CHANNEL: u8 = 0x0E;
+/// Link keepalive request/response.
+pub const CONTEXT_KEEPALIVE: u8 = 0xFA;
+/// Link identification during handshake.
+pub const CONTEXT_LINKIDENTIFY: u8 = 0xFB;
+/// Link close request.
+pub const CONTEXT_LINKCLOSE: u8 = 0xFC;
+/// Link proof (responder → initiator).
+pub const CONTEXT_LINKPROOF: u8 = 0xFD;
+/// Link RTT measurement (initiator → responder).
+pub const CONTEXT_LRRTT: u8 = 0xFE;
+/// Link request proof (part of handshake).
+pub const CONTEXT_LRPROOF: u8 = 0xFF;
+
+// ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------
 
@@ -242,12 +263,16 @@ impl<'a> Packet<'a> {
     /// `packet_hash = SHA-256(hashable_part)` — full 32 bytes, NOT truncated.
     ///
     /// Invariant to hop count and transport changes.
+    /// Uses incremental hashing to avoid a 500-byte stack buffer.
     pub fn compute_hash(&self) -> [u8; 32] {
-        let mut buf = [0u8; MTU]; // hashable_part is always ≤ MTU - 1 bytes
-        let n = self
-            .write_hashable_part(&mut buf)
-            .expect("MTU-sized buffer is always sufficient");
-        Sha256::digest(&buf[..n]).into()
+        let mut hasher = Sha256::new();
+        hasher.update([self.flags & 0x0F]);
+        let tail = match self.header_type {
+            HeaderType::Header1 => &self.raw[2..],
+            HeaderType::Header2 => &self.raw[2 + TRUNCATED_HASH_LEN..],
+        };
+        hasher.update(tail);
+        hasher.finalize().into()
     }
 }
 

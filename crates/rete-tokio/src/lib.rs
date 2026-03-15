@@ -7,6 +7,7 @@ use rete_core::{
     DestType, HeaderType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
 };
 pub use rete_stack::NodeEvent;
+pub use rete_stack::ProofStrategy;
 use rete_stack::ReteInterface;
 use rete_transport::{
     HostedTransport, IngestResult, Transport, ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS,
@@ -36,6 +37,8 @@ pub struct TokioNode {
     last_peer: Option<[u8; TRUNCATED_HASH_LEN]>,
     /// Initial data to send right after the first announce (to a pre-registered peer).
     initial_send: Option<(Vec<u8>, [u8; TRUNCATED_HASH_LEN])>,
+    /// Proof generation strategy for incoming data packets.
+    proof_strategy: ProofStrategy,
 }
 
 impl TokioNode {
@@ -47,9 +50,12 @@ impl TokioNode {
         let id_hash = identity.hash();
         let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
 
+        let mut transport = Transport::new();
+        transport.add_local_destination(dest_hash);
+
         TokioNode {
             identity,
-            transport: Transport::new(),
+            transport,
             app_name: app_name.to_string(),
             aspects: aspects.iter().map(|s| s.to_string()).collect(),
             dest_hash,
@@ -57,7 +63,13 @@ impl TokioNode {
             echo_data: false,
             last_peer: None,
             initial_send: None,
+            proof_strategy: ProofStrategy::ProveNone,
         }
+    }
+
+    /// Enable transport mode: forward HEADER_2 packets for other nodes.
+    pub fn enable_transport(&mut self) {
+        self.transport.set_local_identity(self.identity.hash());
     }
 
     /// Returns our destination hash.
@@ -73,6 +85,11 @@ impl TokioNode {
     /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
     pub fn set_echo_data(&mut self, echo: bool) {
         self.echo_data = echo;
+    }
+
+    /// Set the proof generation strategy for incoming data packets.
+    pub fn set_proof_strategy(&mut self, strategy: ProofStrategy) {
+        self.proof_strategy = strategy;
     }
 
     /// Queue a data message to send immediately after the initial announce.
@@ -232,8 +249,13 @@ impl TokioNode {
                                             }
                                         }
                                     }
+                                    // Immediately flush pending announces (retransmissions)
+                                    let pending = self.transport.pending_outbound(now);
+                                    for ann_raw in pending {
+                                        let _ = iface.send(&ann_raw).await;
+                                    }
                                 }
-                                IngestResult::LocalData { dest_hash, payload } => {
+                                IngestResult::LocalData { dest_hash, payload, packet_hash } => {
                                     let decrypted = if dest_hash == self.dest_hash {
                                         let mut dec_buf = [0u8; MTU];
                                         match self.identity.decrypt(payload, &mut dec_buf) {
@@ -243,6 +265,12 @@ impl TokioNode {
                                     } else {
                                         payload.to_vec()
                                     };
+                                    // Generate proof if strategy requires it
+                                    if self.proof_strategy == ProofStrategy::ProveAll {
+                                        if let Some(proof) = Transport::<1024, 256, 4096>::build_proof_packet(&self.identity, &packet_hash) {
+                                            let _ = iface.send(&proof).await;
+                                        }
+                                    }
                                     // Echo data back to sender if echo mode is on
                                     if self.echo_data {
                                         if let Some(peer) = self.last_peer {
@@ -259,11 +287,11 @@ impl TokioNode {
                                         payload: decrypted,
                                     });
                                 }
-                                IngestResult::Forward { raw } => {
+                                IngestResult::Forward { raw, .. } => {
                                     // Forward to all interfaces (we only have one for now)
                                     let _ = iface.send(raw).await;
                                 }
-                                IngestResult::Duplicate | IngestResult::Invalid => {
+                                IngestResult::Duplicate | IngestResult::Invalid | IngestResult::LinkRequestReceived { .. } | IngestResult::LinkEstablished { .. } | IngestResult::LinkData { .. } | IngestResult::LinkClosed { .. } => {
                                     // Silently drop
                                 }
                             }
@@ -298,6 +326,209 @@ impl TokioNode {
             }
         }
     }
+}
+
+/// Message from an interface recv task to the main loop.
+pub struct InboundMsg {
+    /// Interface index this packet was received on.
+    pub iface_idx: u8,
+    /// Raw packet data.
+    pub data: Vec<u8>,
+}
+
+impl TokioNode {
+    /// Run the main event loop with multiple interfaces.
+    ///
+    /// Each interface is wrapped in a spawned recv task feeding into a shared
+    /// inbound channel. Outbound is dispatched to all interfaces except the source.
+    ///
+    /// `senders` and `receivers` are parallel vecs — one per interface.
+    /// Each sender is used by the main loop to send outbound packets.
+    /// Each receiver is a spawned task feeding into `inbound_tx`.
+    pub async fn run_multi<F>(
+        &mut self,
+        iface_senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>>,
+        mut inbound_rx: tokio::sync::mpsc::Receiver<InboundMsg>,
+        mut on_event: F,
+    ) where
+        F: FnMut(NodeEvent),
+    {
+        // Send initial announce to all interfaces
+        let announce = self.build_announce(None);
+        for tx in &iface_senders {
+            let _ = tx.send(announce.clone()).await;
+        }
+        eprintln!("[rete] sent announce on {} interfaces", iface_senders.len());
+
+        // Send initial data to pre-registered peer (if configured)
+        if let Some((data, dest)) = self.initial_send.take() {
+            if let Some(pkt) = self.build_data_packet(&dest, &data) {
+                for tx in &iface_senders {
+                    let _ = tx.send(pkt.clone()).await;
+                }
+            }
+        }
+
+        let mut announce_timer =
+            tokio::time::interval(std::time::Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
+        let mut tick_timer =
+            tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
+        announce_timer.tick().await;
+        tick_timer.tick().await;
+
+        loop {
+            tokio::select! {
+                msg = inbound_rx.recv() => {
+                    let Some(msg) = msg else { break };
+                    let len = msg.data.len();
+                    let mut pkt_buf = [0u8; MTU];
+                    if len > MTU { continue; }
+                    pkt_buf[..len].copy_from_slice(&msg.data);
+                    let now = current_time_secs();
+                    match self.transport.ingest_on(&mut pkt_buf[..len], now, msg.iface_idx) {
+                        IngestResult::AnnounceReceived { dest_hash, identity_hash, hops, app_data } => {
+                            self.last_peer = Some(dest_hash);
+                            on_event(NodeEvent::AnnounceReceived {
+                                dest_hash,
+                                identity_hash,
+                                hops,
+                                app_data: app_data.map(|d| d.to_vec()),
+                            });
+                            if let Some(ref reply_msg) = self.auto_reply {
+                                if let Some(pkt) = self.build_data_packet(&dest_hash, reply_msg) {
+                                    if let Some(tx) = iface_senders.get(msg.iface_idx as usize) {
+                                        let _ = tx.send(pkt).await;
+                                    }
+                                }
+                            }
+                            // Immediately flush pending announces to all interfaces
+                            let pending = self.transport.pending_outbound(now);
+                            for ann_raw in pending {
+                                let v: Vec<u8> = ann_raw.iter().copied().collect();
+                                for tx in &iface_senders {
+                                    let _ = tx.send(v.clone()).await;
+                                }
+                            }
+                        }
+                        IngestResult::LocalData { dest_hash, payload, packet_hash } => {
+                            let decrypted = if dest_hash == self.dest_hash {
+                                let mut dec_buf = [0u8; MTU];
+                                match self.identity.decrypt(payload, &mut dec_buf) {
+                                    Ok(n) => dec_buf[..n].to_vec(),
+                                    Err(_) => payload.to_vec(),
+                                }
+                            } else {
+                                payload.to_vec()
+                            };
+                            // Generate proof if strategy requires it
+                            if self.proof_strategy == ProofStrategy::ProveAll {
+                                if let Some(proof) = Transport::<1024, 256, 4096>::build_proof_packet(&self.identity, &packet_hash) {
+                                    if let Some(tx) = iface_senders.get(msg.iface_idx as usize) {
+                                        let _ = tx.send(proof).await;
+                                    }
+                                }
+                            }
+                            if self.echo_data {
+                                if let Some(peer) = self.last_peer {
+                                    let mut echo = Vec::with_capacity(5 + decrypted.len());
+                                    echo.extend_from_slice(b"echo:");
+                                    echo.extend_from_slice(&decrypted);
+                                    if let Some(pkt) = self.build_data_packet(&peer, &echo) {
+                                        if let Some(tx) = iface_senders.get(msg.iface_idx as usize) {
+                                            let _ = tx.send(pkt).await;
+                                        }
+                                    }
+                                }
+                            }
+                            on_event(NodeEvent::DataReceived {
+                                dest_hash,
+                                payload: decrypted,
+                            });
+                        }
+                        IngestResult::Forward { raw, source_iface } => {
+                            let fwd = raw.to_vec();
+                            for (i, tx) in iface_senders.iter().enumerate() {
+                                if i as u8 != source_iface {
+                                    let _ = tx.send(fwd.clone()).await;
+                                }
+                            }
+                        }
+                        IngestResult::Duplicate | IngestResult::Invalid | IngestResult::LinkRequestReceived { .. } | IngestResult::LinkEstablished { .. } | IngestResult::LinkData { .. } | IngestResult::LinkClosed { .. } => {}
+                    }
+                }
+                _ = announce_timer.tick() => {
+                    let announce = self.build_announce(None);
+                    for tx in &iface_senders {
+                        let _ = tx.send(announce.clone()).await;
+                    }
+                }
+                _ = tick_timer.tick() => {
+                    let now = current_time_secs();
+                    let result = self.transport.tick(now);
+                    on_event(NodeEvent::Tick {
+                        expired_paths: result.expired_paths,
+                    });
+                    let pending = self.transport.pending_outbound(now);
+                    for ann_raw in pending {
+                        let v: Vec<u8> = ann_raw.iter().copied().collect();
+                        for tx in &iface_senders {
+                            let _ = tx.send(v.clone()).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Create channels for an interface and return its driver future.
+///
+/// Returns `(outbound_sender, driver_future)`. The caller must spawn or
+/// poll the driver future (e.g. via `tokio::spawn` when the concrete type
+/// is known to be `Send`).
+///
+/// - `inbound_tx`: feed received packets into the shared inbound channel
+/// - `iface_idx`: index of this interface (for source tracking)
+pub fn interface_task<I>(
+    mut iface: I,
+    iface_idx: u8,
+    inbound_tx: tokio::sync::mpsc::Sender<InboundMsg>,
+) -> (
+    tokio::sync::mpsc::Sender<Vec<u8>>,
+    impl std::future::Future<Output = ()>,
+)
+where
+    I: ReteInterface,
+{
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
+    let driver = async move {
+        let mut recv_buf = [0u8; MTU];
+        loop {
+            tokio::select! {
+                result = iface.recv(&mut recv_buf) => {
+                    match result {
+                        Ok(data) => {
+                            let msg = InboundMsg {
+                                iface_idx,
+                                data: data.to_vec(),
+                            };
+                            if inbound_tx.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                pkt = outbound_rx.recv() => {
+                    let Some(pkt) = pkt else { break };
+                    let _ = iface.send(&pkt).await;
+                }
+            }
+        }
+    };
+
+    (outbound_tx, driver)
 }
 
 /// Get current time as seconds since UNIX epoch.

@@ -45,11 +45,9 @@
 //!   plaintext  = PKCS7_unpad(AES-256-CBC-decrypt(enc_key, iv, aes_body))
 //! ```
 
+use crate::token::{Token, TOKEN_OVERHEAD};
 use crate::{Error, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
-
-/// Token overhead: IV (16 bytes) + HMAC-SHA256 (32 bytes).
-const TOKEN_OVERHEAD: usize = 48;
 
 /// An RNS identity — combined X25519 (ECDH) and Ed25519 (signing) keypair.
 #[derive(Debug, PartialEq, Eq)]
@@ -199,14 +197,10 @@ impl Identity {
     where
         R: rand_core::RngCore + rand_core::CryptoRng,
     {
-        use aes::cipher::{generic_array::GenericArray, BlockEncryptMut, KeyIvInit};
-        use aes::Aes256;
-        use hmac::{Hmac, Mac};
-
-        // Compute padded AES body size and total output size
+        // Compute total output size: ephemeral_pub(32) + token(iv + aes_body + hmac)
         let pad_len = 16 - (plaintext.len() % 16);
         let padded_len = plaintext.len() + pad_len;
-        let total_len = 32 + TOKEN_OVERHEAD + padded_len; // ephemeral_pub + iv + aes_body + hmac
+        let total_len = 32 + TOKEN_OVERHEAD + padded_len;
         if out.len() < total_len {
             return Err(Error::BufferTooSmall);
         }
@@ -226,42 +220,14 @@ impl Identity {
         hk.expand(b"", &mut derived)
             .map_err(|_| Error::CryptoError)?;
 
-        let signing_key = &derived[0..32];
-        let encryption_key = &derived[32..64];
-
-        // 4. Generate random IV
-        let mut iv = [0u8; 16];
-        rng.fill_bytes(&mut iv);
-
-        // 5. Write ephemeral pub key
+        // 4. Write ephemeral pub key
         out[..32].copy_from_slice(ephemeral_pub.as_bytes());
 
-        // 6. Write IV
-        out[32..48].copy_from_slice(&iv);
+        // 5. Delegate to Token for symmetric encryption
+        let token = Token::new(&derived)?;
+        let token_len = token.encrypt(plaintext, rng, &mut out[32..])?;
 
-        // 7. PKCS7-pad plaintext into output buffer
-        out[48..48 + plaintext.len()].copy_from_slice(plaintext);
-        for b in &mut out[48 + plaintext.len()..48 + padded_len] {
-            *b = pad_len as u8;
-        }
-
-        // 8. AES-256-CBC encrypt in-place
-        let mut enc = cbc::Encryptor::<Aes256>::new(
-            GenericArray::from_slice(encryption_key),
-            GenericArray::from_slice(&iv),
-        );
-        for chunk in out[48..48 + padded_len].chunks_exact_mut(16) {
-            enc.encrypt_block_mut(GenericArray::from_mut_slice(chunk));
-        }
-
-        // 9. HMAC-SHA256(signing_key, iv || aes_body)
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(signing_key).map_err(|_| Error::CryptoError)?;
-        mac.update(&out[32..48 + padded_len]);
-        let hmac_result = mac.finalize().into_bytes();
-        out[48 + padded_len..total_len].copy_from_slice(&hmac_result);
-
-        Ok(total_len)
+        Ok(32 + token_len)
     }
 
     /// Decrypt `ciphertext` using this identity's X25519 private key.
@@ -271,17 +237,13 @@ impl Identity {
     /// # Errors
     /// [`Error::BufferTooSmall`], [`Error::CryptoError`], [`Error::InvalidPadding`]
     pub fn decrypt(&self, ciphertext: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-        use aes::cipher::{generic_array::GenericArray, BlockDecryptMut, KeyIvInit};
-        use aes::Aes256;
-        use hmac::{Hmac, Mac};
-
         // Minimum: ephemeral_pub(32) + iv(16) + 1_block(16) + hmac(32) = 96
         if ciphertext.len() < 96 {
             return Err(Error::CryptoError);
         }
 
         let ephemeral_pub_bytes = &ciphertext[0..32];
-        let token = &ciphertext[32..];
+        let token_bytes = &ciphertext[32..];
 
         // 1. ECDH
         let ephemeral_pub =
@@ -296,58 +258,10 @@ impl Identity {
         hk.expand(b"", &mut derived)
             .map_err(|_| Error::CryptoError)?;
 
-        let signing_key = &derived[0..32];
-        let encryption_key = &derived[32..64];
-
-        // 3. Verify HMAC
-        let hmac_offset = token.len() - 32;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(signing_key).map_err(|_| Error::CryptoError)?;
-        mac.update(&token[..hmac_offset]);
-        mac.verify_slice(&token[hmac_offset..])
-            .map_err(|_| Error::CryptoError)?;
-
-        // 4. Extract IV and AES body
-        let iv = &token[0..16];
-        let aes_body = &token[16..hmac_offset];
-        if aes_body.is_empty() || !aes_body.len().is_multiple_of(16) {
-            return Err(Error::CryptoError);
-        }
-        if out.len() < aes_body.len() {
-            return Err(Error::BufferTooSmall);
-        }
-
-        // 5. Copy ciphertext to output buffer and decrypt in-place
-        out[..aes_body.len()].copy_from_slice(aes_body);
-        let mut dec = cbc::Decryptor::<Aes256>::new(
-            GenericArray::from_slice(encryption_key),
-            GenericArray::from_slice(iv),
-        );
-        for chunk in out[..aes_body.len()].chunks_exact_mut(16) {
-            dec.decrypt_block_mut(GenericArray::from_mut_slice(chunk));
-        }
-
-        // 6. PKCS7 unpad
-        pkcs7_unpad(&out[..aes_body.len()])
+        // 3. Delegate to Token for symmetric decryption
+        let token = Token::new(&derived)?;
+        token.decrypt(token_bytes, out)
     }
-}
-
-/// Validate and strip PKCS#7 padding, returning the unpadded data length.
-fn pkcs7_unpad(data: &[u8]) -> Result<usize, Error> {
-    if data.is_empty() {
-        return Err(Error::InvalidPadding);
-    }
-    let pad_byte = data[data.len() - 1];
-    let pad_len = pad_byte as usize;
-    if pad_byte == 0 || pad_len > 16 || pad_len > data.len() {
-        return Err(Error::InvalidPadding);
-    }
-    for &b in &data[data.len() - pad_len..] {
-        if b != pad_byte {
-            return Err(Error::InvalidPadding);
-        }
-    }
-    Ok(data.len() - pad_len)
 }
 
 // ---------------------------------------------------------------------------

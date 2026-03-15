@@ -10,7 +10,7 @@
 use rete_core::Identity;
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
-use rete_tokio::{NodeEvent, TokioNode};
+use rete_tokio::{interface_task, InboundMsg, NodeEvent, TokioNode};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,11 +23,12 @@ const ASPECTS: &[&str] = &["example", "v1"];
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Parse --connect <addr>
-    let addr = args
+    // Parse --connect <addr> (can be repeated for multi-interface)
+    let addrs: Vec<&str> = args
         .windows(2)
-        .find(|w| w[0] == "--connect")
-        .map(|w| w[1].as_str());
+        .filter(|w| w[0] == "--connect")
+        .map(|w| w[1].as_str())
+        .collect();
 
     // Parse --serial <path>
     let serial_path = args
@@ -63,6 +64,9 @@ async fn main() {
         .find(|w| w[0] == "--peer-seed")
         .map(|w| w[1].clone());
 
+    // --transport: enable transport mode (relay HEADER_2 packets)
+    let transport_mode = args.iter().any(|a| a == "--transport");
+
     // Create or derive identity
     let identity = if let Some(seed_str) = seed {
         Identity::from_seed(seed_str.as_bytes()).expect("invalid derived key")
@@ -78,6 +82,10 @@ async fn main() {
 
     // Create node
     let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
+    if transport_mode {
+        node.enable_transport();
+        eprintln!("[rete] transport mode enabled");
+    }
 
     // Pre-register peer identity (so we can send DATA without waiting for announce)
     if let Some(ref ps) = peer_seed {
@@ -126,8 +134,31 @@ async fn main() {
         };
         eprintln!("[rete] serial port open");
         node.run(&mut iface, on_event).await;
+    } else if addrs.len() > 1 {
+        // Multi-interface mode: connect to multiple TCP endpoints
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<InboundMsg>(256);
+        let mut senders = Vec::new();
+
+        for (idx, addr) in addrs.iter().enumerate() {
+            eprintln!("[rete] connecting to {} (iface {}) ...", addr, idx);
+            let iface = match TcpInterface::connect(addr).await {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("[rete] failed to connect to {}: {e}", addr);
+                    std::process::exit(1);
+                }
+            };
+            eprintln!("[rete] connected to {} (iface {})", addr, idx);
+            let (tx, driver) = interface_task(iface, idx as u8, inbound_tx.clone());
+            senders.push(tx);
+            tokio::spawn(driver);
+        }
+        // Drop the original inbound_tx so the channel closes when all tasks exit
+        drop(inbound_tx);
+
+        node.run_multi(senders, inbound_rx, on_event).await;
     } else {
-        let addr = addr.unwrap_or(DEFAULT_ADDR);
+        let addr = addrs.first().copied().unwrap_or(DEFAULT_ADDR);
         eprintln!("[rete] connecting to {} ...", addr);
         let mut iface = match TcpInterface::connect(addr).await {
             Ok(i) => i,
@@ -187,6 +218,37 @@ fn on_event(event: NodeEvent) {
                     println!("DATA:{}:{}", hex::encode(dest_hash), hex::encode(&payload));
                 }
             }
+        }
+        NodeEvent::ProofReceived { packet_hash } => {
+            eprintln!(
+                "[rete] PROOF received for packet {}",
+                hex::encode(packet_hash),
+            );
+            println!("PROOF_RECEIVED:{}", hex::encode(packet_hash));
+        }
+        NodeEvent::LinkEstablished { link_id } => {
+            eprintln!("[rete] LINK established: {}", hex::encode(link_id));
+            println!("LINK_ESTABLISHED:{}", hex::encode(link_id));
+        }
+        NodeEvent::LinkData {
+            link_id,
+            data,
+            context,
+        } => {
+            eprintln!(
+                "[rete] LINK_DATA link={} ctx={:#04x} len={}",
+                hex::encode(link_id),
+                context,
+                data.len(),
+            );
+            match std::str::from_utf8(&data) {
+                Ok(text) => println!("LINK_DATA:{}:{}", hex::encode(link_id), text),
+                Err(_) => println!("LINK_DATA:{}:{}", hex::encode(link_id), hex::encode(&data)),
+            }
+        }
+        NodeEvent::LinkClosed { link_id } => {
+            eprintln!("[rete] LINK closed: {}", hex::encode(link_id));
+            println!("LINK_CLOSED:{}", hex::encode(link_id));
         }
         NodeEvent::Tick { expired_paths } => {
             if expired_paths > 0 {

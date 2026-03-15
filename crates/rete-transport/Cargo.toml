@@ -9,10 +9,13 @@ keywords.workspace   = true
 categories.workspace = true
 
 [dependencies]
-rete-core = { workspace = true }
-heapless  = { workspace = true }
-sha2      = { workspace = true }
-rand_core = { workspace = true }
+rete-core     = { workspace = true }
+heapless      = { workspace = true }
+sha2          = { workspace = true }
+rand_core     = { workspace = true }
+x25519-dalek  = { workspace = true }
+hkdf          = { workspace = true }
+zeroize       = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
