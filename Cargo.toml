@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rete-core",
+    "crates/rete-transport",
+    "crates/rete-stack",
+    "crates/rete-embassy",
+    "crates/rete-tokio",
+    "crates/rete-iface-kiss",
+    "crates/rete-iface-serial",
+    "crates/rete-iface-tcp",
+    "examples/linux",
+]
+
+# Hardware examples require target-specific toolchains — build explicitly:
+#   cargo build -p rete-example-esp32s3 --target xtensa-esp32s3-none-elf
+#   cargo build -p rete-example-rp2040  --target thumbv6m-none-eabi
+#   cd examples/esp32c6 && cargo build --release --features esp32c6
+exclude = [
+    "examples/esp32s3",
+    "examples/esp32c6",
+    "examples/rp2040",
+]
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/your-org/rete"
+description = "no_std Reticulum Network Stack (RNS) for embedded and hosted targets"
+keywords    = ["reticulum", "rns", "lora", "mesh", "no-std"]
+categories  = ["network-programming", "embedded", "no-std"]
+
+[workspace.dependencies]
+# Internal crates
+rete-core         = { path = "crates/rete-core" }
+rete-transport    = { path = "crates/rete-transport" }
+rete-stack        = { path = "crates/rete-stack" }
+rete-embassy      = { path = "crates/rete-embassy" }
+rete-tokio        = { path = "crates/rete-tokio" }
+rete-iface-kiss   = { path = "crates/rete-iface-kiss" }
+rete-iface-serial = { path = "crates/rete-iface-serial" }
+rete-iface-tcp    = { path = "crates/rete-iface-tcp" }
+
+# Embassy (optional — only needed by rete-embassy and embedded examples)
+embassy-executor  = { version = "0.9",  default-features = false }
+embassy-time      = { version = "0.5",  default-features = false }
+embassy-sync      = { version = "0.7",  default-features = false }
+embassy-futures   = { version = "0.1",  default-features = false }
+
+# Crypto (all no_std)
+x25519-dalek  = { version = "2", default-features = false, features = ["zeroize", "static_secrets"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
+aes           = { version = "0.8", default-features = false }
+cbc           = { version = "0.1", default-features = false }
+sha2          = { version = "0.10", default-features = false }
+hmac          = { version = "0.12", default-features = false }
+hkdf          = { version = "0.12", default-features = false }
+rand_core     = { version = "0.6", default-features = false }
+zeroize       = { version = "1",   default-features = false }
+
+# Collections
+heapless          = { version = "0.8", default-features = false }
+
+# Embedded I/O abstraction
+embedded-io-async = { version = "0.6", default-features = false }
+
+# Hosted only
+serde      = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1" }
+tokio      = { version = "1", features = ["full"] }

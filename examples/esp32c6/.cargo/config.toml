@@ -1,0 +1,17 @@
+[target.'cfg(target_arch = "riscv32")']
+runner    = "espflash flash --monitor"
+rustflags = [
+  "-C", "link-arg=-Tlinkall.x",
+  "-C", "force-frame-pointers",
+]
+
+[env]
+ESP_LOG = "info"
+# Override at build time: SSID="MyNet" PASSWORD="MyPass" cargo build ...
+SSID = { value = "YOUR_SSID", force = false }
+PASSWORD = { value = "YOUR_PASSWORD", force = false }
+RNSD_HOST = { value = "192.168.1.100", force = false }
+RNSD_PORT = { value = "4242", force = false }
+
+[unstable]
+build-std = ["alloc", "core"]

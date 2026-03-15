@@ -1,0 +1,17 @@
+[package]
+name        = "rete-tokio"
+description = "Tokio runtime integration for rete (hosted)"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+keywords.workspace   = true
+categories.workspace = true
+
+[dependencies]
+rete-core      = { workspace = true }
+rete-transport = { workspace = true }
+rete-stack     = { workspace = true }
+tokio          = { workspace = true }
+rand_core      = { version = "0.6", features = ["std"] }
+rand           = "0.8"

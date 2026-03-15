@@ -1,0 +1,22 @@
+[package]
+name    = "rete-example-esp32s3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rete-esp32s3"
+path = "src/main.rs"
+
+[dependencies]
+rete-core       = { workspace = true }
+rete-transport  = { workspace = true }
+rete-stack      = { workspace = true }
+rete-embassy    = { workspace = true }
+rete-iface-kiss = { workspace = true }
+embassy-executor = { workspace = true, features = ["task-arena-size-32768"] }
+embassy-time     = { workspace = true }
+
+[profile.release]
+opt-level = "z"
+lto       = true

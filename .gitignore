@@ -1,0 +1,33 @@
+# Build artifacts
+/target/
+examples/esp32c6/target/
+examples/esp32s3/target/
+examples/rp2040/target/
+
+# Rust
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+/tests/interop/vectors_fresh.json
+
+# Claude Code
+.claude/

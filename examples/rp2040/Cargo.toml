@@ -1,0 +1,24 @@
+[package]
+name    = "rete-example-rp2040"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rete-rp2040"
+path = "src/main.rs"
+
+[dependencies]
+rete-core       = { workspace = true }
+rete-transport  = { workspace = true }
+rete-stack      = { workspace = true }
+rete-embassy    = { workspace = true }
+rete-iface-kiss = { workspace = true }
+embassy-executor = { workspace = true, features = ["task-arena-size-32768", "arch-cortex-m"] }
+embassy-rp       = { version = "0.3", features = ["rp2040"] }
+cortex-m         = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt      = "0.7"
+
+[profile.release]
+opt-level = "z"
+lto       = true

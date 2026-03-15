@@ -1,0 +1,18 @@
+[package]
+name        = "rete-embassy"
+description = "Embassy executor integration for rete"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+keywords.workspace   = true
+categories.workspace = true
+
+[dependencies]
+rete-core       = { workspace = true }
+rete-transport  = { workspace = true }
+rete-stack      = { workspace = true }
+embassy-time    = { workspace = true }
+embassy-futures = { workspace = true }
+embedded-io-async = { workspace = true }
+rand_core       = { workspace = true }

@@ -1,0 +1,9 @@
+[toolchain]
+channel    = "stable"
+targets    = [
+    "thumbv6m-none-eabi",          # RP2040 / Pico 2W
+    "thumbv8m.main-none-eabihf",   # Cortex-M33
+    # xtensa-esp32s3-none-elf installed separately via:
+    # https://esp-rs.github.io/book/installation/index.html
+]
+components = ["rustfmt", "clippy", "rust-src"]

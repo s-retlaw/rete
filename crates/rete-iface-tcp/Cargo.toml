@@ -1,0 +1,14 @@
+[package]
+name        = "rete-iface-tcp"
+description = "TCP interface for rete (hosted)"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+keywords.workspace   = true
+categories.workspace = true
+
+[dependencies]
+rete-core  = { workspace = true }
+rete-stack = { workspace = true }
+tokio      = { workspace = true }

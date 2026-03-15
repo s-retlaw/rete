@@ -1,0 +1,15 @@
+[package]
+name        = "rete-iface-serial"
+description = "Serial port interface with HDLC framing for rete"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+keywords.workspace   = true
+categories.workspace = true
+
+[dependencies]
+rete-core  = { workspace = true }
+rete-stack = { workspace = true }
+tokio      = { workspace = true }
+tokio-serial = "5.4"

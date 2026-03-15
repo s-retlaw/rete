@@ -1,0 +1,86 @@
+[package]
+name    = "rete-example-esp32c6"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "rete-esp32c6"
+path = "src/main.rs"
+required-features = ["wifi"]
+
+[[bin]]
+name = "rete-esp32c6-serial"
+path = "src/bin/serial.rs"
+
+[dependencies]
+# Rete crates (workspace path deps)
+rete-core    = { path = "../../crates/rete-core" }
+rete-embassy = { path = "../../crates/rete-embassy" }
+
+# ESP-HAL ecosystem (pinned to esp-hal v1.0.0 release)
+esp-hal = { version = "1.0.0", default-features = false, features = ["unstable"] }
+esp-rtos = { version = "0.2.0", default-features = false, features = ["embassy"] }
+esp-alloc = "0.9.0"
+esp-backtrace = { version = "0.18.1", default-features = false, features = ["panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.4.0", default-features = false }
+
+# Embassy
+embassy-executor = "0.9.0"
+embassy-time = "0.5.0"
+
+# Misc
+static_cell = "2.1.0"
+sha2 = { version = "0.10", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+
+# Embedded I/O (needed by both serial and wifi binaries)
+embedded-io-async = "0.6.1"
+
+# WiFi-only (optional — needed by main.rs, not by serial.rs)
+esp-radio = { version = "0.17.0", optional = true, default-features = false, features = ["wifi", "unstable", "smoltcp"] }
+embassy-net = { version = "0.7.0", optional = true, features = ["dhcpv4", "medium-ethernet", "tcp"] }
+esp-println = { version = "0.16.1", default-features = false, features = ["auto", "critical-section"] }
+
+[features]
+default = []
+
+# Chip selection (pick one)
+esp32c6 = [
+    "esp-hal/esp32c6",
+    "esp-rtos/esp32c6",
+    "esp-backtrace/esp32c6",
+    "esp-bootloader-esp-idf/esp32c6",
+    "esp-println/esp32c6",
+    "esp-radio?/esp32c6",
+]
+
+esp32c3 = [
+    "esp-hal/esp32c3",
+    "esp-rtos/esp32c3",
+    "esp-backtrace/esp32c3",
+    "esp-bootloader-esp-idf/esp32c3",
+    "esp-println/esp32c3",
+    "esp-radio?/esp32c3",
+]
+
+# WiFi mode (enables esp-radio, embassy-net, logging via esp-println)
+wifi = [
+    "dep:esp-radio",
+    "dep:embassy-net",
+    "esp-rtos/esp-radio",
+]
+
+# Logging
+log = [
+    "esp-hal/log-04",
+    "esp-rtos/log-04",
+    "esp-radio?/log-04",
+    "esp-println/log-04",
+]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,151 @@
+//! Linux/hosted example — Reticulum node on desktop or Raspberry Pi.
+//!
+//! Connects to Python rnsd over TCP for interop testing, or directly to
+//! an ESP32 over serial.
+//!
+//! Usage:
+//!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242
+//!   cargo run -p rete-example-linux -- --serial /dev/ttyACM0
+
+use rete_core::Identity;
+use rete_iface_serial::SerialInterface;
+use rete_iface_tcp::TcpInterface;
+use rete_tokio::{ReteNode, NodeEvent};
+use sha2::{Sha256, Digest};
+
+const DEFAULT_ADDR: &str = "127.0.0.1:4242";
+const DEFAULT_BAUD: u32 = 115200;
+const APP_NAME: &str = "rete";
+const ASPECTS: &[&str] = &["example", "v1"];
+
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Parse --connect <addr>
+    let addr = args.windows(2)
+        .find(|w| w[0] == "--connect")
+        .map(|w| w[1].as_str());
+
+    // Parse --serial <path>
+    let serial_path = args.windows(2)
+        .find(|w| w[0] == "--serial")
+        .map(|w| w[1].as_str());
+
+    // Parse --baud <rate> (default 115200, ignored for USB-CDC)
+    let baud: u32 = args.windows(2)
+        .find(|w| w[0] == "--baud")
+        .and_then(|w| w[1].parse().ok())
+        .unwrap_or(DEFAULT_BAUD);
+
+    // Parse --identity-seed <seed> (deterministic key for testing)
+    let seed = args.windows(2)
+        .find(|w| w[0] == "--identity-seed")
+        .map(|w| w[1].clone());
+
+    // Parse --auto-reply <message> (send DATA after receiving an announce)
+    let auto_reply = args.windows(2)
+        .find(|w| w[0] == "--auto-reply")
+        .map(|w| w[1].clone());
+
+    // Create or derive identity
+    let identity = if let Some(seed_str) = seed {
+        // Deterministic identity from seed (for reproducible testing)
+        let hash = Sha256::digest(seed_str.as_bytes());
+        let mut prv = [0u8; 64];
+        prv[..32].copy_from_slice(&hash);
+        // Use a different hash for ed25519 half
+        let hash2 = Sha256::digest(&hash);
+        prv[32..].copy_from_slice(&hash2);
+        Identity::from_private_key(&prv).expect("invalid derived key")
+    } else {
+        // Random identity
+        let mut rng = rand::thread_rng();
+        let mut prv = [0u8; 64];
+        rand::RngCore::fill_bytes(&mut rng, &mut prv);
+        Identity::from_private_key(&prv).expect("invalid random key")
+    };
+
+    let id_hash = identity.hash();
+    eprintln!("[rete] identity hash: {}", hex::encode(id_hash));
+
+    // Create node
+    let mut node = ReteNode::new(identity, APP_NAME, ASPECTS);
+    if let Some(msg) = auto_reply {
+        node.set_auto_reply(Some(msg.into_bytes()));
+    }
+    eprintln!("[rete] destination hash: {}", hex::encode(node.dest_hash()));
+
+    // Dispatch based on interface type
+    if let Some(path) = serial_path {
+        eprintln!("[rete] opening serial port {} at {} baud ...", path, baud);
+        let mut iface = match SerialInterface::open(path, baud) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("[rete] failed to open serial port: {e}");
+                std::process::exit(1);
+            }
+        };
+        eprintln!("[rete] serial port open");
+        node.run(&mut iface, on_event).await;
+    } else {
+        let addr = addr.unwrap_or(DEFAULT_ADDR);
+        eprintln!("[rete] connecting to {} ...", addr);
+        let mut iface = match TcpInterface::connect(addr).await {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("[rete] failed to connect: {e}");
+                std::process::exit(1);
+            }
+        };
+        eprintln!("[rete] connected");
+        node.run(&mut iface, on_event).await;
+    }
+}
+
+fn on_event(event: NodeEvent) {
+    match event {
+        NodeEvent::AnnounceReceived { dest_hash, identity_hash, hops, app_data } => {
+            eprintln!(
+                "[rete] ANNOUNCE dest={} identity={} hops={}{}",
+                hex::encode(dest_hash),
+                hex::encode(identity_hash),
+                hops,
+                app_data.as_ref().map(|d| {
+                    match std::str::from_utf8(d) {
+                        Ok(s) => format!(" app_data=\"{s}\""),
+                        Err(_) => format!(" app_data={}", hex::encode(d)),
+                    }
+                }).unwrap_or_default(),
+            );
+            println!(
+                "ANNOUNCE:{}:{}:{}",
+                hex::encode(dest_hash),
+                hex::encode(identity_hash),
+                hops,
+            );
+        }
+        NodeEvent::DataReceived { dest_hash, payload } => {
+            eprintln!(
+                "[rete] DATA dest={} len={}",
+                hex::encode(dest_hash),
+                payload.len(),
+            );
+            match std::str::from_utf8(&payload) {
+                Ok(text) => {
+                    eprintln!("[rete]   text: {text}");
+                    println!("DATA:{}:{}", hex::encode(dest_hash), text);
+                }
+                Err(_) => {
+                    eprintln!("[rete]   hex: {}", hex::encode(&payload));
+                    println!("DATA:{}:{}", hex::encode(dest_hash), hex::encode(&payload));
+                }
+            }
+        }
+        NodeEvent::Tick { expired_paths } => {
+            if expired_paths > 0 {
+                eprintln!("[rete] tick: expired {expired_paths} paths");
+            }
+        }
+    }
+}

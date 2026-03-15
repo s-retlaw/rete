@@ -1,0 +1,8 @@
+[project]
+name = "rete-interop-tests"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["rns>=0.8.0"]
+
+[project.scripts]
+interop = "live_interop:main"

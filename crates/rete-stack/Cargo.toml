@@ -1,0 +1,14 @@
+[package]
+name        = "rete-stack"
+description = "Runtime-agnostic async interface traits for rete"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+keywords.workspace   = true
+categories.workspace = true
+
+[dependencies]
+rete-core = { workspace = true }
+rete-transport = { workspace = true }
+embedded-io-async = { workspace = true }

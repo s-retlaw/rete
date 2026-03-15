@@ -1,0 +1,974 @@
+{
+  "_generator": "generate_test_vectors.py",
+  "_rns_version": "1.1.4",
+  "_generated_at": "2026-03-14T23:14:22Z",
+  "_description": "Test vectors generated from the Python Reticulum reference implementation. All byte values are lowercase hex strings. These are ground truth for rns-rs wire format compliance testing.",
+  "constants": {
+    "_description": "Fundamental protocol constants from the Python reference",
+    "MTU": 500,
+    "PLAIN_MDU": 464,
+    "ENCRYPTED_MDU": 383,
+    "TRUNCATED_HASHLENGTH_bits": 128,
+    "TRUNCATED_HASHLENGTH_bytes": 16,
+    "NAME_HASH_LENGTH_bits": 80,
+    "NAME_HASH_LENGTH_bytes": 10,
+    "packet_type_DATA": 0,
+    "packet_type_ANNOUNCE": 1,
+    "packet_type_LINKREQUEST": 2,
+    "packet_type_PROOF": 3,
+    "dest_type_SINGLE": 0,
+    "dest_type_GROUP": 1,
+    "dest_type_PLAIN": 2,
+    "dest_type_LINK": 3,
+    "header_type_1": 0,
+    "header_type_2": 1,
+    "identity_pub_key_bytes": 64,
+    "identity_prv_key_bytes": 64,
+    "x25519_key_bytes": 32,
+    "ed25519_key_bytes": 32,
+    "ed25519_signature_bytes": 64
+  },
+  "identity_vectors": [
+    {
+      "_description": "Identity 'alice' \u2014 derived from SHA-512(label)",
+      "seed_label": "alice",
+      "private_key_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c75272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+      "public_key_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "x25519_prv_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7",
+      "x25519_pub_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0f",
+      "ed25519_prv_hex": "5272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
+      "_note": "identity_hash = SHA-256(pub_key)[0:16]  (truncated to 16 bytes)"
+    },
+    {
+      "_description": "Identity 'bob' \u2014 derived from SHA-512(label)",
+      "seed_label": "bob",
+      "private_key_hex": "0416a26ba554334286b1954918ecad7ba6c33575b49df915ff3367b5cef7ecd93b1f0b436636667b27b363011543971f1c81c3151d5ef72733501c1ff33c34af",
+      "public_key_hex": "9c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "x25519_prv_hex": "0416a26ba554334286b1954918ecad7ba6c33575b49df915ff3367b5cef7ecd9",
+      "x25519_pub_hex": "9c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb32571",
+      "ed25519_prv_hex": "3b1f0b436636667b27b363011543971f1c81c3151d5ef72733501c1ff33c34af",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "identity_hash_hex": "236d5c3f7d7a9ca0388ca355cb71080b",
+      "_note": "identity_hash = SHA-256(pub_key)[0:16]  (truncated to 16 bytes)"
+    },
+    {
+      "_description": "Identity 'carol' \u2014 derived from SHA-512(label)",
+      "seed_label": "carol",
+      "private_key_hex": "ecbec19886c1db3466adee3156fdc084f0a7c821934ece8a539d5932a37fd221746f6b080001db1bfa639a7aaa4938cc3c134b6797e78cd60f50f3eda48bd739",
+      "public_key_hex": "5722f71a595b53adfa3656a8ba352e1addd1b7e557250b85e46c47148e603527d8fc489cde15e8da3f6d33b27f6d109c1a47877dba52ff456c467c6f6b75bae6",
+      "x25519_prv_hex": "ecbec19886c1db3466adee3156fdc084f0a7c821934ece8a539d5932a37fd221",
+      "x25519_pub_hex": "5722f71a595b53adfa3656a8ba352e1addd1b7e557250b85e46c47148e603527",
+      "ed25519_prv_hex": "746f6b080001db1bfa639a7aaa4938cc3c134b6797e78cd60f50f3eda48bd739",
+      "ed25519_pub_hex": "d8fc489cde15e8da3f6d33b27f6d109c1a47877dba52ff456c467c6f6b75bae6",
+      "identity_hash_hex": "0a7c9668fae5477d3bfcb1b66c3751e0",
+      "_note": "identity_hash = SHA-256(pub_key)[0:16]  (truncated to 16 bytes)"
+    },
+    {
+      "_description": "Identity 'relay_node_1' \u2014 derived from SHA-512(label)",
+      "seed_label": "relay_node_1",
+      "private_key_hex": "e088d827dbbd4c288454f0ff7eb6d53ca45818b924410c963da7c1ea3d826f0406f60610db0c3d54092c01eb537de61a9084838b4ea0d81ff4d67c809d291e5d",
+      "public_key_hex": "48ea4fbb77a6969ad8598463003c73e9978dbbf90d59c4534bcf95bcbe16de58570ff63f32cd0489563fa71683c8f2a991be9a7c166c186ed40dcfb76175d728",
+      "x25519_prv_hex": "e088d827dbbd4c288454f0ff7eb6d53ca45818b924410c963da7c1ea3d826f04",
+      "x25519_pub_hex": "48ea4fbb77a6969ad8598463003c73e9978dbbf90d59c4534bcf95bcbe16de58",
+      "ed25519_prv_hex": "06f60610db0c3d54092c01eb537de61a9084838b4ea0d81ff4d67c809d291e5d",
+      "ed25519_pub_hex": "570ff63f32cd0489563fa71683c8f2a991be9a7c166c186ed40dcfb76175d728",
+      "identity_hash_hex": "f9588eb20874d7db17021a3147af177a",
+      "_note": "identity_hash = SHA-256(pub_key)[0:16]  (truncated to 16 bytes)"
+    },
+    {
+      "_description": "Identity 'van_bot' \u2014 derived from SHA-512(label)",
+      "seed_label": "van_bot",
+      "private_key_hex": "39ac8f90e7ec22bb8d9acaf170958c130ff1ebe190aa6e2522b37a80a14ff62a45a6cbf4b52120d956989cc0884042d5f4d355c955b4d6927f06e9af6ded616c",
+      "public_key_hex": "0837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4a",
+      "x25519_prv_hex": "39ac8f90e7ec22bb8d9acaf170958c130ff1ebe190aa6e2522b37a80a14ff62a",
+      "x25519_pub_hex": "0837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600a",
+      "ed25519_prv_hex": "45a6cbf4b52120d956989cc0884042d5f4d355c955b4d6927f06e9af6ded616c",
+      "ed25519_pub_hex": "f40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4a",
+      "identity_hash_hex": "a6dc410a617cbda84d55c57a8a71428e",
+      "_note": "identity_hash = SHA-256(pub_key)[0:16]  (truncated to 16 bytes)"
+    }
+  ],
+  "destination_hash_vectors": [
+    {
+      "_description": "Destination hash: app='testapp' aspects=['aspect1'] identity='alice'",
+      "app_name": "testapp",
+      "aspects": [
+        "aspect1"
+      ],
+      "expanded_name": "testapp.aspect1",
+      "name_hash_hex": "fca709a4818d4e0c78a0",
+      "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
+      "addr_material_hex": "fca709a4818d4e0c78a0fd9f121e293bf4a415dd74366ff75f69",
+      "dest_hash_hex": "2b7fa6842783252974dc5fcaff22b808",
+      "_steps": [
+        "expanded      = dot-join(app_name, *aspects)",
+        "name_hash     = SHA-256(expanded.encode('utf-8'))[0:10]",
+        "addr_material = name_hash [+ identity_hash if not PLAIN]",
+        "dest_hash     = SHA-256(addr_material)[0:16]"
+      ]
+    },
+    {
+      "_description": "Destination hash: app='testapp' aspects=['aspect1', 'aspect2'] identity='alice'",
+      "app_name": "testapp",
+      "aspects": [
+        "aspect1",
+        "aspect2"
+      ],
+      "expanded_name": "testapp.aspect1.aspect2",
+      "name_hash_hex": "48ed1ac572cc8ab0cf33",
+      "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
+      "addr_material_hex": "48ed1ac572cc8ab0cf33fd9f121e293bf4a415dd74366ff75f69",
+      "dest_hash_hex": "5a9d239885594f1f38cae23404ffef09",
+      "_steps": [
+        "expanded      = dot-join(app_name, *aspects)",
+        "name_hash     = SHA-256(expanded.encode('utf-8'))[0:10]",
+        "addr_material = name_hash [+ identity_hash if not PLAIN]",
+        "dest_hash     = SHA-256(addr_material)[0:16]"
+      ]
+    },
+    {
+      "_description": "Destination hash: app='chat' aspects=['message'] identity='alice'",
+      "app_name": "chat",
+      "aspects": [
+        "message"
+      ],
+      "expanded_name": "chat.message",
+      "name_hash_hex": "2ce5ea6df00975c99634",
+      "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
+      "addr_material_hex": "2ce5ea6df00975c99634fd9f121e293bf4a415dd74366ff75f69",
+      "dest_hash_hex": "d44136b16b534aa44163696731476827",
+      "_steps": [
+        "expanded      = dot-join(app_name, *aspects)",
+        "name_hash     = SHA-256(expanded.encode('utf-8'))[0:10]",
+        "addr_material = name_hash [+ identity_hash if not PLAIN]",
+        "dest_hash     = SHA-256(addr_material)[0:16]"
+      ]
+    },
+    {
+      "_description": "Destination hash: app='rns_rs' aspects=['bot', 'commands'] identity='alice'",
+      "app_name": "rns_rs",
+      "aspects": [
+        "bot",
+        "commands"
+      ],
+      "expanded_name": "rns_rs.bot.commands",
+      "name_hash_hex": "0c1ce8cab86c69fc3ee6",
+      "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
+      "addr_material_hex": "0c1ce8cab86c69fc3ee6fd9f121e293bf4a415dd74366ff75f69",
+      "dest_hash_hex": "2fe565d6c0dcbf6914528f13aac7bb24",
+      "_steps": [
+        "expanded      = dot-join(app_name, *aspects)",
+        "name_hash     = SHA-256(expanded.encode('utf-8'))[0:10]",
+        "addr_material = name_hash [+ identity_hash if not PLAIN]",
+        "dest_hash     = SHA-256(addr_material)[0:16]"
+      ]
+    },
+    {
+      "_description": "Destination hash: app='testapp' aspects=['aspect1'] identity='bob'",
+      "app_name": "testapp",
+      "aspects": [
+        "aspect1"
+      ],
+      "expanded_name": "testapp.aspect1",
+      "name_hash_hex": "fca709a4818d4e0c78a0",
+      "identity_hash_hex": "236d5c3f7d7a9ca0388ca355cb71080b",
+      "addr_material_hex": "fca709a4818d4e0c78a0236d5c3f7d7a9ca0388ca355cb71080b",
+      "dest_hash_hex": "22da01f03d8c743d2483fce46f093bf5",
+      "_steps": [
+        "expanded      = dot-join(app_name, *aspects)",
+        "name_hash     = SHA-256(expanded.encode('utf-8'))[0:10]",
+        "addr_material = name_hash [+ identity_hash if not PLAIN]",
+        "dest_hash     = SHA-256(addr_material)[0:16]"
+      ]
+    },
+    {
+      "_description": "Destination hash: app='sensor' aspects=['temperature', 'living_room'] identity='bob'",
+      "app_name": "sensor",
+      "aspects": [
+        "temperature",
+        "living_room"
+      ],
+      "expanded_name": "sensor.temperature.living_room",
+      "name_hash_hex": "0278ab48c08c5c50e2a9",
+      "identity_hash_hex": "236d5c3f7d7a9ca0388ca355cb71080b",
+      "addr_material_hex": "0278ab48c08c5c50e2a9236d5c3f7d7a9ca0388ca355cb71080b",
+      "dest_hash_hex": "4dc11e7ed263acc07b2c726dc61b0594",
+      "_steps": [
+        "expanded      = dot-join(app_name, *aspects)",
+        "name_hash     = SHA-256(expanded.encode('utf-8'))[0:10]",
+        "addr_material = name_hash [+ identity_hash if not PLAIN]",
+        "dest_hash     = SHA-256(addr_material)[0:16]"
+      ]
+    },
+    {
+      "_description": "Destination hash: app='broadcast' aspects=[] identity='None'",
+      "app_name": "broadcast",
+      "aspects": [],
+      "expanded_name": "broadcast",
+      "name_hash_hex": "e88199c423228a456677",
+      "identity_hash_hex": null,
+      "addr_material_hex": "e88199c423228a456677",
+      "dest_hash_hex": "9ddfb8d99f260168b10e79462a6f88de",
+      "_steps": [
+        "expanded      = dot-join(app_name, *aspects)",
+        "name_hash     = SHA-256(expanded.encode('utf-8'))[0:10]",
+        "addr_material = name_hash [+ identity_hash if not PLAIN]",
+        "dest_hash     = SHA-256(addr_material)[0:16]"
+      ]
+    }
+  ],
+  "packet_flags_vectors": [
+    {
+      "_description": "flags=0x00: header_type=0 context_flag=0 transport_type=0 dest_type=0 packet_type=0",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 0,
+      "packet_type": 0,
+      "flags_byte": 0,
+      "flags_hex": "0x00"
+    },
+    {
+      "_description": "flags=0x08: header_type=0 context_flag=0 transport_type=0 dest_type=2 packet_type=0",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 2,
+      "packet_type": 0,
+      "flags_byte": 8,
+      "flags_hex": "0x08"
+    },
+    {
+      "_description": "flags=0x04: header_type=0 context_flag=0 transport_type=0 dest_type=1 packet_type=0",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 1,
+      "packet_type": 0,
+      "flags_byte": 4,
+      "flags_hex": "0x04"
+    },
+    {
+      "_description": "flags=0x0c: header_type=0 context_flag=0 transport_type=0 dest_type=3 packet_type=0",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 3,
+      "packet_type": 0,
+      "flags_byte": 12,
+      "flags_hex": "0x0c"
+    },
+    {
+      "_description": "flags=0x01: header_type=0 context_flag=0 transport_type=0 dest_type=0 packet_type=1",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 0,
+      "packet_type": 1,
+      "flags_byte": 1,
+      "flags_hex": "0x01"
+    },
+    {
+      "_description": "flags=0x02: header_type=0 context_flag=0 transport_type=0 dest_type=0 packet_type=2",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 0,
+      "packet_type": 2,
+      "flags_byte": 2,
+      "flags_hex": "0x02"
+    },
+    {
+      "_description": "flags=0x03: header_type=0 context_flag=0 transport_type=0 dest_type=0 packet_type=3",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 0,
+      "packet_type": 3,
+      "flags_byte": 3,
+      "flags_hex": "0x03"
+    },
+    {
+      "_description": "flags=0x0f: header_type=0 context_flag=0 transport_type=0 dest_type=3 packet_type=3",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 3,
+      "packet_type": 3,
+      "flags_byte": 15,
+      "flags_hex": "0x0f"
+    },
+    {
+      "_description": "flags=0x40: header_type=1 context_flag=0 transport_type=0 dest_type=0 packet_type=0",
+      "header_type": 1,
+      "context_flag": 0,
+      "transport_type": 0,
+      "dest_type": 0,
+      "packet_type": 0,
+      "flags_byte": 64,
+      "flags_hex": "0x40"
+    },
+    {
+      "_description": "flags=0x20: header_type=0 context_flag=1 transport_type=0 dest_type=0 packet_type=0",
+      "header_type": 0,
+      "context_flag": 1,
+      "transport_type": 0,
+      "dest_type": 0,
+      "packet_type": 0,
+      "flags_byte": 32,
+      "flags_hex": "0x20"
+    },
+    {
+      "_description": "flags=0x10: header_type=0 context_flag=0 transport_type=1 dest_type=0 packet_type=0",
+      "header_type": 0,
+      "context_flag": 0,
+      "transport_type": 1,
+      "dest_type": 0,
+      "packet_type": 0,
+      "flags_byte": 16,
+      "flags_hex": "0x10"
+    },
+    {
+      "_description": "flags=0x51: header_type=1 context_flag=0 transport_type=1 dest_type=0 packet_type=1",
+      "header_type": 1,
+      "context_flag": 0,
+      "transport_type": 1,
+      "dest_type": 0,
+      "packet_type": 1,
+      "flags_byte": 81,
+      "flags_hex": "0x51"
+    }
+  ],
+  "data_packet_vectors": [
+    {
+      "_description": "PLAIN DATA packet \u2014 payload=b'hello world'",
+      "dest_type": "PLAIN",
+      "dest_hash_hex": "066951e758a2aa0068dd10ec3ee8bfbc",
+      "plaintext_hex": "68656c6c6f20776f726c64",
+      "plaintext_len": 11,
+      "raw_hex": "0800066951e758a2aa0068dd10ec3ee8bfbc0068656c6c6f20776f726c64",
+      "raw_len": 30,
+      "flags_byte": 8,
+      "hops": 0,
+      "context_byte": 0,
+      "packet_hash_hex": "e810187f1368c49e64caeae6ab0636415f86c553396486cb6f1ef43217ad1c54",
+      "hashable_part_hex": "08066951e758a2aa0068dd10ec3ee8bfbc0068656c6c6f20776f726c64",
+      "_layout": "flags[1] || hops[1] || dest_hash[16] || context[1] || payload"
+    },
+    {
+      "_description": "PLAIN DATA packet \u2014 payload=b''",
+      "dest_type": "PLAIN",
+      "dest_hash_hex": "066951e758a2aa0068dd10ec3ee8bfbc",
+      "plaintext_hex": "",
+      "plaintext_len": 0,
+      "raw_hex": "0800066951e758a2aa0068dd10ec3ee8bfbc00",
+      "raw_len": 19,
+      "flags_byte": 8,
+      "hops": 0,
+      "context_byte": 0,
+      "packet_hash_hex": "13299bd87ce1a70f252dd2c8d35a6389b58786e6457f4b9e120e8e22ce35273f",
+      "hashable_part_hex": "08066951e758a2aa0068dd10ec3ee8bfbc00",
+      "_layout": "flags[1] || hops[1] || dest_hash[16] || context[1] || payload"
+    },
+    {
+      "_description": "PLAIN DATA packet \u2014 payload=b'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'",
+      "dest_type": "PLAIN",
+      "dest_hash_hex": "066951e758a2aa0068dd10ec3ee8bfbc",
+      "plaintext_hex": "4141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "plaintext_len": 80,
+      "raw_hex": "0800066951e758a2aa0068dd10ec3ee8bfbc004141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "raw_len": 99,
+      "flags_byte": 8,
+      "hops": 0,
+      "context_byte": 0,
+      "packet_hash_hex": "ba65b0259f7ae393a93a5b7903f4fcde8a5221b507e03ef52c0ae254b14e8e1a",
+      "hashable_part_hex": "08066951e758a2aa0068dd10ec3ee8bfbc004141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "_layout": "flags[1] || hops[1] || dest_hash[16] || context[1] || payload"
+    },
+    {
+      "_description": "PLAIN DATA packet \u2014 payload=b'\\x00\\x01\\x02\\x03\\xff'",
+      "dest_type": "PLAIN",
+      "dest_hash_hex": "066951e758a2aa0068dd10ec3ee8bfbc",
+      "plaintext_hex": "00010203ff",
+      "plaintext_len": 5,
+      "raw_hex": "0800066951e758a2aa0068dd10ec3ee8bfbc0000010203ff",
+      "raw_len": 24,
+      "flags_byte": 8,
+      "hops": 0,
+      "context_byte": 0,
+      "packet_hash_hex": "f1469453f4e5be8c6b85cfd34947896fc8086abf4f7c686a7c6fc5d73d6f7fd9",
+      "hashable_part_hex": "08066951e758a2aa0068dd10ec3ee8bfbc0000010203ff",
+      "_layout": "flags[1] || hops[1] || dest_hash[16] || context[1] || payload"
+    },
+    {
+      "_description": "ENCRYPTED DATA packet to alice \u2014 payload=b'secret message'",
+      "dest_type": "SINGLE",
+      "dest_hash_hex": "3a4ebff7578cd6985b5c19087559c3ab",
+      "recipient_x25519_prv_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7",
+      "recipient_x25519_pub_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0f",
+      "plaintext_hex": "736563726574206d657373616765",
+      "plaintext_len": 14,
+      "raw_hex": "00003a4ebff7578cd6985b5c19087559c3ab003691415d6e94e1f6ad8d1d3ce9958cc854e0f5c09af1b42702a1be96ba212377ce49e3f7555b7c970a81138db2a28838999a4819d8139ba9a67203137c6f0eb2908cd0cf90937291adddc7861370046e016764240dd6d0822440813407130872",
+      "raw_len": 115,
+      "flags_byte": 0,
+      "ciphertext_hex": "3691415d6e94e1f6ad8d1d3ce9958cc854e0f5c09af1b42702a1be96ba212377ce49e3f7555b7c970a81138db2a28838999a4819d8139ba9a67203137c6f0eb2908cd0cf90937291adddc7861370046e016764240dd6d0822440813407130872",
+      "packet_hash_hex": "ab3775ecb2a08b11cce690ff4db78e420d83f344484e00421a7824374a3394e7",
+      "hashable_part_hex": "003a4ebff7578cd6985b5c19087559c3ab003691415d6e94e1f6ad8d1d3ce9958cc854e0f5c09af1b42702a1be96ba212377ce49e3f7555b7c970a81138db2a28838999a4819d8139ba9a67203137c6f0eb2908cd0cf90937291adddc7861370046e016764240dd6d0822440813407130872",
+      "_note": "ciphertext = ephemeral_X25519_pub[32] || AES_IV[16] || aes_body. Decrypt with recipient X25519 prv via ECDH -> HKDF -> AES-128-CBC."
+    },
+    {
+      "_description": "ENCRYPTED DATA packet to alice \u2014 payload=b'van: temp=68 bat=87 heater=off'",
+      "dest_type": "SINGLE",
+      "dest_hash_hex": "3a4ebff7578cd6985b5c19087559c3ab",
+      "recipient_x25519_prv_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7",
+      "recipient_x25519_pub_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0f",
+      "plaintext_hex": "76616e3a2074656d703d3638206261743d3837206865617465723d6f6666",
+      "plaintext_len": 30,
+      "raw_hex": "00003a4ebff7578cd6985b5c19087559c3ab00cc8fa15658569bc698fbc7e808bc7a8cbaff2e82a879df02892412afd5a8ac473528be531e5f0e63f23502093a4f8108e31254d2c11cc643fc358f9371a7ce0c3b8399e2cfee5247b13afa984e11b6b8ee5722acf92af861213e89f8f4a2600e07b8c94be5b902081438618ddc33dce0",
+      "raw_len": 131,
+      "flags_byte": 0,
+      "ciphertext_hex": "cc8fa15658569bc698fbc7e808bc7a8cbaff2e82a879df02892412afd5a8ac473528be531e5f0e63f23502093a4f8108e31254d2c11cc643fc358f9371a7ce0c3b8399e2cfee5247b13afa984e11b6b8ee5722acf92af861213e89f8f4a2600e07b8c94be5b902081438618ddc33dce0",
+      "packet_hash_hex": "66703eb8ed074da86a1038b85ac743fb99e03d0529d1f7ecd8de496aedd129a4",
+      "hashable_part_hex": "003a4ebff7578cd6985b5c19087559c3ab00cc8fa15658569bc698fbc7e808bc7a8cbaff2e82a879df02892412afd5a8ac473528be531e5f0e63f23502093a4f8108e31254d2c11cc643fc358f9371a7ce0c3b8399e2cfee5247b13afa984e11b6b8ee5722acf92af861213e89f8f4a2600e07b8c94be5b902081438618ddc33dce0",
+      "_note": "ciphertext = ephemeral_X25519_pub[32] || AES_IV[16] || aes_body. Decrypt with recipient X25519 prv via ECDH -> HKDF -> AES-128-CBC."
+    }
+  ],
+  "announce_packet_vectors": [
+    {
+      "_description": "ANNOUNCE for 'alice' \u2014 no app_data",
+      "identity_label": "alice",
+      "private_key_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c75272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+      "public_key_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
+      "dest_hash_hex": "2b7fa6842783252974dc5fcaff22b808",
+      "name_hash_hex": "fca709a4818d4e0c78a0",
+      "random_hash_hex": "0000000000006553f100",
+      "fixed_timestamp": 1700000000,
+      "signed_data_hex": "2b7fa6842783252974dc5fcaff22b80880ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f100",
+      "signature_hex": "50fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205",
+      "announce_payload_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f10050fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205",
+      "announce_payload_len": 148,
+      "raw_hex": "01002b7fa6842783252974dc5fcaff22b8080080ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f10050fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205",
+      "raw_len": 167,
+      "packet_hash_hex": "b63705cf3ed52d56e32e8e17fbd86f51f391b9ce86a1a38f0f3649c058e74cae",
+      "hashable_part_hex": "012b7fa6842783252974dc5fcaff22b8080080ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f10050fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205",
+      "_payload_layout": {
+        "pub_key": "payload[0:64]   X25519_pub[32] || Ed25519_pub[32]",
+        "name_hash": "payload[64:74]  SHA-256(expanded_name)[0:10]",
+        "rand_hash": "payload[74:84]  5_rand || 5_timestamp",
+        "signature": "payload[84:148] Ed25519(dest_hash||pub_key||name_hash||rand_hash)"
+      }
+    },
+    {
+      "_description": "ANNOUNCE for 'alice' \u2014 WITH app_data",
+      "identity_label": "alice",
+      "public_key_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "dest_hash_hex": "2b7fa6842783252974dc5fcaff22b808",
+      "name_hash_hex": "fca709a4818d4e0c78a0",
+      "random_hash_hex": "0000000000006553f100",
+      "app_data_hex": "6e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "app_data_utf8": "node:sensor:outdoor:v1",
+      "signed_data_hex": "2b7fa6842783252974dc5fcaff22b80880ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f1006e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "signature_hex": "6950faa92732c50c127e4101ee07eff43657b7a0f72d5841c53eb146d1c2b79ed287fbdd16b0f80549e86777fe1a971109c8137492519c63a6f22803e91bfb09",
+      "announce_payload_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f1006950faa92732c50c127e4101ee07eff43657b7a0f72d5841c53eb146d1c2b79ed287fbdd16b0f80549e86777fe1a971109c8137492519c63a6f22803e91bfb096e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "raw_hex": "01002b7fa6842783252974dc5fcaff22b8080080ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f1006950faa92732c50c127e4101ee07eff43657b7a0f72d5841c53eb146d1c2b79ed287fbdd16b0f80549e86777fe1a971109c8137492519c63a6f22803e91bfb096e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "raw_len": 189,
+      "packet_hash_hex": "15fe99812b5537a09c8014b6df19899f51d7971bf769168986114d476b8bf841",
+      "_note": "With app_data, signature covers: dest_hash||pub_key||name_hash||rand_hash||app_data. app_data is appended AFTER the signature in the payload."
+    },
+    {
+      "_description": "ANNOUNCE for 'bob' \u2014 no app_data",
+      "identity_label": "bob",
+      "private_key_hex": "0416a26ba554334286b1954918ecad7ba6c33575b49df915ff3367b5cef7ecd93b1f0b436636667b27b363011543971f1c81c3151d5ef72733501c1ff33c34af",
+      "public_key_hex": "9c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "identity_hash_hex": "236d5c3f7d7a9ca0388ca355cb71080b",
+      "dest_hash_hex": "22da01f03d8c743d2483fce46f093bf5",
+      "name_hash_hex": "fca709a4818d4e0c78a0",
+      "random_hash_hex": "0000000000006553f100",
+      "fixed_timestamp": 1700000000,
+      "signed_data_hex": "22da01f03d8c743d2483fce46f093bf59c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416fca709a4818d4e0c78a00000000000006553f100",
+      "signature_hex": "311fcc6eaa3af38005714bfad1d792aed129f9cb9ad1a798116a7db2c6d432610ea238ccc170deee66f84de7c9692c36bffdf5649e48aae01c00b41a41c7d60c",
+      "announce_payload_hex": "9c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416fca709a4818d4e0c78a00000000000006553f100311fcc6eaa3af38005714bfad1d792aed129f9cb9ad1a798116a7db2c6d432610ea238ccc170deee66f84de7c9692c36bffdf5649e48aae01c00b41a41c7d60c",
+      "announce_payload_len": 148,
+      "raw_hex": "010022da01f03d8c743d2483fce46f093bf5009c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416fca709a4818d4e0c78a00000000000006553f100311fcc6eaa3af38005714bfad1d792aed129f9cb9ad1a798116a7db2c6d432610ea238ccc170deee66f84de7c9692c36bffdf5649e48aae01c00b41a41c7d60c",
+      "raw_len": 167,
+      "packet_hash_hex": "15c7cb723793dce852391e70201fddb664035432f3da45c0d958d8e43bfec723",
+      "hashable_part_hex": "0122da01f03d8c743d2483fce46f093bf5009c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416fca709a4818d4e0c78a00000000000006553f100311fcc6eaa3af38005714bfad1d792aed129f9cb9ad1a798116a7db2c6d432610ea238ccc170deee66f84de7c9692c36bffdf5649e48aae01c00b41a41c7d60c",
+      "_payload_layout": {
+        "pub_key": "payload[0:64]   X25519_pub[32] || Ed25519_pub[32]",
+        "name_hash": "payload[64:74]  SHA-256(expanded_name)[0:10]",
+        "rand_hash": "payload[74:84]  5_rand || 5_timestamp",
+        "signature": "payload[84:148] Ed25519(dest_hash||pub_key||name_hash||rand_hash)"
+      }
+    },
+    {
+      "_description": "ANNOUNCE for 'bob' \u2014 WITH app_data",
+      "identity_label": "bob",
+      "public_key_hex": "9c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "dest_hash_hex": "22da01f03d8c743d2483fce46f093bf5",
+      "name_hash_hex": "fca709a4818d4e0c78a0",
+      "random_hash_hex": "0000000000006553f100",
+      "app_data_hex": "6e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "app_data_utf8": "node:sensor:outdoor:v1",
+      "signed_data_hex": "22da01f03d8c743d2483fce46f093bf59c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416fca709a4818d4e0c78a00000000000006553f1006e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "signature_hex": "41c33936629aed882c8c64e8c3e9778e0c158d7c2b5b858e7035feae575b3fd6717179d9945b62b55afb27853bf1b6245c7805e238aad860299e26c768816c05",
+      "announce_payload_hex": "9c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416fca709a4818d4e0c78a00000000000006553f10041c33936629aed882c8c64e8c3e9778e0c158d7c2b5b858e7035feae575b3fd6717179d9945b62b55afb27853bf1b6245c7805e238aad860299e26c768816c056e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "raw_hex": "010022da01f03d8c743d2483fce46f093bf5009c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416fca709a4818d4e0c78a00000000000006553f10041c33936629aed882c8c64e8c3e9778e0c158d7c2b5b858e7035feae575b3fd6717179d9945b62b55afb27853bf1b6245c7805e238aad860299e26c768816c056e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "raw_len": 189,
+      "packet_hash_hex": "93ee377daee532b9285ba6e2454466d2d0645db026093b1a1a62786beec80402",
+      "_note": "With app_data, signature covers: dest_hash||pub_key||name_hash||rand_hash||app_data. app_data is appended AFTER the signature in the payload."
+    },
+    {
+      "_description": "ANNOUNCE for 'van_bot' \u2014 no app_data",
+      "identity_label": "van_bot",
+      "private_key_hex": "39ac8f90e7ec22bb8d9acaf170958c130ff1ebe190aa6e2522b37a80a14ff62a45a6cbf4b52120d956989cc0884042d5f4d355c955b4d6927f06e9af6ded616c",
+      "public_key_hex": "0837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4a",
+      "identity_hash_hex": "a6dc410a617cbda84d55c57a8a71428e",
+      "dest_hash_hex": "65dc2f8fe3b5371ca439ec9092d36bf5",
+      "name_hash_hex": "fca709a4818d4e0c78a0",
+      "random_hash_hex": "0000000000006553f100",
+      "fixed_timestamp": 1700000000,
+      "signed_data_hex": "65dc2f8fe3b5371ca439ec9092d36bf50837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4afca709a4818d4e0c78a00000000000006553f100",
+      "signature_hex": "7478f24a2b2d86602c53238ffba2adeb70e305f52217cd9c2843c53288febb5bdaf87f0d3a9a5d97cda1996dc436f50323ae9c2938097c1390294c72a6a00f09",
+      "announce_payload_hex": "0837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4afca709a4818d4e0c78a00000000000006553f1007478f24a2b2d86602c53238ffba2adeb70e305f52217cd9c2843c53288febb5bdaf87f0d3a9a5d97cda1996dc436f50323ae9c2938097c1390294c72a6a00f09",
+      "announce_payload_len": 148,
+      "raw_hex": "010065dc2f8fe3b5371ca439ec9092d36bf5000837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4afca709a4818d4e0c78a00000000000006553f1007478f24a2b2d86602c53238ffba2adeb70e305f52217cd9c2843c53288febb5bdaf87f0d3a9a5d97cda1996dc436f50323ae9c2938097c1390294c72a6a00f09",
+      "raw_len": 167,
+      "packet_hash_hex": "8e069d6674d1064ae20aa40704a44c828b9b8d91facd71db522ae5b445699808",
+      "hashable_part_hex": "0165dc2f8fe3b5371ca439ec9092d36bf5000837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4afca709a4818d4e0c78a00000000000006553f1007478f24a2b2d86602c53238ffba2adeb70e305f52217cd9c2843c53288febb5bdaf87f0d3a9a5d97cda1996dc436f50323ae9c2938097c1390294c72a6a00f09",
+      "_payload_layout": {
+        "pub_key": "payload[0:64]   X25519_pub[32] || Ed25519_pub[32]",
+        "name_hash": "payload[64:74]  SHA-256(expanded_name)[0:10]",
+        "rand_hash": "payload[74:84]  5_rand || 5_timestamp",
+        "signature": "payload[84:148] Ed25519(dest_hash||pub_key||name_hash||rand_hash)"
+      }
+    },
+    {
+      "_description": "ANNOUNCE for 'van_bot' \u2014 WITH app_data",
+      "identity_label": "van_bot",
+      "public_key_hex": "0837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4a",
+      "dest_hash_hex": "65dc2f8fe3b5371ca439ec9092d36bf5",
+      "name_hash_hex": "fca709a4818d4e0c78a0",
+      "random_hash_hex": "0000000000006553f100",
+      "app_data_hex": "6e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "app_data_utf8": "node:sensor:outdoor:v1",
+      "signed_data_hex": "65dc2f8fe3b5371ca439ec9092d36bf50837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4afca709a4818d4e0c78a00000000000006553f1006e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "signature_hex": "82242a73187f6c2faf8006e9f590ea390c960d05e5198fbb0108fd9e285441319eae13fbd6e50bfc82b68fe5eba44b9e715f6322bc17540a2d0710297ba6bb05",
+      "announce_payload_hex": "0837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4afca709a4818d4e0c78a00000000000006553f10082242a73187f6c2faf8006e9f590ea390c960d05e5198fbb0108fd9e285441319eae13fbd6e50bfc82b68fe5eba44b9e715f6322bc17540a2d0710297ba6bb056e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "raw_hex": "010065dc2f8fe3b5371ca439ec9092d36bf5000837d264788ba98431b930b5862b25d0dd3087989065e109a3765fdcc700600af40df6785be41e05c0ba11ecb07f65b3297f0a783cf178ada2aa6454b23d4d4afca709a4818d4e0c78a00000000000006553f10082242a73187f6c2faf8006e9f590ea390c960d05e5198fbb0108fd9e285441319eae13fbd6e50bfc82b68fe5eba44b9e715f6322bc17540a2d0710297ba6bb056e6f64653a73656e736f723a6f7574646f6f723a7631",
+      "raw_len": 189,
+      "packet_hash_hex": "ab0fcf6adce388fcc4d32218fcb542a03de7a0f5666c868384054f797dad3f24",
+      "_note": "With app_data, signature covers: dest_hash||pub_key||name_hash||rand_hash||app_data. app_data is appended AFTER the signature in the payload."
+    }
+  ],
+  "signing_vectors": [
+    {
+      "_description": "Ed25519 sign \u2014 identity='alice' msg=b'hello from reticulum'",
+      "identity_label": "alice",
+      "ed25519_prv_hex": "5272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "message_hex": "68656c6c6f2066726f6d207265746963756c756d",
+      "message_len": 20,
+      "signature_hex": "7a114c616a4404fba6f200295e6b6435f5a72a35901488a7b1f9ced1e6901b900bc196d4990b6a454be2e516925cafb743dd323e568a070ffee1363faa467603",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 verify FAIL \u2014 tampered, identity='alice'",
+      "identity_label": "alice",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "original_message_hex": "68656c6c6f2066726f6d207265746963756c756d",
+      "tampered_message_hex": "97656c6c6f2066726f6d207265746963756c756d",
+      "signature_hex": "7a114c616a4404fba6f200295e6b6435f5a72a35901488a7b1f9ced1e6901b900bc196d4990b6a454be2e516925cafb743dd323e568a070ffee1363faa467603",
+      "verify_result": false,
+      "_note": "signature was created over original_message_hex"
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='alice' msg=b''",
+      "identity_label": "alice",
+      "ed25519_prv_hex": "5272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "message_hex": "",
+      "message_len": 0,
+      "signature_hex": "28d54ccbd742cd8b8be6755bf3ce8bceae01736f8f597a1fc883d345115cb6acea85da6b596676ced9417f9fba6251e7f0b40863c3944612bc4bdc26f5736f04",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='alice' msg=b'\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00'",
+      "identity_label": "alice",
+      "ed25519_prv_hex": "5272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "message_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "message_len": 32,
+      "signature_hex": "cc56134d4ae7d7939a340b9084b12b51eb75d0245443adc3fb63d897c6dd4af79fa6e1c09f4978ea27bc90e69915283158e5d104ab2a2a1f94fb2a3b34cb9d0a",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 verify FAIL \u2014 tampered, identity='alice'",
+      "identity_label": "alice",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "original_message_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "tampered_message_hex": "ff00000000000000000000000000000000000000000000000000000000000000",
+      "signature_hex": "cc56134d4ae7d7939a340b9084b12b51eb75d0245443adc3fb63d897c6dd4af79fa6e1c09f4978ea27bc90e69915283158e5d104ab2a2a1f94fb2a3b34cb9d0a",
+      "verify_result": false,
+      "_note": "signature was created over original_message_hex"
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='alice' msg=b'\\xa8m\\xf27\\xac=\\x15\\xe2-\\x93\\xa0\\x83X\\xae:zxx~\\xe5\\x9f\\xc8$l\\x05x?|V\\xe6\\xc4\\xa0'",
+      "identity_label": "alice",
+      "ed25519_prv_hex": "5272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "message_hex": "a86df237ac3d15e22d93a08358ae3a7a78787ee59fc8246c05783f7c56e6c4a0",
+      "message_len": 32,
+      "signature_hex": "bf0c216b798ef9f55b9ae777cdf6315c677b23a0624b800ab9d062d4e0262aab3a47b03742523ef3ca97369373943b3a1afa37b42aa367b8c990dcadf5ecae08",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 verify FAIL \u2014 tampered, identity='alice'",
+      "identity_label": "alice",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "original_message_hex": "a86df237ac3d15e22d93a08358ae3a7a78787ee59fc8246c05783f7c56e6c4a0",
+      "tampered_message_hex": "576df237ac3d15e22d93a08358ae3a7a78787ee59fc8246c05783f7c56e6c4a0",
+      "signature_hex": "bf0c216b798ef9f55b9ae777cdf6315c677b23a0624b800ab9d062d4e0262aab3a47b03742523ef3ca97369373943b3a1afa37b42aa367b8c990dcadf5ecae08",
+      "verify_result": false,
+      "_note": "signature was created over original_message_hex"
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='alice' msg=b'van telemetry packet'",
+      "identity_label": "alice",
+      "ed25519_prv_hex": "5272c90c8d3385d47ede5420a7a9623aad817d9f8a70bd100a0acea7400daa59",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "message_hex": "76616e2074656c656d65747279207061636b6574",
+      "message_len": 20,
+      "signature_hex": "dbc2829c32bd5749cf1c6ce0c91fb98f4bff3f0a88258a7520259897ce9cdd4c33439b9d7aff6f1898ca4633235a24c1e16508bb41339801a1e825a8201a530d",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 verify FAIL \u2014 tampered, identity='alice'",
+      "identity_label": "alice",
+      "ed25519_pub_hex": "a175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628f",
+      "original_message_hex": "76616e2074656c656d65747279207061636b6574",
+      "tampered_message_hex": "89616e2074656c656d65747279207061636b6574",
+      "signature_hex": "dbc2829c32bd5749cf1c6ce0c91fb98f4bff3f0a88258a7520259897ce9cdd4c33439b9d7aff6f1898ca4633235a24c1e16508bb41339801a1e825a8201a530d",
+      "verify_result": false,
+      "_note": "signature was created over original_message_hex"
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='bob' msg=b'hello from reticulum'",
+      "identity_label": "bob",
+      "ed25519_prv_hex": "3b1f0b436636667b27b363011543971f1c81c3151d5ef72733501c1ff33c34af",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "message_hex": "68656c6c6f2066726f6d207265746963756c756d",
+      "message_len": 20,
+      "signature_hex": "deb148ba397519bd5c967f1c03eb318c95a8d0037cdf80f86e29f5c18cdc44ad2d88e1a2ac98d4f3bb36ff51b858ce8904ebdaddb210a194ac078de3a1c61602",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 verify FAIL \u2014 tampered, identity='bob'",
+      "identity_label": "bob",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "original_message_hex": "68656c6c6f2066726f6d207265746963756c756d",
+      "tampered_message_hex": "97656c6c6f2066726f6d207265746963756c756d",
+      "signature_hex": "deb148ba397519bd5c967f1c03eb318c95a8d0037cdf80f86e29f5c18cdc44ad2d88e1a2ac98d4f3bb36ff51b858ce8904ebdaddb210a194ac078de3a1c61602",
+      "verify_result": false,
+      "_note": "signature was created over original_message_hex"
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='bob' msg=b''",
+      "identity_label": "bob",
+      "ed25519_prv_hex": "3b1f0b436636667b27b363011543971f1c81c3151d5ef72733501c1ff33c34af",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "message_hex": "",
+      "message_len": 0,
+      "signature_hex": "34af7e32c36248727c92e1682a911735695b97a311f9eeb26f4e7a40f4feb90fb9a9b5eb29d7bd1362aca477caec62f8f459d247df12bebfeee6144c9d1e6200",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='bob' msg=b'\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00'",
+      "identity_label": "bob",
+      "ed25519_prv_hex": "3b1f0b436636667b27b363011543971f1c81c3151d5ef72733501c1ff33c34af",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "message_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "message_len": 32,
+      "signature_hex": "b2276c272f1dc8138fcc810f0684e6dac5b7e7459a9da5823e727302309e2715b08c40216037826ab03d2c82523dbdad16d3e5aa41782cc96010aa8ec8ae200a",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 verify FAIL \u2014 tampered, identity='bob'",
+      "identity_label": "bob",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "original_message_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "tampered_message_hex": "ff00000000000000000000000000000000000000000000000000000000000000",
+      "signature_hex": "b2276c272f1dc8138fcc810f0684e6dac5b7e7459a9da5823e727302309e2715b08c40216037826ab03d2c82523dbdad16d3e5aa41782cc96010aa8ec8ae200a",
+      "verify_result": false,
+      "_note": "signature was created over original_message_hex"
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='bob' msg=b'\\xa8m\\xf27\\xac=\\x15\\xe2-\\x93\\xa0\\x83X\\xae:zxx~\\xe5\\x9f\\xc8$l\\x05x?|V\\xe6\\xc4\\xa0'",
+      "identity_label": "bob",
+      "ed25519_prv_hex": "3b1f0b436636667b27b363011543971f1c81c3151d5ef72733501c1ff33c34af",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "message_hex": "a86df237ac3d15e22d93a08358ae3a7a78787ee59fc8246c05783f7c56e6c4a0",
+      "message_len": 32,
+      "signature_hex": "70ef5d4edde3fa801504f7c31e453e09a78c186a483f15f53edf880d930b303084ebbaed43f5cac59d4429d381df52516b1393a6c36db64dc0db9126d6d64e0e",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 verify FAIL \u2014 tampered, identity='bob'",
+      "identity_label": "bob",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "original_message_hex": "a86df237ac3d15e22d93a08358ae3a7a78787ee59fc8246c05783f7c56e6c4a0",
+      "tampered_message_hex": "576df237ac3d15e22d93a08358ae3a7a78787ee59fc8246c05783f7c56e6c4a0",
+      "signature_hex": "70ef5d4edde3fa801504f7c31e453e09a78c186a483f15f53edf880d930b303084ebbaed43f5cac59d4429d381df52516b1393a6c36db64dc0db9126d6d64e0e",
+      "verify_result": false,
+      "_note": "signature was created over original_message_hex"
+    },
+    {
+      "_description": "Ed25519 sign \u2014 identity='bob' msg=b'van telemetry packet'",
+      "identity_label": "bob",
+      "ed25519_prv_hex": "3b1f0b436636667b27b363011543971f1c81c3151d5ef72733501c1ff33c34af",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "message_hex": "76616e2074656c656d65747279207061636b6574",
+      "message_len": 20,
+      "signature_hex": "8278be037ff8e7c59e1ac3f0de8fa7280f813fa6d45d13ca95ff1f18c37c2441fbc480bd0703c1e48bfd32c7f1fad680bd56676f04224933ac1184a96b415101",
+      "signature_len": 64,
+      "verify_result": true
+    },
+    {
+      "_description": "Ed25519 verify FAIL \u2014 tampered, identity='bob'",
+      "identity_label": "bob",
+      "ed25519_pub_hex": "1abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416",
+      "original_message_hex": "76616e2074656c656d65747279207061636b6574",
+      "tampered_message_hex": "89616e2074656c656d65747279207061636b6574",
+      "signature_hex": "8278be037ff8e7c59e1ac3f0de8fa7280f813fa6d45d13ca95ff1f18c37c2441fbc480bd0703c1e48bfd32c7f1fad680bd56676f04224933ac1184a96b415101",
+      "verify_result": false,
+      "_note": "signature was created over original_message_hex"
+    }
+  ],
+  "encryption_vectors": [
+    {
+      "_description": "Encrypt/decrypt \u2014 plaintext_len=5",
+      "recipient_x25519_prv_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7",
+      "recipient_x25519_pub_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0f",
+      "plaintext_hex": "68656c6c6f",
+      "plaintext_len": 5,
+      "ciphertext_hex": "9c2e7880b96c60c88c1bcf91547684eb1ec0e81450279091768b4f68baf4a53fea9f1b21dd91ef1fa0e7213b2ea3a4fc4a963731a52ff77bbc9d98f578359fbcb96d129af3959c5b6116e466f1109b64ebf3521e1843d8395af4c1da667e9c43",
+      "ciphertext_len": 96,
+      "_layout": "ciphertext = ephemeral_X25519_pub[32] || AES_IV[16] || aes_body",
+      "_decrypt_steps": [
+        "ephemeral_pub = ciphertext[0:32]",
+        "iv            = ciphertext[32:48]",
+        "body          = ciphertext[48:]",
+        "shared_secret = X25519(recipient_prv, ephemeral_pub)",
+        "key_material  = HKDF(shared_secret, length=32)",
+        "plaintext     = AES-128-CBC-decrypt(key=key_material[0:16], iv=iv, data=body)"
+      ]
+    },
+    {
+      "_description": "Encrypt/decrypt \u2014 plaintext_len=30",
+      "recipient_x25519_prv_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7",
+      "recipient_x25519_pub_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0f",
+      "plaintext_hex": "76616e3a2074656d703d3638206261743d3837206865617465723d6f6666",
+      "plaintext_len": 30,
+      "ciphertext_hex": "4a3f4d58798568ace80291ef350224df67245dde2b23945377cb1bb3902e77335d3dc702ca672138d13d8bb81a3d75b9804b23e40bf8739623b668865a9a4a7db1f7f62a002bd0074709c2d47619557cbb9d9e75a99ad1258acbcb99f89f3bb065317f216c07cb6769e39b702e98caaf",
+      "ciphertext_len": 112,
+      "_layout": "ciphertext = ephemeral_X25519_pub[32] || AES_IV[16] || aes_body",
+      "_decrypt_steps": [
+        "ephemeral_pub = ciphertext[0:32]",
+        "iv            = ciphertext[32:48]",
+        "body          = ciphertext[48:]",
+        "shared_secret = X25519(recipient_prv, ephemeral_pub)",
+        "key_material  = HKDF(shared_secret, length=32)",
+        "plaintext     = AES-128-CBC-decrypt(key=key_material[0:16], iv=iv, data=body)"
+      ]
+    },
+    {
+      "_description": "Encrypt/decrypt \u2014 plaintext_len=32",
+      "recipient_x25519_prv_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7",
+      "recipient_x25519_pub_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0f",
+      "plaintext_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "plaintext_len": 32,
+      "ciphertext_hex": "1a786498fa87df80973e806752f06353b78920896c9b2adf7f9666758b7a2e21a61118a9783167fdec8acc6f71286e90c8dd994774ee6acdcbe42f2ddef0dd9ba835d25d00cad335911d2ac4ad11e08238e91cf5b63614d8fa5c9e1caf52a4a808c23fee95e230ec5b79eb5091d978b8e25a81c53e39b03c53a1483c03954a04",
+      "ciphertext_len": 128,
+      "_layout": "ciphertext = ephemeral_X25519_pub[32] || AES_IV[16] || aes_body",
+      "_decrypt_steps": [
+        "ephemeral_pub = ciphertext[0:32]",
+        "iv            = ciphertext[32:48]",
+        "body          = ciphertext[48:]",
+        "shared_secret = X25519(recipient_prv, ephemeral_pub)",
+        "key_material  = HKDF(shared_secret, length=32)",
+        "plaintext     = AES-128-CBC-decrypt(key=key_material[0:16], iv=iv, data=body)"
+      ]
+    },
+    {
+      "_description": "Encrypt/decrypt \u2014 plaintext_len=64",
+      "recipient_x25519_prv_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7",
+      "recipient_x25519_pub_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0f",
+      "plaintext_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "plaintext_len": 64,
+      "ciphertext_hex": "fbf2eb4e4941d76987b2da43c2ca6643bd466fac718b53207e97059dc4a70e54fe40f815cf8ef169615c9474eb21e2bd207ce7284e3b2803a831e688245eed41bf31f911ee651292899f2cde8524d900243ee3654ebb2b34a474c103c229687a8b31de5e9db665d9b9a2fb7f906241c41541ed9b740fb72be65ffa829ddeafb4be094255b99619034688767ed63c2bb83211ab5e5f9dd01373b4556f6c32d4d1",
+      "ciphertext_len": 160,
+      "_layout": "ciphertext = ephemeral_X25519_pub[32] || AES_IV[16] || aes_body",
+      "_decrypt_steps": [
+        "ephemeral_pub = ciphertext[0:32]",
+        "iv            = ciphertext[32:48]",
+        "body          = ciphertext[48:]",
+        "shared_secret = X25519(recipient_prv, ephemeral_pub)",
+        "key_material  = HKDF(shared_secret, length=32)",
+        "plaintext     = AES-128-CBC-decrypt(key=key_material[0:16], iv=iv, data=body)"
+      ]
+    },
+    {
+      "_description": "Encrypt/decrypt \u2014 plaintext_len=382",
+      "recipient_x25519_prv_hex": "408b27d3097eea5a46bf2ab6433a7234a33d5e49957b13ec7acc2ca08e1a13c7",
+      "recipient_x25519_pub_hex": "80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0f",
+      "plaintext_hex": "41414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "plaintext_len": 382,
+      "ciphertext_hex": "c87376da4fff792b31e23ce68931368204087182e718e69d95f84bf0fc45620b43489aa01ab3de54c1bf5b972395d9a0fad2ed73aff9d2498b3c4244503a1ad229ff0879f73901b80910e8c886cb02bec09b00aa3de324b22c6fa923b271e51d65bf82daa2f3d117ff653d32b299b8d95cc1d636abe0f98d370b266625576e7ae39e766f11cfb020209cb0ab877caf59cefb72b01f23046f56534259dcb792359fc40705c622e906eb07d5d437ec0a5f5ada1723cf52d3d2e0c950029f0c3c3335dca40288a6ee568e000f5dbd028408f85fe3ede568912a57a2d909149037bd00ae9f83d7df446053de5631d71ff70a220a646ea6c5b45448b04896c113c7b5e5a0a0a367b3eb45fa3e8bb159b95269ac151319dbacb8ffea0c5f2992848a4547ec94242c9b89607469d9681dd9951ce5fe7dad5a19134266fbfa568a7ef029386d5ef62b415e6600c39306bb4ffa3f3df5a4042b0589a62cf0a64d3e2b9cf9c224de1d4e15651aad0e201f8ae128f2f5f00e7fb11664e1f3b3ee186eadb1169ca8f26fc88892a9a6f0cbab8abfd10594e59033890c06b972fa03417753ef491834c41db939b8a2c68109c6f0f16da897fa883f330421872264435b9a9251511feff50ab3e86c1bfa3018f3551c3fe0",
+      "ciphertext_len": 464,
+      "_layout": "ciphertext = ephemeral_X25519_pub[32] || AES_IV[16] || aes_body",
+      "_decrypt_steps": [
+        "ephemeral_pub = ciphertext[0:32]",
+        "iv            = ciphertext[32:48]",
+        "body          = ciphertext[48:]",
+        "shared_secret = X25519(recipient_prv, ephemeral_pub)",
+        "key_material  = HKDF(shared_secret, length=32)",
+        "plaintext     = AES-128-CBC-decrypt(key=key_material[0:16], iv=iv, data=body)"
+      ]
+    }
+  ],
+  "packet_hash_vectors": [
+    {
+      "_description": "Packet hash \u2014 payload=b'test'",
+      "raw_hex": "0800a4a6badb3a1da49d386a3569d5c052170074657374",
+      "hashable_part_hex": "08a4a6badb3a1da49d386a3569d5c052170074657374",
+      "packet_hash_hex": "5b664d4cde6f011fd5bed4cc2ea1562bbaa1d33bc84362dfc98e599f32b0a55d",
+      "packet_hash_len": 32,
+      "_formula": "hashable_part = (raw[0] & 0x0F) || raw[2:]  [HEADER_1]. packet_hash = SHA-256(hashable_part)  [32 bytes, full, NOT truncated]"
+    },
+    {
+      "_description": "Packet hash hop-invariance \u2014 payload=b'test' hops=5",
+      "raw_hex": "0805a4a6badb3a1da49d386a3569d5c052170074657374",
+      "hashable_part_hex": "08a4a6badb3a1da49d386a3569d5c052170074657374",
+      "packet_hash_hex": "5b664d4cde6f011fd5bed4cc2ea1562bbaa1d33bc84362dfc98e599f32b0a55d",
+      "_note": "Identical to hops=0 hash above \u2014 hops byte excluded from hashable_part"
+    },
+    {
+      "_description": "Packet hash \u2014 payload=b'hello world'",
+      "raw_hex": "0800a4a6badb3a1da49d386a3569d5c052170068656c6c6f20776f726c64",
+      "hashable_part_hex": "08a4a6badb3a1da49d386a3569d5c052170068656c6c6f20776f726c64",
+      "packet_hash_hex": "1b78dbe8bffd7262cc3e8a7be4e88ca4bdd0ee0d60f36975f6e3146b10a6e24f",
+      "packet_hash_len": 32,
+      "_formula": "hashable_part = (raw[0] & 0x0F) || raw[2:]  [HEADER_1]. packet_hash = SHA-256(hashable_part)  [32 bytes, full, NOT truncated]"
+    },
+    {
+      "_description": "Packet hash hop-invariance \u2014 payload=b'hello world' hops=5",
+      "raw_hex": "0805a4a6badb3a1da49d386a3569d5c052170068656c6c6f20776f726c64",
+      "hashable_part_hex": "08a4a6badb3a1da49d386a3569d5c052170068656c6c6f20776f726c64",
+      "packet_hash_hex": "1b78dbe8bffd7262cc3e8a7be4e88ca4bdd0ee0d60f36975f6e3146b10a6e24f",
+      "_note": "Identical to hops=0 hash above \u2014 hops byte excluded from hashable_part"
+    },
+    {
+      "_description": "Packet hash \u2014 payload=b'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'",
+      "raw_hex": "0800a4a6badb3a1da49d386a3569d5c05217004141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "hashable_part_hex": "08a4a6badb3a1da49d386a3569d5c05217004141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "packet_hash_hex": "b3ef3b3ce3b729a1145243173ae94b63f183ccc07d443351442949843787413a",
+      "packet_hash_len": 32,
+      "_formula": "hashable_part = (raw[0] & 0x0F) || raw[2:]  [HEADER_1]. packet_hash = SHA-256(hashable_part)  [32 bytes, full, NOT truncated]"
+    },
+    {
+      "_description": "Packet hash hop-invariance \u2014 payload=b'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' hops=5",
+      "raw_hex": "0805a4a6badb3a1da49d386a3569d5c05217004141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "hashable_part_hex": "08a4a6badb3a1da49d386a3569d5c05217004141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "packet_hash_hex": "b3ef3b3ce3b729a1145243173ae94b63f183ccc07d443351442949843787413a",
+      "_note": "Identical to hops=0 hash above \u2014 hops byte excluded from hashable_part"
+    },
+    {
+      "_description": "Packet hash \u2014 payload=b''",
+      "raw_hex": "0800a4a6badb3a1da49d386a3569d5c0521700",
+      "hashable_part_hex": "08a4a6badb3a1da49d386a3569d5c0521700",
+      "packet_hash_hex": "19d0ddfa75be310bea8503a97a1b5363d672099b9d9b90c93b9ba483fb512956",
+      "packet_hash_len": 32,
+      "_formula": "hashable_part = (raw[0] & 0x0F) || raw[2:]  [HEADER_1]. packet_hash = SHA-256(hashable_part)  [32 bytes, full, NOT truncated]"
+    },
+    {
+      "_description": "Packet hash hop-invariance \u2014 payload=b'' hops=5",
+      "raw_hex": "0805a4a6badb3a1da49d386a3569d5c0521700",
+      "hashable_part_hex": "08a4a6badb3a1da49d386a3569d5c0521700",
+      "packet_hash_hex": "19d0ddfa75be310bea8503a97a1b5363d672099b9d9b90c93b9ba483fb512956",
+      "_note": "Identical to hops=0 hash above \u2014 hops byte excluded from hashable_part"
+    }
+  ],
+  "roundtrip_vectors": [
+    {
+      "_description": "Round-trip: PLAIN DATA \u2014 short",
+      "raw_hex": "08006259167520c819b009077caad28a392d0068656c6c6f20776f726c64",
+      "raw_len": 30,
+      "flags_byte": 8,
+      "hops": 0,
+      "dest_hash_hex": "6259167520c819b009077caad28a392d",
+      "packet_type": 0,
+      "header_type": 0,
+      "dest_type": 2,
+      "context_byte": 0,
+      "payload_hex": "68656c6c6f20776f726c64",
+      "payload_len": 11,
+      "packet_hash_hex": "cf69e339d90b93581e1ad8aaa02e6db682adc4aaa9aba6030e831fb6e799c230"
+    },
+    {
+      "_description": "Round-trip: PLAIN DATA \u2014 empty",
+      "raw_hex": "08006259167520c819b009077caad28a392d00",
+      "raw_len": 19,
+      "flags_byte": 8,
+      "hops": 0,
+      "dest_hash_hex": "6259167520c819b009077caad28a392d",
+      "packet_type": 0,
+      "header_type": 0,
+      "dest_type": 2,
+      "context_byte": 0,
+      "payload_hex": "",
+      "payload_len": 0,
+      "packet_hash_hex": "b6abf5c928e412460be9859abef8645e947a2c64651e26cbe19896cc767b8b64"
+    },
+    {
+      "_description": "Round-trip: PLAIN DATA \u2014 binary",
+      "raw_hex": "08006259167520c819b009077caad28a392d00ff00ab",
+      "raw_len": 22,
+      "flags_byte": 8,
+      "hops": 0,
+      "dest_hash_hex": "6259167520c819b009077caad28a392d",
+      "packet_type": 0,
+      "header_type": 0,
+      "dest_type": 2,
+      "context_byte": 0,
+      "payload_hex": "ff00ab",
+      "payload_len": 3,
+      "packet_hash_hex": "3c5381fd03a93da8d554ead27a7adcf2e993672e0fd833d49f1bcc547b2bf239"
+    },
+    {
+      "_description": "Round-trip: PLAIN DATA \u2014 longer",
+      "raw_hex": "08006259167520c819b009077caad28a392d005858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858",
+      "raw_len": 219,
+      "flags_byte": 8,
+      "hops": 0,
+      "dest_hash_hex": "6259167520c819b009077caad28a392d",
+      "packet_type": 0,
+      "header_type": 0,
+      "dest_type": 2,
+      "context_byte": 0,
+      "payload_hex": "5858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858585858",
+      "payload_len": 200,
+      "packet_hash_hex": "39999496d6db615ebc86d267f0ea17ff9a4d99dff3c4c082d3eb353dc4ccf07c"
+    }
+  ]
+}
