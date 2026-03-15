@@ -118,7 +118,7 @@ fn forward_excludes_source_interface() {
             .unwrap()
             .block_on(async {
                 let mut node = make_node(b"multi-iface-1");
-                node.enable_transport();
+                node.core.enable_transport();
 
                 let local_hash = node.core.identity.hash();
                 let dest = [0xCC; TRUNCATED_HASH_LEN];
@@ -200,7 +200,7 @@ fn local_data_not_forwarded() {
             .unwrap()
             .block_on(async {
                 let mut node = make_node(b"multi-iface-3");
-                let node_dest = *node.dest_hash();
+                let node_dest = *node.core.dest_hash();
 
                 let data = build_header1_data(&node_dest, b"local data");
                 let inbound = vec![InboundMsg { iface_idx: 0, data }];
@@ -234,7 +234,7 @@ fn proof_routed_to_correct_interface() {
             .unwrap()
             .block_on(async {
                 let mut node = make_node(b"multi-iface-4");
-                node.enable_transport();
+                node.core.enable_transport();
 
                 let local_hash = node.core.identity.hash();
                 let dest = [0xCC; TRUNCATED_HASH_LEN];

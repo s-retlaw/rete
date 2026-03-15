@@ -31,13 +31,39 @@ pub use transport::{
     IngestResult, ReverseEntry, TickResult, Transport, PATH_REQUEST_DEST, REVERSE_TIMEOUT,
 };
 
+// ---------------------------------------------------------------------------
+// Transport sizing constants — shared by Transport and NodeCore type aliases
+// ---------------------------------------------------------------------------
+
+/// Embedded: max learned destination paths.
+pub const EMBEDDED_MAX_PATHS: usize = 64;
+/// Embedded: max pending outbound announces.
+pub const EMBEDDED_MAX_ANNOUNCES: usize = 16;
+/// Embedded: duplicate-detection window size.
+pub const EMBEDDED_DEDUP_WINDOW: usize = 128;
+/// Embedded: max concurrent link sessions.
+pub const EMBEDDED_MAX_LINKS: usize = 4;
+
+/// Hosted: max learned destination paths.
+pub const HOSTED_MAX_PATHS: usize = 1024;
+/// Hosted: max pending outbound announces.
+pub const HOSTED_MAX_ANNOUNCES: usize = 256;
+/// Hosted: duplicate-detection window size.
+pub const HOSTED_DEDUP_WINDOW: usize = 4096;
+/// Hosted: max concurrent link sessions.
+pub const HOSTED_MAX_LINKS: usize = 32;
+
 /// Transport for embedded targets (conservative memory).
-/// Generics: MAX_PATHS=64, MAX_ANNOUNCES=16, DEDUP_WINDOW=128, MAX_LINKS=4
-pub type EmbeddedTransport = Transport<64, 16, 128, 4>;
+pub type EmbeddedTransport = Transport<
+    EMBEDDED_MAX_PATHS,
+    EMBEDDED_MAX_ANNOUNCES,
+    EMBEDDED_DEDUP_WINDOW,
+    EMBEDDED_MAX_LINKS,
+>;
 
 /// Transport for hosted/gateway targets.
-/// Generics: MAX_PATHS=1024, MAX_ANNOUNCES=256, DEDUP_WINDOW=4096, MAX_LINKS=32
-pub type HostedTransport = Transport<1024, 256, 4096, 32>;
+pub type HostedTransport =
+    Transport<HOSTED_MAX_PATHS, HOSTED_MAX_ANNOUNCES, HOSTED_DEDUP_WINDOW, HOSTED_MAX_LINKS>;
 
 /// Default announce interval in seconds.
 pub const ANNOUNCE_INTERVAL_SECS: u64 = 300;

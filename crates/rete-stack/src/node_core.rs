@@ -382,10 +382,20 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 }
 
 /// Hosted node core (generous memory for desktop/gateway).
-pub type HostedNodeCore = NodeCore<1024, 256, 4096, 32>;
+pub type HostedNodeCore = NodeCore<
+    { rete_transport::HOSTED_MAX_PATHS },
+    { rete_transport::HOSTED_MAX_ANNOUNCES },
+    { rete_transport::HOSTED_DEDUP_WINDOW },
+    { rete_transport::HOSTED_MAX_LINKS },
+>;
 
 /// Embedded node core (conservative memory for MCUs).
-pub type EmbeddedNodeCore = NodeCore<64, 16, 128, 4>;
+pub type EmbeddedNodeCore = NodeCore<
+    { rete_transport::EMBEDDED_MAX_PATHS },
+    { rete_transport::EMBEDDED_MAX_ANNOUNCES },
+    { rete_transport::EMBEDDED_DEDUP_WINDOW },
+    { rete_transport::EMBEDDED_MAX_LINKS },
+>;
 
 // ---------------------------------------------------------------------------
 // Tests

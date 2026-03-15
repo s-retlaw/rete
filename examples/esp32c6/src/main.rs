@@ -141,7 +141,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Create node
     let mut node = EmbassyNode::new(identity, APP_NAME, ASPECTS);
-    let dh = node.dest_hash();
+    let dh = node.core.dest_hash();
     println!(
         "[rete] dest: {:02x}{:02x}{:02x}{:02x}...",
         dh[0], dh[1], dh[2], dh[3]

@@ -83,7 +83,7 @@ async fn main() {
     // Create node
     let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
     if transport_mode {
-        node.enable_transport();
+        node.core.enable_transport();
         eprintln!("[rete] transport mode enabled");
     }
 
@@ -114,13 +114,16 @@ async fn main() {
             .as_secs();
         let msg = format!("ping:{ts}");
         eprintln!("[rete] auto-reply-ping: {msg}");
-        node.set_auto_reply(Some(msg.into_bytes()));
+        node.core.set_auto_reply(Some(msg.into_bytes()));
     }
 
     if let Some(msg) = auto_reply {
-        node.set_auto_reply(Some(msg.into_bytes()));
+        node.core.set_auto_reply(Some(msg.into_bytes()));
     }
-    eprintln!("[rete] destination hash: {}", hex::encode(node.dest_hash()));
+    eprintln!(
+        "[rete] destination hash: {}",
+        hex::encode(node.core.dest_hash())
+    );
 
     // Dispatch based on interface type
     if let Some(path) = serial_path {

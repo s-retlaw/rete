@@ -161,7 +161,7 @@ async fn embassy_node_receives_announce() {
 #[tokio::test]
 async fn embassy_node_receives_encrypted_data() {
     let mut node = make_node(b"test-node-3");
-    let node_dest = *node.dest_hash();
+    let node_dest = *node.core.dest_hash();
     let mut iface = MockInterface::new();
     let mut rng = rand::thread_rng();
     let mut events = Vec::new();
@@ -210,8 +210,8 @@ async fn embassy_node_receives_encrypted_data() {
 #[tokio::test]
 async fn embassy_node_echo_mode() {
     let mut node = make_node(b"test-node-4");
-    let node_dest = *node.dest_hash();
-    node.set_echo_data(true);
+    let node_dest = *node.core.dest_hash();
+    node.core.set_echo_data(true);
     let mut iface = MockInterface::new();
     let mut rng = rand::thread_rng();
     let mut events = Vec::new();
@@ -260,7 +260,8 @@ async fn embassy_node_echo_mode() {
 #[tokio::test]
 async fn embassy_node_auto_reply() {
     let mut node = make_node(b"test-node-5");
-    node.set_auto_reply(Some(b"auto-reply message".to_vec()));
+    node.core
+        .set_auto_reply(Some(b"auto-reply message".to_vec()));
     let mut iface = MockInterface::new();
     let mut rng = rand::thread_rng();
     let mut events = Vec::new();

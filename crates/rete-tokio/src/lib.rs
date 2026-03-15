@@ -31,31 +31,6 @@ impl TokioNode {
         }
     }
 
-    /// Enable transport mode: forward HEADER_2 packets for other nodes.
-    pub fn enable_transport(&mut self) {
-        self.core.enable_transport();
-    }
-
-    /// Returns our destination hash.
-    pub fn dest_hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
-        self.core.dest_hash()
-    }
-
-    /// Set an auto-reply message sent to any peer that announces.
-    pub fn set_auto_reply(&mut self, msg: Option<Vec<u8>>) {
-        self.core.set_auto_reply(msg);
-    }
-
-    /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
-    pub fn set_echo_data(&mut self, echo: bool) {
-        self.core.set_echo_data(echo);
-    }
-
-    /// Set the proof generation strategy for incoming data packets.
-    pub fn set_proof_strategy(&mut self, strategy: ProofStrategy) {
-        self.core.set_proof_strategy(strategy);
-    }
-
     /// Queue a data message to send immediately after the initial announce.
     pub fn send_on_start(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN], data: Vec<u8>) {
         self.initial_send = Some((data, dest_hash));

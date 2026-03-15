@@ -16,7 +16,7 @@ use embassy_futures::select::{select3, Either3};
 use embassy_time::{Duration, Instant, Timer};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
-use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN};
+use rete_core::{Identity, MTU};
 pub use rete_stack::NodeEvent;
 pub use rete_stack::ProofStrategy;
 use rete_stack::{EmbeddedNodeCore, ReteInterface};
@@ -142,31 +142,6 @@ impl EmbassyNode {
             core: EmbeddedNodeCore::new(identity, app_name, aspects),
             epoch_offset: 0,
         }
-    }
-
-    /// Enable transport mode: forward HEADER_2 packets for other nodes.
-    pub fn enable_transport(&mut self) {
-        self.core.enable_transport();
-    }
-
-    /// Returns our destination hash.
-    pub fn dest_hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
-        self.core.dest_hash()
-    }
-
-    /// Set an auto-reply message sent to any peer that announces.
-    pub fn set_auto_reply(&mut self, msg: Option<Vec<u8>>) {
-        self.core.set_auto_reply(msg);
-    }
-
-    /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
-    pub fn set_echo_data(&mut self, echo: bool) {
-        self.core.set_echo_data(echo);
-    }
-
-    /// Set the proof generation strategy for incoming data packets.
-    pub fn set_proof_strategy(&mut self, strategy: ProofStrategy) {
-        self.core.set_proof_strategy(strategy);
     }
 
     /// Set the epoch offset so announce timestamps approximate Unix time.
