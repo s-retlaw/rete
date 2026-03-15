@@ -167,11 +167,15 @@ name = "rete-interop-tests"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "pyserial" },
     { name = "rns" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "rns", specifier = ">=0.8.0" }]
+requires-dist = [
+    { name = "pyserial", specifier = ">=3.5" },
+    { name = "rns", specifier = ">=0.8.0" },
+]
 
 [[package]]
 name = "rns"

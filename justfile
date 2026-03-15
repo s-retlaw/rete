@@ -121,6 +121,25 @@ e2e-esp32c6: build-esp32c6
     fi
 
 # --------------------------------------------------------------------------
+# End-to-end test: ESP32-C6 <-> Python RNS reference over serial
+# --------------------------------------------------------------------------
+
+# Flash ESP32-C6, send/receive data using Python RNS crypto
+e2e-esp32c6-python: build-esp32c6
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Flash ESP32
+    espflash flash --port {{serial_port}} \
+        {{esp32c6_dir}}/target/{{esp32c6_target}}/release/rete-esp32c6-serial
+    echo ""
+    echo "=== ESP32-C6 flashed ==="
+    echo "=== Flow: Python RNS sends ping → ESP32 echoes back ==="
+    echo ""
+    sleep 0.5
+    cd tests/interop && uv run python serial_interop.py \
+        --port {{serial_port}} --timeout 10
+
+# --------------------------------------------------------------------------
 # Test vectors
 # --------------------------------------------------------------------------
 
