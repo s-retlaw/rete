@@ -202,7 +202,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         // Register receipt for proof tracking
         if let Ok(parsed) = Packet::parse(&pkt_buf[..pkt_len]) {
             let pkt_hash = parsed.compute_hash();
-            self.transport.register_receipt(pkt_hash, pub_key, now, RECEIPT_TIMEOUT);
+            self.transport
+                .register_receipt(pkt_hash, pub_key, now, RECEIPT_TIMEOUT);
         }
 
         Some(pkt_buf[..pkt_len].to_vec())

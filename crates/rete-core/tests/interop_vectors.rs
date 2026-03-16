@@ -42,13 +42,14 @@ fn identity_key_derivation() {
         );
 
         // Individual sub-keys
+        let pub_key = id.public_key();
         assert_eq!(
-            hex::encode(id.x25519_pub),
+            hex::encode(&pub_key[..32]),
             x_pub_hex,
             "x25519_pub mismatch for '{label}'"
         );
         assert_eq!(
-            hex::encode(id.ed25519_pub),
+            hex::encode(&pub_key[32..]),
             ed_pub_hex,
             "ed25519_pub mismatch for '{label}'"
         );
@@ -131,20 +132,16 @@ fn signing_vectors() {
         if verify_ok {
             // Sign test: verify our signature matches
             let ed_prv_hex = sv["ed25519_prv_hex"].as_str().unwrap();
-            let ed_pub_hex = sv["ed25519_pub_hex"].as_str().unwrap();
             let msg_hex = sv["message_hex"].as_str().unwrap();
             let sig_hex = sv["signature_hex"].as_str().unwrap();
 
             // Build identity with just the Ed25519 keys (X25519 doesn't matter)
             let ed_prv = unhex(ed_prv_hex);
-            let ed_pub = unhex(ed_pub_hex);
 
             // We need a full 64-byte private key. Use dummy X25519 bytes.
             let mut prv_key = [0u8; 64];
             prv_key[32..].copy_from_slice(&ed_prv);
-            let mut id = Identity::from_private_key(&prv_key).unwrap();
-            // Override ed25519_pub with expected value (X25519 derivation sets different pub)
-            id.ed25519_pub.copy_from_slice(&ed_pub);
+            let id = Identity::from_private_key(&prv_key).unwrap();
 
             let msg = unhex(msg_hex);
             let expected = unhex(sig_hex);
@@ -166,14 +163,10 @@ fn signing_vectors() {
             let tampered = unhex(tampered_hex);
             let sig = unhex(sig_hex);
 
-            // Build identity with just the public key
-            let mut id = Identity {
-                x25519_prv: [0; 32],
-                x25519_pub: [0; 32],
-                ed25519_prv: [0; 32],
-                ed25519_pub: [0; 32],
-            };
-            id.ed25519_pub.copy_from_slice(&ed_pub);
+            // Build verify-only identity from public key
+            let mut pub_key = [0u8; 64];
+            pub_key[32..].copy_from_slice(&ed_pub);
+            let id = Identity::from_public_key(&pub_key).unwrap();
 
             assert!(
                 id.verify(&tampered, &sig).is_err(),
@@ -331,15 +324,8 @@ fn announce_signature_vectors() {
             let signed = unhex(signed_hex);
             let sig = unhex(sig_hex);
 
-            // Create identity from public key only
-            let mut id = Identity {
-                x25519_prv: [0; 32],
-                x25519_pub: [0; 32],
-                ed25519_prv: [0; 32],
-                ed25519_pub: [0; 32],
-            };
-            id.x25519_pub.copy_from_slice(&pub_key[..32]);
-            id.ed25519_pub.copy_from_slice(&pub_key[32..64]);
+            // Create verify-only identity from public key
+            let id = Identity::from_public_key(&pub_key).unwrap();
 
             id.verify(&signed, &sig)
                 .unwrap_or_else(|e| panic!("announce pubkey verify failed: {desc}: {e}"));

@@ -34,7 +34,7 @@ fn build_link_request(
     identity: &Identity,
     rng: &mut impl rand_core::CryptoRngCore,
 ) -> (Vec<u8>, [u8; 64]) {
-    let (_, request_payload) = Link::new_initiator(*dest_hash, &identity.ed25519_pub, rng, 100);
+    let (_, request_payload) = Link::new_initiator(*dest_hash, identity.ed25519_pub(), rng, 100);
 
     let mut buf = [0u8; MTU];
     let n = PacketBuilder::new(&mut buf)
@@ -77,7 +77,7 @@ fn full_handshake() -> (
     };
 
     // Initiator sets up its link (manually, since it needs the raw packet)
-    let (mut init_link, _) = Link::new_initiator(resp_dest, &init_id.ed25519_pub, &mut rng, 100);
+    let (mut init_link, _) = Link::new_initiator(resp_dest, init_id.ed25519_pub(), &mut rng, 100);
     // Recompute from the same raw packet
     init_link.set_link_id(link_id);
 

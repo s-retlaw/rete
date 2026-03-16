@@ -53,16 +53,27 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, PartialEq, Eq)]
 pub struct Identity {
     /// X25519 private scalar (32 bytes).
-    pub x25519_prv: [u8; 32],
+    pub(crate) x25519_prv: [u8; 32],
     /// X25519 public point (32 bytes).
-    pub x25519_pub: [u8; 32],
+    pub(crate) x25519_pub: [u8; 32],
     /// Ed25519 signing key seed (32 bytes).
-    pub ed25519_prv: [u8; 32],
+    pub(crate) ed25519_prv: [u8; 32],
     /// Ed25519 verifying key (32 bytes).
-    pub ed25519_pub: [u8; 32],
+    pub(crate) ed25519_pub: [u8; 32],
+    /// Precomputed identity hash (SHA-256(pub_key)[0:16]).
+    cached_hash: [u8; TRUNCATED_HASH_LEN],
 }
 
 impl Identity {
+    /// Compute identity hash from raw public key halves.
+    fn compute_hash(x25519_pub: &[u8; 32], ed25519_pub: &[u8; 32]) -> [u8; TRUNCATED_HASH_LEN] {
+        let mut pub_key = [0u8; 64];
+        pub_key[..32].copy_from_slice(x25519_pub);
+        pub_key[32..].copy_from_slice(ed25519_pub);
+        let digest = Sha256::digest(pub_key);
+        digest[..TRUNCATED_HASH_LEN].try_into().unwrap()
+    }
+
     /// Create a verify-only Identity from a 64-byte combined public key.
     ///
     /// Format: `X25519_pub[0:32] || Ed25519_pub[32:64]`
@@ -80,11 +91,13 @@ impl Identity {
         let mut ed25519_pub = [0u8; 32];
         x25519_pub.copy_from_slice(&pub_key[..32]);
         ed25519_pub.copy_from_slice(&pub_key[32..64]);
+        let cached_hash = Self::compute_hash(&x25519_pub, &ed25519_pub);
         Ok(Identity {
             x25519_prv: [0u8; 32],
             x25519_pub,
             ed25519_prv: [0u8; 32],
             ed25519_pub,
+            cached_hash,
         })
     }
 
@@ -113,11 +126,13 @@ impl Identity {
         let signing = ed25519_dalek::SigningKey::from_bytes(&ed25519_prv);
         let ed25519_pub = signing.verifying_key().to_bytes();
 
+        let cached_hash = Self::compute_hash(&x25519_pub, &ed25519_pub);
         Ok(Identity {
             x25519_prv,
             x25519_pub,
             ed25519_prv,
             ed25519_pub,
+            cached_hash,
         })
     }
 
@@ -158,13 +173,16 @@ impl Identity {
         out
     }
 
-    /// Compute the 16-byte identity hash.
+    /// Returns the precomputed 16-byte identity hash.
     ///
     /// `identity_hash = SHA-256(pub_key)[0:16]`
     pub fn hash(&self) -> [u8; TRUNCATED_HASH_LEN] {
-        let pub_key = self.public_key();
-        let digest = Sha256::digest(pub_key);
-        digest[..TRUNCATED_HASH_LEN].try_into().unwrap()
+        self.cached_hash
+    }
+
+    /// Returns the Ed25519 verifying key (32 bytes).
+    pub fn ed25519_pub(&self) -> &[u8; 32] {
+        &self.ed25519_pub
     }
 
     /// Sign `message` with the Ed25519 key.

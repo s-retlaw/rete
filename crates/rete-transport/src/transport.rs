@@ -311,7 +311,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         now: u64,
         timeout: u64,
     ) -> bool {
-        self.receipts.register(packet_hash, dest_pub_key, now, timeout)
+        self.receipts
+            .register(packet_hash, dest_pub_key, now, timeout)
     }
 
     /// Number of tracked receipts.
@@ -334,7 +335,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         now: u64,
     ) -> Option<(alloc::vec::Vec<u8>, [u8; TRUNCATED_HASH_LEN])> {
         let (mut link, request_payload) =
-            Link::new_initiator(dest_hash, &identity.ed25519_pub, rng, now);
+            Link::new_initiator(dest_hash, identity.ed25519_pub(), rng, now);
 
         // Build LINKREQUEST packet
         let mut pkt_buf = [0u8; rete_core::MTU];
@@ -1083,9 +1084,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     ///
     /// Sends a DATA packet addressed to `PATH_REQUEST_DEST` (PLAIN) with
     /// `dest_hash` as the payload.
-    pub fn build_path_request(
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
-    ) -> alloc::vec::Vec<u8> {
+    pub fn build_path_request(dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> alloc::vec::Vec<u8> {
         let mut buf = [0u8; rete_core::MTU];
         let n = PacketBuilder::new(&mut buf)
             .packet_type(PacketType::Data)

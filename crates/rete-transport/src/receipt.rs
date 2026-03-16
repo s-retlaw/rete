@@ -130,29 +130,23 @@ impl<const MAX: usize> ReceiptTable<MAX> {
     }
 
     /// Expire receipts that have timed out.
-    ///
-    /// Returns the hashes of expired receipts.
-    pub fn tick(&mut self, now: u64) -> Vec<[u8; 32]> {
-        let mut expired = Vec::new();
-        let mut to_update = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
+    pub fn tick(&mut self, now: u64) {
+        let mut to_expire: Vec<[u8; TRUNCATED_HASH_LEN]> = Vec::new();
 
         for (key, receipt) in self.entries.iter() {
             if receipt.status == ReceiptStatus::Sent
                 && receipt.timeout > 0
                 && now.saturating_sub(receipt.sent_at) > receipt.timeout
             {
-                expired.push(receipt.packet_hash);
-                let _ = to_update.push(*key);
+                to_expire.push(*key);
             }
         }
 
-        for key in &to_update {
+        for key in &to_expire {
             if let Some(r) = self.entries.get_mut(key) {
                 r.status = ReceiptStatus::Failed;
             }
         }
-
-        expired
     }
 
     /// Number of tracked receipts.
@@ -262,14 +256,11 @@ mod tests {
         let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
 
         // Before timeout
-        let expired = table.tick(129);
-        assert!(expired.is_empty());
+        table.tick(129);
         assert_eq!(table.get(&trunc).unwrap().status, ReceiptStatus::Sent);
 
         // After timeout
-        let expired = table.tick(131);
-        assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0], packet_hash);
+        table.tick(131);
         assert_eq!(table.get(&trunc).unwrap().status, ReceiptStatus::Failed);
     }
 }

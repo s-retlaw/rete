@@ -20,9 +20,7 @@ pub enum NodeCommand {
         payload: Vec<u8>,
     },
     /// Initiate a link to a destination.
-    InitiateLink {
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-    },
+    InitiateLink { dest_hash: [u8; TRUNCATED_HASH_LEN] },
     /// Send a channel message on an active link.
     SendChannelMessage {
         link_id: [u8; TRUNCATED_HASH_LEN],
@@ -30,13 +28,9 @@ pub enum NodeCommand {
         payload: Vec<u8>,
     },
     /// Request a path to a destination.
-    RequestPath {
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-    },
+    RequestPath { dest_hash: [u8; TRUNCATED_HASH_LEN] },
     /// Emit an announce (optionally with app_data).
-    Announce {
-        app_data: Option<Vec<u8>>,
-    },
+    Announce { app_data: Option<Vec<u8>> },
     /// Shut down the event loop.
     Shutdown,
 }
@@ -80,11 +74,7 @@ impl TokioNode {
     }
 
     /// Dispatch a single command, returning outbound packets and whether to continue.
-    fn handle_command<R>(
-        &mut self,
-        cmd: NodeCommand,
-        rng: &mut R,
-    ) -> (Vec<OutboundPacket>, bool)
+    fn handle_command<R>(&mut self, cmd: NodeCommand, rng: &mut R) -> (Vec<OutboundPacket>, bool)
     where
         R: rand_core::RngCore + rand_core::CryptoRng,
     {

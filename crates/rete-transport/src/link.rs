@@ -570,7 +570,7 @@ mod tests {
         // Initiator creates link
         let initiator_identity = Identity::from_seed(b"initiator-full").unwrap();
         let (mut initiator_link, request_payload) =
-            Link::new_initiator(dest_hash, &initiator_identity.ed25519_pub, &mut rng, 100);
+            Link::new_initiator(dest_hash, initiator_identity.ed25519_pub(), &mut rng, 100);
 
         // Build LINKREQUEST packet to compute link_id
         let mut pkt_buf = [0u8; MTU];
@@ -621,7 +621,7 @@ mod tests {
 
         let initiator_identity = Identity::from_seed(b"initiator-bad-sig").unwrap();
         let (mut initiator_link, request_payload) =
-            Link::new_initiator(dest_hash, &initiator_identity.ed25519_pub, &mut rng, 100);
+            Link::new_initiator(dest_hash, initiator_identity.ed25519_pub(), &mut rng, 100);
 
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
@@ -652,7 +652,7 @@ mod tests {
         let identity = Identity::from_seed(b"initiator-pending").unwrap();
         let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
 
-        let (link, payload) = Link::new_initiator(dest_hash, &identity.ed25519_pub, &mut rng, 100);
+        let (link, payload) = Link::new_initiator(dest_hash, identity.ed25519_pub(), &mut rng, 100);
 
         assert_eq!(link.state, LinkState::Pending);
         assert_eq!(link.role, LinkRole::Initiator);
@@ -740,7 +740,7 @@ mod tests {
         let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
 
         let (mut initiator, request_payload) =
-            Link::new_initiator(dest_hash, &initiator_identity.ed25519_pub, &mut rng, 100);
+            Link::new_initiator(dest_hash, initiator_identity.ed25519_pub(), &mut rng, 100);
 
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
