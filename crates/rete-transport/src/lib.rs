@@ -28,7 +28,8 @@ pub use link::{compute_link_id, Link, LinkRole, LinkState, TeardownReason};
 pub use path::Path;
 pub use receipt::{PacketReceipt, ReceiptStatus, ReceiptTable};
 pub use transport::{
-    IngestResult, ReverseEntry, TickResult, Transport, PATH_REQUEST_DEST, REVERSE_TIMEOUT,
+    IngestResult, ReverseEntry, TickResult, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,
+    REVERSE_TIMEOUT,
 };
 
 // ---------------------------------------------------------------------------

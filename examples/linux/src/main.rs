@@ -10,14 +10,127 @@
 use rete_core::Identity;
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
-use rete_tokio::{interface_task, InboundMsg, NodeEvent, TokioNode};
+use rete_tokio::{interface_task, InboundMsg, NodeCommand, NodeEvent, TokioNode};
 
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:4242";
 const DEFAULT_BAUD: u32 = 115200;
 const APP_NAME: &str = "rete";
 const ASPECTS: &[&str] = &["example", "v1"];
+
+// ---------------------------------------------------------------------------
+// Identity persistence
+// ---------------------------------------------------------------------------
+
+fn default_identity_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".rete").join("identity")
+}
+
+fn load_or_create_identity(path: &std::path::Path) -> Identity {
+    match std::fs::read(path) {
+        Ok(data) => {
+            if data.len() != 64 {
+                eprintln!(
+                    "[rete] invalid identity file (expected 64 bytes, got {})",
+                    data.len()
+                );
+                std::process::exit(1);
+            }
+            eprintln!("[rete] loaded identity from {}", path.display());
+            Identity::from_private_key(&data).expect("invalid identity file")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut rng = rand::thread_rng();
+            let mut prv = [0u8; 64];
+            rand::RngCore::fill_bytes(&mut rng, &mut prv);
+            let identity = Identity::from_private_key(&prv).expect("invalid random key");
+
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("failed to create identity directory");
+            }
+            std::fs::write(path, identity.private_key()).expect("failed to write identity file");
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .expect("failed to set identity file permissions");
+            }
+
+            eprintln!("[rete] created new identity at {}", path.display());
+            identity
+        }
+        Err(e) => {
+            eprintln!("[rete] failed to read identity file: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stdin command parser
+// ---------------------------------------------------------------------------
+
+fn parse_dest_hash(hex_str: &str) -> Option<[u8; 16]> {
+    let bytes = hex::decode(hex_str).ok()?;
+    bytes.as_slice().try_into().ok()
+}
+
+fn parse_command(line: &str) -> Option<NodeCommand> {
+    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+    match parts.first().copied()? {
+        "send" if parts.len() >= 3 => Some(NodeCommand::SendData {
+            dest_hash: parse_dest_hash(parts[1])?,
+            payload: parts[2].as_bytes().to_vec(),
+        }),
+        "link" if parts.len() >= 2 => Some(NodeCommand::InitiateLink {
+            dest_hash: parse_dest_hash(parts[1])?,
+        }),
+        "path" if parts.len() >= 2 => Some(NodeCommand::RequestPath {
+            dest_hash: parse_dest_hash(parts[1])?,
+        }),
+        "announce" => {
+            let app_data = if parts.len() >= 2 {
+                Some(parts[1..].join(" ").into_bytes())
+            } else {
+                None
+            };
+            Some(NodeCommand::Announce { app_data })
+        }
+        "quit" => Some(NodeCommand::Shutdown),
+        _ => {
+            eprintln!("[rete] unknown command: {line}");
+            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | path <dest_hex> | announce [data] | quit");
+            None
+        }
+    }
+}
+
+fn spawn_stdin_reader(cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>) {
+    tokio::task::spawn_blocking(move || {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else { break };
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(cmd) = parse_command(&line) {
+                if cmd_tx.blocking_send(cmd).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() {
@@ -43,11 +156,17 @@ async fn main() {
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(DEFAULT_BAUD);
 
-    // Parse --identity-seed <seed> (deterministic key for testing)
+    // Parse --identity-seed <seed> (deterministic key for testing, takes priority)
     let seed = args
         .windows(2)
         .find(|w| w[0] == "--identity-seed")
         .map(|w| w[1].clone());
+
+    // Parse --identity-file <path> (default: ~/.rete/identity)
+    let identity_file = args
+        .windows(2)
+        .find(|w| w[0] == "--identity-file")
+        .map(|w| PathBuf::from(&w[1]));
 
     // Parse --auto-reply <message> (send DATA after receiving an announce)
     let auto_reply = args
@@ -71,10 +190,8 @@ async fn main() {
     let identity = if let Some(seed_str) = seed {
         Identity::from_seed(seed_str.as_bytes()).expect("invalid derived key")
     } else {
-        let mut rng = rand::thread_rng();
-        let mut prv = [0u8; 64];
-        rand::RngCore::fill_bytes(&mut rng, &mut prv);
-        Identity::from_private_key(&prv).expect("invalid random key")
+        let id_path = identity_file.unwrap_or_else(default_identity_path);
+        load_or_create_identity(&id_path)
     };
 
     let id_hash = identity.hash();
@@ -125,6 +242,10 @@ async fn main() {
         hex::encode(node.core.dest_hash())
     );
 
+    // Create command channel + stdin reader
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<NodeCommand>(64);
+    spawn_stdin_reader(cmd_tx);
+
     // Dispatch based on interface type
     if let Some(path) = serial_path {
         eprintln!("[rete] opening serial port {} at {} baud ...", path, baud);
@@ -136,7 +257,7 @@ async fn main() {
             }
         };
         eprintln!("[rete] serial port open");
-        node.run(&mut iface, on_event).await;
+        node.run_with_commands(&mut iface, cmd_rx, on_event).await;
     } else if addrs.len() > 1 {
         // Multi-interface mode: connect to multiple TCP endpoints
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<InboundMsg>(256);
@@ -159,7 +280,8 @@ async fn main() {
         // Drop the original inbound_tx so the channel closes when all tasks exit
         drop(inbound_tx);
 
-        node.run_multi(senders, inbound_rx, on_event).await;
+        node.run_multi_with_commands(senders, inbound_rx, cmd_rx, on_event)
+            .await;
     } else {
         let addr = addrs.first().copied().unwrap_or(DEFAULT_ADDR);
         eprintln!("[rete] connecting to {} ...", addr);
@@ -171,7 +293,7 @@ async fn main() {
             }
         };
         eprintln!("[rete] connected");
-        node.run(&mut iface, on_event).await;
+        node.run_with_commands(&mut iface, cmd_rx, on_event).await;
     }
 }
 

@@ -11,6 +11,36 @@ use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Command injected into a running node's event loop.
+#[derive(Debug)]
+pub enum NodeCommand {
+    /// Send encrypted DATA to a destination.
+    SendData {
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        payload: Vec<u8>,
+    },
+    /// Initiate a link to a destination.
+    InitiateLink {
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// Send a channel message on an active link.
+    SendChannelMessage {
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        message_type: u16,
+        payload: Vec<u8>,
+    },
+    /// Request a path to a destination.
+    RequestPath {
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// Emit an announce (optionally with app_data).
+    Announce {
+        app_data: Option<Vec<u8>>,
+    },
+    /// Shut down the event loop.
+    Shutdown,
+}
+
 /// A Reticulum node running on the Tokio runtime.
 ///
 /// Thin wrapper around [`HostedNodeCore`] that provides the Tokio async
@@ -49,9 +79,88 @@ impl TokioNode {
         self.core.build_announce(app_data, &mut rng, now)
     }
 
-    /// Run the main event loop with a single interface.
-    pub async fn run<I, F>(&mut self, iface: &mut I, mut on_event: F)
+    /// Dispatch a single command, returning outbound packets and whether to continue.
+    fn handle_command<R>(
+        &mut self,
+        cmd: NodeCommand,
+        rng: &mut R,
+    ) -> (Vec<OutboundPacket>, bool)
     where
+        R: rand_core::RngCore + rand_core::CryptoRng,
+    {
+        let now = current_time_secs();
+        match cmd {
+            NodeCommand::SendData { dest_hash, payload } => {
+                if let Some(pkt) = self.core.build_data_packet(&dest_hash, &payload, rng, now) {
+                    eprintln!("[rete] cmd: sent DATA to {}", hex(&dest_hash));
+                    (vec![OutboundPacket::broadcast(pkt)], true)
+                } else {
+                    eprintln!("[rete] cmd: send failed (unknown dest {})", hex(&dest_hash));
+                    (vec![], true)
+                }
+            }
+            NodeCommand::InitiateLink { dest_hash } => {
+                if let Some((outbound, link_id)) = self.core.initiate_link(dest_hash, now, rng) {
+                    eprintln!(
+                        "[rete] cmd: initiated link {} to {}",
+                        hex(&link_id),
+                        hex(&dest_hash)
+                    );
+                    (vec![outbound], true)
+                } else {
+                    eprintln!("[rete] cmd: link initiation failed");
+                    (vec![], true)
+                }
+            }
+            NodeCommand::SendChannelMessage {
+                link_id,
+                message_type,
+                payload,
+            } => {
+                if let Some(outbound) =
+                    self.core
+                        .send_channel_message(&link_id, message_type, &payload, now, rng)
+                {
+                    (vec![outbound], true)
+                } else {
+                    eprintln!("[rete] cmd: channel send failed");
+                    (vec![], true)
+                }
+            }
+            NodeCommand::RequestPath { dest_hash } => {
+                eprintln!("[rete] cmd: requesting path to {}", hex(&dest_hash));
+                (vec![self.core.request_path(&dest_hash)], true)
+            }
+            NodeCommand::Announce { app_data } => {
+                let announce = self.core.build_announce(app_data.as_deref(), rng, now);
+                eprintln!("[rete] cmd: sent announce");
+                (vec![OutboundPacket::broadcast(announce)], true)
+            }
+            NodeCommand::Shutdown => {
+                eprintln!("[rete] cmd: shutdown requested");
+                (vec![], false)
+            }
+        }
+    }
+
+    /// Run the main event loop with a single interface (no command channel).
+    pub async fn run<I, F>(&mut self, iface: &mut I, on_event: F)
+    where
+        I: ReteInterface,
+        F: FnMut(NodeEvent),
+    {
+        let (dummy_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
+        drop(dummy_tx);
+        self.run_with_commands(iface, cmd_rx, on_event).await;
+    }
+
+    /// Run the main event loop with a single interface and command channel.
+    pub async fn run_with_commands<I, F>(
+        &mut self,
+        iface: &mut I,
+        mut cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
+        mut on_event: F,
+    ) where
         I: ReteInterface,
         F: FnMut(NodeEvent),
     {
@@ -72,7 +181,8 @@ impl TokioNode {
 
         // Send initial data to pre-registered peer (if configured)
         if let Some((data, dest)) = self.initial_send.take() {
-            if let Some(pkt) = self.core.build_data_packet(&dest, &data, &mut rng) {
+            let now = current_time_secs();
+            if let Some(pkt) = self.core.build_data_packet(&dest, &data, &mut rng, now) {
                 if let Err(e) = iface.send(&pkt).await {
                     eprintln!("[rete] initial send failed: {:?}", e);
                 } else {
@@ -119,6 +229,13 @@ impl TokioNode {
                         }
                     }
                 }
+                cmd = cmd_rx.recv() => {
+                    if let Some(cmd) = cmd {
+                        let (packets, cont) = self.handle_command(cmd, &mut rng);
+                        dispatch_single(iface, &packets).await;
+                        if !cont { break; }
+                    }
+                }
                 _ = announce_timer.tick() => {
                     let announce = self.core.build_announce(None, &mut rng, current_time_secs());
                     if let Err(e) = iface.send(&announce).await {
@@ -160,11 +277,27 @@ pub struct InboundMsg {
 }
 
 impl TokioNode {
-    /// Run the main event loop with multiple interfaces.
+    /// Run the main event loop with multiple interfaces (no command channel).
     pub async fn run_multi<F>(
         &mut self,
         iface_senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>>,
+        inbound_rx: tokio::sync::mpsc::Receiver<InboundMsg>,
+        on_event: F,
+    ) where
+        F: FnMut(NodeEvent),
+    {
+        let (dummy_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
+        drop(dummy_tx);
+        self.run_multi_with_commands(iface_senders, inbound_rx, cmd_rx, on_event)
+            .await;
+    }
+
+    /// Run the main event loop with multiple interfaces and a command channel.
+    pub async fn run_multi_with_commands<F>(
+        &mut self,
+        iface_senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>>,
         mut inbound_rx: tokio::sync::mpsc::Receiver<InboundMsg>,
+        mut cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
         mut on_event: F,
     ) where
         F: FnMut(NodeEvent),
@@ -182,7 +315,8 @@ impl TokioNode {
 
         // Send initial data to pre-registered peer (if configured)
         if let Some((data, dest)) = self.initial_send.take() {
-            if let Some(pkt) = self.core.build_data_packet(&dest, &data, &mut rng) {
+            let now = current_time_secs();
+            if let Some(pkt) = self.core.build_data_packet(&dest, &data, &mut rng, now) {
                 for tx in &iface_senders {
                     let _ = tx.send(pkt.clone()).await;
                 }
@@ -205,6 +339,13 @@ impl TokioNode {
                     dispatch_multi(&iface_senders, &outcome.packets, msg.iface_idx).await;
                     if let Some(event) = outcome.event {
                         on_event(event);
+                    }
+                }
+                cmd = cmd_rx.recv() => {
+                    if let Some(cmd) = cmd {
+                        let (packets, cont) = self.handle_command(cmd, &mut rng);
+                        dispatch_multi(&iface_senders, &packets, 0).await;
+                        if !cont { break; }
                     }
                 }
                 _ = announce_timer.tick() => {

@@ -1,6 +1,6 @@
 //! Sprint 4: Path request handling tests.
 
-use rete_core::{DestType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN};
+use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN};
 use rete_transport::{IngestResult, Transport, PATH_REQUEST_DEST};
 
 /// Small transport suitable for tests.
@@ -10,19 +10,8 @@ type TestTransport = Transport<64, 16, 128, 4>;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build a HEADER_1 DATA packet addressed to the path request destination,
-/// with the requested dest_hash as payload.
 fn build_path_request(requested_dest: &[u8; TRUNCATED_HASH_LEN]) -> Vec<u8> {
-    let mut buf = [0u8; MTU];
-    let n = PacketBuilder::new(&mut buf)
-        .packet_type(PacketType::Data)
-        .dest_type(DestType::Plain)
-        .destination_hash(&PATH_REQUEST_DEST)
-        .context(0x00)
-        .payload(requested_dest)
-        .build()
-        .unwrap();
-    buf[..n].to_vec()
+    TestTransport::build_path_request(requested_dest)
 }
 
 // ---------------------------------------------------------------------------

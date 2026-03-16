@@ -147,6 +147,17 @@ impl Identity {
         out
     }
 
+    /// Returns the combined 64-byte private key.
+    ///
+    /// Format: `X25519_prv[0:32] || Ed25519_prv[32:64]`
+    /// This matches the input format of [`Identity::from_private_key`].
+    pub fn private_key(&self) -> [u8; 64] {
+        let mut out = [0u8; 64];
+        out[..32].copy_from_slice(&self.x25519_prv);
+        out[32..].copy_from_slice(&self.ed25519_prv);
+        out
+    }
+
     /// Compute the 16-byte identity hash.
     ///
     /// `identity_hash = SHA-256(pub_key)[0:16]`

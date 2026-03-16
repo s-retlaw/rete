@@ -13,9 +13,9 @@ use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    DestType, HeaderType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
+    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
 };
-use rete_transport::{IngestResult, Transport};
+use rete_transport::{IngestResult, Transport, RECEIPT_TIMEOUT};
 
 use crate::{NodeEvent, ProofStrategy};
 
@@ -167,14 +167,18 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     }
 
     /// Build an encrypted DATA packet addressed to a known destination.
+    ///
+    /// Also registers a receipt for proof tracking. The `now` timestamp is
+    /// used for receipt timeout calculation.
     pub fn build_data_packet<R: RngCore + CryptoRng>(
-        &self,
+        &mut self,
         dest_hash: &[u8; TRUNCATED_HASH_LEN],
         plaintext: &[u8],
         rng: &mut R,
+        now: u64,
     ) -> Option<Vec<u8>> {
-        let pub_key = self.transport.recall_identity(dest_hash)?;
-        let recipient = Identity::from_public_key(pub_key).ok()?;
+        let pub_key = *self.transport.recall_identity(dest_hash)?;
+        let recipient = Identity::from_public_key(&pub_key).ok()?;
         let mut ct_buf = [0u8; MTU];
         let ct_len = recipient.encrypt(plaintext, rng, &mut ct_buf).ok()?;
         let via = self.transport.get_path(dest_hash).and_then(|p| p.via);
@@ -194,6 +198,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             builder
         };
         let pkt_len = builder.build().ok()?;
+
+        // Register receipt for proof tracking
+        if let Ok(parsed) = Packet::parse(&pkt_buf[..pkt_len]) {
+            let pkt_hash = parsed.compute_hash();
+            self.transport.register_receipt(pkt_hash, pub_key, now, RECEIPT_TIMEOUT);
+        }
+
         Some(pkt_buf[..pkt_len].to_vec())
     }
 
@@ -276,6 +287,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         )
     }
 
+    /// Build a path request packet for a destination.
+    pub fn request_path(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> OutboundPacket {
+        let raw = Transport::<P, A, D, L>::build_path_request(dest_hash);
+        OutboundPacket::broadcast(raw)
+    }
+
     /// Process an inbound raw packet and return the outcome.
     ///
     /// The runtime loop dispatches packets based on `IngestOutcome.packets`
@@ -308,8 +325,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 let mut packets = Vec::new();
 
                 // Auto-reply to announcing peer
-                if let Some(ref msg) = self.auto_reply {
-                    if let Some(pkt) = self.build_data_packet(&dest_hash, msg, rng) {
+                if let Some(msg) = self.auto_reply.take() {
+                    let result = self.build_data_packet(&dest_hash, &msg, rng, now);
+                    self.auto_reply = Some(msg);
+                    if let Some(pkt) = result {
                         packets.push(OutboundPacket {
                             data: pkt,
                             routing: PacketRouting::SourceInterface,
@@ -368,7 +387,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         let mut echo_msg = Vec::with_capacity(5 + decrypted.len());
                         echo_msg.extend_from_slice(b"echo:");
                         echo_msg.extend_from_slice(&decrypted);
-                        if let Some(pkt) = self.build_data_packet(&peer, &echo_msg, rng) {
+                        if let Some(pkt) = self.build_data_packet(&peer, &echo_msg, rng, now) {
                             packets.push(OutboundPacket {
                                 data: pkt,
                                 routing: PacketRouting::SourceInterface,
@@ -443,6 +462,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             },
             IngestResult::LinkClosed { link_id } => IngestOutcome {
                 event: Some(NodeEvent::LinkClosed { link_id }),
+                packets: Vec::new(),
+            },
+            IngestResult::ProofReceived { packet_hash } => IngestOutcome {
+                event: Some(NodeEvent::ProofReceived { packet_hash }),
                 packets: Vec::new(),
             },
             IngestResult::Duplicate | IngestResult::Buffered | IngestResult::Invalid => {
@@ -542,7 +565,7 @@ mod tests {
         sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100);
 
         let pkt = sender
-            .build_data_packet(receiver.dest_hash(), b"hello", &mut rng)
+            .build_data_packet(receiver.dest_hash(), b"hello", &mut rng, 100)
             .expect("should build data packet");
 
         let parsed = Packet::parse(&pkt).unwrap();
@@ -749,7 +772,7 @@ mod tests {
         core.register_peer(&peer, "testapp", &["aspect1"], 100);
 
         // Should be able to build data packet to registered peer
-        let pkt = core.build_data_packet(&peer_dest, b"hello peer", &mut rng);
+        let pkt = core.build_data_packet(&peer_dest, b"hello peer", &mut rng, 100);
         assert!(pkt.is_some(), "should build data packet to registered peer");
     }
 
@@ -1016,5 +1039,103 @@ mod tests {
             }
             other => panic!("expected ChannelMessages, got {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase: Receipt wiring tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn receipt_auto_registered_on_data_send() {
+        let mut sender = make_core(b"receipt-sender");
+        let receiver = make_core(b"receipt-receiver");
+        let mut rng = rand::thread_rng();
+
+        let receiver_id = Identity::from_seed(b"receipt-receiver").unwrap();
+        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100);
+
+        assert_eq!(sender.transport.receipt_count(), 0);
+        let _pkt = sender
+            .build_data_packet(receiver.dest_hash(), b"hello", &mut rng, 100)
+            .expect("should build data packet");
+        assert_eq!(sender.transport.receipt_count(), 1);
+    }
+
+    #[test]
+    fn proof_for_sent_data_fires_event() {
+        let mut sender = make_core(b"proof-fire-sender");
+        let mut receiver = make_core(b"proof-fire-receiver");
+        receiver.set_proof_strategy(ProofStrategy::ProveAll);
+        let mut rng = rand::thread_rng();
+
+        // Register each other
+        let receiver_id = Identity::from_seed(b"proof-fire-receiver").unwrap();
+        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100);
+
+        // Sender builds data → receipt auto-registered
+        let pkt = sender
+            .build_data_packet(receiver.dest_hash(), b"prove me", &mut rng, 100)
+            .expect("should build data packet");
+        assert_eq!(sender.transport.receipt_count(), 1);
+
+        // Receiver ingests → generates proof
+        let outcome = receiver.handle_ingest(&pkt, 100, 0, &mut rng);
+        let proof_pkt = outcome
+            .packets
+            .iter()
+            .find(|p| {
+                Packet::parse(&p.data)
+                    .map(|pkt| pkt.packet_type == PacketType::Proof)
+                    .unwrap_or(false)
+            })
+            .expect("receiver should generate proof");
+
+        // Sender ingests proof → should fire ProofReceived
+        let outcome = sender.handle_ingest(&proof_pkt.data, 101, 0, &mut rng);
+        assert!(
+            matches!(outcome.event, Some(NodeEvent::ProofReceived { .. })),
+            "expected ProofReceived, got {:?}",
+            outcome.event
+        );
+    }
+
+    #[test]
+    fn receipt_expires_on_tick() {
+        let mut sender = make_core(b"receipt-expire");
+        let receiver = make_core(b"receipt-expire-recv");
+        let mut rng = rand::thread_rng();
+
+        let receiver_id = Identity::from_seed(b"receipt-expire-recv").unwrap();
+        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100);
+
+        let _pkt = sender
+            .build_data_packet(receiver.dest_hash(), b"hello", &mut rng, 100)
+            .expect("should build data packet");
+        assert_eq!(sender.transport.receipt_count(), 1);
+
+        // Tick before timeout — receipt should still be there
+        sender.handle_tick(120, &mut rng);
+        assert_eq!(sender.transport.receipt_count(), 1);
+
+        // Tick after timeout (30s) — receipt should be failed
+        sender.handle_tick(131, &mut rng);
+        // Receipt is still in the table but marked Failed
+        assert_eq!(sender.transport.receipt_count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase: Path request origination tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn path_request_produces_valid_packet() {
+        let core = make_core(b"path-req-test");
+        let dest = [0xBB; rete_core::TRUNCATED_HASH_LEN];
+        let outbound = core.request_path(&dest);
+        let parsed = Packet::parse(&outbound.data).unwrap();
+        assert_eq!(parsed.packet_type, PacketType::Data);
+        assert_eq!(parsed.dest_type, rete_core::DestType::Plain);
+        assert_eq!(parsed.destination_hash, &rete_transport::PATH_REQUEST_DEST);
+        assert_eq!(parsed.payload, &dest);
     }
 }

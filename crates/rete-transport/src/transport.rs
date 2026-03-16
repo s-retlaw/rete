@@ -2,6 +2,7 @@
 
 use crate::announce::validate_announce;
 use crate::link::{compute_link_id, Link};
+use crate::receipt::ReceiptTable;
 use crate::{announce::PendingAnnounce, dedup::DedupWindow, path::Path};
 use heapless::{FnvIndexMap, FnvIndexSet};
 use rand_core::{CryptoRng, RngCore};
@@ -30,6 +31,9 @@ pub const PATH_EXPIRES: u64 = 604800;
 
 /// Reverse table entry timeout in seconds (8 minutes).
 pub const REVERSE_TIMEOUT: u64 = 480;
+
+/// Default receipt proof timeout in seconds.
+pub const RECEIPT_TIMEOUT: u64 = 30;
 
 /// Destination hash for `rnstransport.path.request` (PLAIN, no identity).
 ///
@@ -122,6 +126,11 @@ pub enum IngestResult<'a> {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
     },
+    /// A proof was received for a packet we sent.
+    ProofReceived {
+        /// The full 32-byte packet hash the proof covers.
+        packet_hash: [u8; 32],
+    },
     /// Packet was a duplicate and should be dropped.
     Duplicate,
     /// A channel message was accepted and buffered (out-of-order), not yet deliverable.
@@ -173,6 +182,9 @@ pub struct Transport<
     local_destinations: FnvIndexSet<[u8; TRUNCATED_HASH_LEN], 8>,
     /// Active link sessions, keyed by link_id.
     links: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], Link, MAX_LINKS>,
+    /// Receipts for sent packets, awaiting delivery proofs.
+    /// Fixed at 64 entries — receipts are short-lived, not proportional to path count.
+    receipts: ReceiptTable<64>,
 }
 
 impl<const P: usize, const A: usize, const D: usize, const L: usize> Default
@@ -196,6 +208,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             announce_dedup: DedupWindow::new(),
             local_destinations: FnvIndexSet::new(),
             links: FnvIndexMap::new(),
+            receipts: ReceiptTable::new(),
         }
     }
 
@@ -288,6 +301,22 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     /// Number of active links.
     pub fn link_count(&self) -> usize {
         self.links.len()
+    }
+
+    /// Register a receipt for a sent packet.
+    pub fn register_receipt(
+        &mut self,
+        packet_hash: [u8; 32],
+        dest_pub_key: [u8; 64],
+        now: u64,
+        timeout: u64,
+    ) -> bool {
+        self.receipts.register(packet_hash, dest_pub_key, now, timeout)
+    }
+
+    /// Number of tracked receipts.
+    pub fn receipt_count(&self) -> usize {
+        self.receipts.len()
     }
 
     // -----------------------------------------------------------------------
@@ -551,9 +580,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     return self.handle_lrproof(&dh, pkt.payload, now);
                 }
 
+                let mut dh = [0u8; TRUNCATED_HASH_LEN];
+                dh.copy_from_slice(pkt.destination_hash);
+
+                // Check receipt table for delivery proof
+                if let Some(packet_hash) = self.receipts.validate_proof(&dh, pkt.payload) {
+                    return IngestResult::ProofReceived { packet_hash };
+                }
+
                 if self.local_identity_hash.is_some() {
-                    let mut dh = [0u8; TRUNCATED_HASH_LEN];
-                    dh.copy_from_slice(pkt.destination_hash);
                     if self.reverse_table.remove(&dh).is_some() {
                         IngestResult::Forward {
                             raw,
@@ -1041,6 +1076,29 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     }
 
     // -----------------------------------------------------------------------
+    // Path request origination
+    // -----------------------------------------------------------------------
+
+    /// Build a path request packet for a destination.
+    ///
+    /// Sends a DATA packet addressed to `PATH_REQUEST_DEST` (PLAIN) with
+    /// `dest_hash` as the payload.
+    pub fn build_path_request(
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+    ) -> alloc::vec::Vec<u8> {
+        let mut buf = [0u8; rete_core::MTU];
+        let n = PacketBuilder::new(&mut buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Plain)
+            .destination_hash(&PATH_REQUEST_DEST)
+            .context(0x00)
+            .payload(dest_hash)
+            .build()
+            .expect("path request packet should always build");
+        buf[..n].to_vec()
+    }
+
+    // -----------------------------------------------------------------------
     // Announce creation
     // -----------------------------------------------------------------------
 
@@ -1152,6 +1210,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         for lid in &closed_links_list {
             self.links.remove(lid);
         }
+
+        // Expire timed-out receipts
+        self.receipts.tick(now);
 
         TickResult {
             expired_paths: expired_count,
