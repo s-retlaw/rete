@@ -600,7 +600,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             } => {
                 let mut packets = Vec::new();
                 // If all parts received, assemble and send proof
-                if current == total {
+                if current == total && total > 0 {
                     // Step 1: assemble data and build proof (borrows transport mutably)
                     let assembly_result = {
                         if let Some(res) =
@@ -617,24 +617,46 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                             None
                         }
                     };
-                    // Step 2: use transport.get_link() for encryption (separate borrow)
-                    if let Some(Ok((data, proof))) = assembly_result {
-                        if let Some(link) = self.transport.get_link(&link_id) {
-                            let mut ct_buf = [0u8; MTU];
-                            if let Ok(ct_len) = link.encrypt(&proof, rng, &mut ct_buf) {
-                                let mut pkt_buf = [0u8; MTU];
-                                if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
-                                    .packet_type(PacketType::Data)
-                                    .dest_type(DestType::Link)
-                                    .destination_hash(&link_id)
-                                    .context(rete_core::CONTEXT_RESOURCE_PRF)
-                                    .payload(&ct_buf[..ct_len])
-                                    .build()
-                                {
-                                    packets.push(OutboundPacket::broadcast(
-                                        pkt_buf[..pkt_len].to_vec(),
-                                    ));
+                    // Step 2: Decrypt assembled data via link Token, strip 4-byte prepend.
+                    // Python flow: link.decrypt() -> bz2.decompress() -> strip 4 prepend bytes
+                    // We skip decompression for now (app layer can handle it).
+                    if let Some(Ok((encrypted_data, proof))) = assembly_result {
+                        // Decrypt via link Token
+                        let data = if let Some(link) = self.transport.get_link(&link_id) {
+                            let mut dec_buf = vec![0u8; encrypted_data.len()];
+                            if let Ok(dec_len) = link.decrypt(&encrypted_data, &mut dec_buf) {
+                                // Strip 4-byte random prepend
+                                if dec_len >= 4 {
+                                    dec_buf[4..dec_len].to_vec()
+                                } else {
+                                    dec_buf[..dec_len].to_vec()
                                 }
+                            } else {
+                                // Decryption failed — return encrypted data as-is
+                                // (might be from our own Rust sender without encryption)
+                                encrypted_data
+                            }
+                        } else {
+                            encrypted_data
+                        };
+
+                        // Step 3: Build and send proof packet.
+                        // Resource proof is Proof packet type, NOT link-encrypted.
+                        // Matches Python: packet_type=PROOF, context=RESOURCE_PRF,
+                        // and "Resource proofs are not encrypted" in Packet.pack().
+                        {
+                            let mut pkt_buf = [0u8; MTU];
+                            if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
+                                .packet_type(PacketType::Proof)
+                                .dest_type(DestType::Link)
+                                .destination_hash(&link_id)
+                                .context(rete_core::CONTEXT_RESOURCE_PRF)
+                                .payload(&proof)
+                                .build()
+                            {
+                                packets.push(OutboundPacket::broadcast(
+                                    pkt_buf[..pkt_len].to_vec(),
+                                ));
                             }
                         }
                         // Drain any resource outbound packets

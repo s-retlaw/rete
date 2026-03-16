@@ -337,10 +337,10 @@ print("PY_DONE", flush=True)
         py_reader.daemon = True
         py_reader.start()
 
-        # Wait for Python to signal it's ready for Rust to send resource back
+        # Wait for Rust to receive the resource (RESOURCE_COMPLETE), then send one back
         deadline = time.monotonic() + args.timeout + 15
         rust_link_id = None
-        py_ready_for_rust_resource = False
+        rust_resource_complete = False
 
         while time.monotonic() < deadline:
             # Check for LINK_ESTABLISHED in Rust output to get link_id
@@ -350,13 +350,13 @@ print("PY_DONE", flush=True)
                         rust_link_id = line.split(":")[1].strip()
                         break
 
-            # Check if Python is ready for Rust resource
-            for line in py_lines:
-                if "PY_READY_FOR_RUST_RESOURCE" in line:
-                    py_ready_for_rust_resource = True
+            # Check if Rust received the resource from Python
+            for line in rust_lines:
+                if line.startswith("RESOURCE_COMPLETE:"):
+                    rust_resource_complete = True
                     break
 
-            if py_ready_for_rust_resource and rust_link_id:
+            if rust_resource_complete and rust_link_id:
                 break
 
             # Check if Python helper has exited
@@ -366,7 +366,7 @@ print("PY_DONE", flush=True)
             time.sleep(0.5)
 
         # Send resource from Rust to Python via stdin command
-        if rust_link_id and py_ready_for_rust_resource:
+        if rust_link_id and rust_resource_complete:
             resource_back_text = "hello_from_rust_resource_transfer"
             cmd = f"resource {rust_link_id} {resource_back_text}\n"
             print(f"[resource-interop] sending resource command to Rust: {cmd.strip()}")

@@ -959,7 +959,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     ) -> IngestResult<'a> {
         match context {
             CONTEXT_RESOURCE => {
-                // A resource data part
+                // A resource data part (NOT link-encrypted — raw segment data)
                 if let Some(res) = self
                     .resources
                     .iter_mut()
@@ -1498,6 +1498,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
     /// Start a new outbound resource transfer on a link.
     ///
+    /// Matches Python RNS protocol flow:
+    /// 1. Prepend 4 random bytes to data
+    /// 2. Skip compression (no bz2 in no_std)
+    /// 3. Encrypt prepended data via link Token
+    /// 4. Create Resource from the encrypted blob
+    /// 5. Build advertisement and send it
+    ///
     /// Returns the advertisement payload as raw packet bytes.
     pub fn start_resource<R: RngCore + CryptoRng>(
         &mut self,
@@ -1505,21 +1512,40 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         data: &[u8],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
-        // Check link is active (immutable borrow scope)
-        {
+        // Step 1: Check link is active and encrypt data (immutable borrow scope)
+        let encrypted = {
             let link = self.links.get(link_id)?;
             if !link.is_active() {
                 return None;
             }
-        }
 
-        let mut resource = Resource::new_outbound(data, *link_id, LINK_MDU, rng);
+            // Prepend 4 random bytes (Python: self.data = os.urandom(4) + self.data)
+            let mut prepended = alloc::vec::Vec::with_capacity(4 + data.len());
+            let mut prepend_bytes = [0u8; 4];
+            rng.fill_bytes(&mut prepend_bytes);
+            prepended.extend_from_slice(&prepend_bytes);
+            prepended.extend_from_slice(data);
+
+            // Encrypt via link Token (Python: self.data = self.link.encrypt(self.data))
+            // Token overhead: 16 (IV) + padding + 32 (HMAC)
+            let max_ct_len = 16 + ((prepended.len() / 16) + 1) * 16 + 32;
+            let mut ct_buf = alloc::vec![0u8; max_ct_len];
+            let ct_len = link.encrypt(&prepended, rng, &mut ct_buf).ok()?;
+            ct_buf.truncate(ct_len);
+            ct_buf
+        };
+
+        // Step 2: Create Resource from the encrypted blob
+        let original_size = data.len();
+        let mut resource = Resource::new_outbound(&encrypted, *link_id, LINK_MDU, original_size, rng);
+        // Set the encrypted flag (Python: self.flags |= Resource.FLAG_ENCRYPTED)
+        resource.flags.encrypted = true;
         let adv = resource.build_advertisement();
 
-        // Encrypt advertisement and build packet
+        // Step 3: Encrypt advertisement and build packet
         let link = self.links.get(link_id)?;
-        let mut ct_buf = [0u8; rete_core::MTU];
-        let ct_len = link.encrypt(&adv, rng, &mut ct_buf).ok()?;
+        let mut adv_ct_buf = [0u8; rete_core::MTU];
+        let adv_ct_len = link.encrypt(&adv, rng, &mut adv_ct_buf).ok()?;
 
         let mut pkt_buf = [0u8; rete_core::MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
@@ -1527,7 +1553,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             .dest_type(DestType::Link)
             .destination_hash(link_id)
             .context(CONTEXT_RESOURCE_ADV)
-            .payload(&ct_buf[..ct_len])
+            .payload(&adv_ct_buf[..adv_ct_len])
             .build()
             .ok()?;
 

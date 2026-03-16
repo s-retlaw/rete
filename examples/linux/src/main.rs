@@ -775,15 +775,27 @@ fn on_event(event: NodeEvent) {
             resource_hash,
             ref data,
         } => {
-            let display = match std::str::from_utf8(data) {
+            // Try bz2 decompression (Python RNS compresses resource data)
+            let final_data = if data.starts_with(b"BZh") {
+                use std::io::Read;
+                let mut decompressor = bzip2::read::BzDecoder::new(&data[..]);
+                let mut decompressed = Vec::new();
+                match decompressor.read_to_end(&mut decompressed) {
+                    Ok(_) => decompressed,
+                    Err(_) => data.clone(),
+                }
+            } else {
+                data.clone()
+            };
+            let display = match std::str::from_utf8(&final_data) {
                 Ok(text) => text.to_string(),
-                Err(_) => hex::encode(data),
+                Err(_) => hex::encode(&final_data),
             };
             eprintln!(
                 "[rete] RESOURCE complete on link={} hash={} len={}",
                 hex::encode(link_id),
                 hex::encode(resource_hash),
-                data.len()
+                final_data.len()
             );
             println!(
                 "RESOURCE_COMPLETE:{}:{}:{}",
