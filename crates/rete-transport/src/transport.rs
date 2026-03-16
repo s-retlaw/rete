@@ -832,6 +832,25 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 | CONTEXT_RESOURCE_ICL
                 | CONTEXT_RESOURCE_RCL
         ) {
+            // CONTEXT_RESOURCE (0x01) data parts are NOT link-encrypted in Python RNS.
+            // The resource handles its own encryption. All other resource contexts
+            // (ADV, REQ, HMU, PRF, ICL, RCL) ARE link-encrypted.
+            if context == CONTEXT_RESOURCE {
+                // Pass raw ciphertext payload directly (no link decryption).
+                // Still need to verify link is active and touch inbound.
+                {
+                    let link = match self.links.get_mut(link_id) {
+                        Some(l) => l,
+                        None => return IngestResult::Invalid,
+                    };
+                    if !link.is_active() {
+                        return IngestResult::Invalid;
+                    }
+                    link.touch_inbound(now);
+                }
+                return self.handle_resource_data(link_id, context, ciphertext, now, rng);
+            }
+
             let mut dec_buf = [0u8; rete_core::MTU];
             let dec_len = {
                 let link = match self.links.get_mut(link_id) {
@@ -936,7 +955,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         context: u8,
         decrypted: &[u8],
         _now: u64,
-        rng: &mut R,
+        _rng: &mut R,
     ) -> IngestResult<'a> {
         match context {
             CONTEXT_RESOURCE => {
@@ -1000,24 +1019,20 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         return IngestResult::Invalid;
                     }
                 };
-                // resources borrow released. Now use links (immutable) for encryption
-                // and push to resource_outbound (disjoint fields, so this compiles).
+                // resources borrow released. Send parts as CONTEXT_RESOURCE.
+                // IMPORTANT: CONTEXT_RESOURCE parts are NOT link-encrypted in Python RNS.
+                // The resource data segments go on the wire as raw payload.
                 for (_idx, part_data) in parts_to_send {
-                    if let Some(link) = self.links.get(link_id) {
-                        let mut ct_buf = [0u8; rete_core::MTU];
-                        if let Ok(ct_len) = link.encrypt(&part_data, rng, &mut ct_buf) {
-                            let mut pkt_buf = [0u8; rete_core::MTU];
-                            if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
-                                .packet_type(PacketType::Data)
-                                .dest_type(DestType::Link)
-                                .destination_hash(link_id)
-                                .context(CONTEXT_RESOURCE)
-                                .payload(&ct_buf[..ct_len])
-                                .build()
-                            {
-                                self.resource_outbound.push(pkt_buf[..pkt_len].to_vec());
-                            }
-                        }
+                    let mut pkt_buf = [0u8; rete_core::MTU];
+                    if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
+                        .packet_type(PacketType::Data)
+                        .dest_type(DestType::Link)
+                        .destination_hash(link_id)
+                        .context(CONTEXT_RESOURCE)
+                        .payload(&part_data)
+                        .build()
+                    {
+                        self.resource_outbound.push(pkt_buf[..pkt_len].to_vec());
                     }
                 }
                 IngestResult::Duplicate // Parts queued in resource_outbound
