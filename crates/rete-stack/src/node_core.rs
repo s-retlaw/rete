@@ -7,7 +7,6 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -17,6 +16,7 @@ use rete_core::{
 };
 use rete_transport::{IngestResult, PendingAnnounce, Transport, RECEIPT_TIMEOUT};
 
+use crate::destination::{Destination, DestinationType, Direction};
 use crate::{NodeEvent, ProofStrategy};
 
 // ---------------------------------------------------------------------------
@@ -88,30 +88,40 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     pub identity: Identity,
     /// Transport state (path table, announce queue, dedup).
     pub transport: Transport<P, A, D, L>,
-    /// Application name for our destination.
-    app_name: String,
-    /// Destination aspects.
-    aspects: Vec<String>,
-    /// Our destination hash.
-    dest_hash: [u8; TRUNCATED_HASH_LEN],
+    /// Primary destination (addressing metadata, proof strategy, app data).
+    primary_dest: Destination,
     /// Optional auto-reply message sent after receiving an announce.
     auto_reply: Option<Vec<u8>>,
     /// When true, echo received DATA back to sender with "echo:" prefix.
     echo_data: bool,
     /// Dest hash of the most recently announced peer (echo target).
     last_peer: Option<[u8; TRUNCATED_HASH_LEN]>,
-    /// Proof generation strategy for incoming data packets.
-    proof_strategy: ProofStrategy,
 }
 
 impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
     /// Create a new NodeCore with the given identity and destination.
     pub fn new(identity: Identity, app_name: &str, aspects: &[&str]) -> Self {
+        use sha2::{Digest, Sha256};
+
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
             .expect("app_name + aspects must fit in 128 bytes");
         let id_hash = identity.hash();
         let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
+
+        // Compute name_hash = SHA-256(expanded)[0:10]
+        let name_hash_full = Sha256::digest(expanded.as_bytes());
+        let mut name_hash = [0u8; rete_core::NAME_HASH_LEN];
+        name_hash.copy_from_slice(&name_hash_full[..rete_core::NAME_HASH_LEN]);
+
+        let primary_dest = Destination::from_hashes(
+            DestinationType::Single,
+            Direction::In,
+            app_name,
+            aspects,
+            dest_hash,
+            name_hash,
+        );
 
         let mut transport = Transport::new();
         transport.add_local_destination(dest_hash);
@@ -119,13 +129,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         NodeCore {
             identity,
             transport,
-            app_name: String::from(app_name),
-            aspects: aspects.iter().map(|s| String::from(*s)).collect(),
-            dest_hash,
+            primary_dest,
             auto_reply: None,
             echo_data: false,
             last_peer: None,
-            proof_strategy: ProofStrategy::ProveNone,
         }
     }
 
@@ -136,7 +143,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
     /// Returns our destination hash.
     pub fn dest_hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
-        &self.dest_hash
+        self.primary_dest.hash()
     }
 
     /// Set an auto-reply message sent to any peer that announces.
@@ -149,9 +156,24 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         self.echo_data = echo;
     }
 
+    /// Returns a reference to the primary destination.
+    pub fn primary_dest(&self) -> &Destination {
+        &self.primary_dest
+    }
+
+    /// Returns a mutable reference to the primary destination.
+    pub fn primary_dest_mut(&mut self) -> &mut Destination {
+        &mut self.primary_dest
+    }
+
     /// Set the proof generation strategy for incoming data packets.
     pub fn set_proof_strategy(&mut self, strategy: ProofStrategy) {
-        self.proof_strategy = strategy;
+        self.primary_dest.set_proof_strategy(strategy);
+    }
+
+    /// Set default application data included in announces.
+    pub fn set_default_app_data(&mut self, data: Option<Vec<u8>>) {
+        self.primary_dest.set_default_app_data(data);
     }
 
     /// Pre-register a peer's identity for sending DATA without waiting for an announce.
@@ -216,11 +238,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         rng: &mut R,
         now: u64,
     ) -> Vec<u8> {
-        let aspects_refs: Vec<&str> = self.aspects.iter().map(|s| s.as_str()).collect();
+        let aspects_refs: Vec<&str> = self.primary_dest.aspects.iter().map(|s| s.as_str()).collect();
         let mut buf = [0u8; MTU];
         let n = Transport::<P, A, D, L>::create_announce(
             &self.identity,
-            &self.app_name,
+            &self.primary_dest.app_name,
             &aspects_refs,
             app_data,
             rng,
@@ -244,11 +266,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     ) -> bool {
         // Build directly into a stack buffer, then copy into heapless::Vec
         // to avoid an intermediate heap allocation via build_announce().
-        let aspects_refs: Vec<&str> = self.aspects.iter().map(|s| s.as_str()).collect();
+        let aspects_refs: Vec<&str> = self.primary_dest.aspects.iter().map(|s| s.as_str()).collect();
         let mut buf = [0u8; MTU];
         let n = match Transport::<P, A, D, L>::create_announce(
             &self.identity,
-            &self.app_name,
+            &self.primary_dest.app_name,
             &aspects_refs,
             app_data,
             rng,
@@ -263,7 +285,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             return false;
         }
         self.transport.queue_announce(PendingAnnounce {
-            dest_hash: self.dest_hash,
+            dest_hash: *self.primary_dest.hash(),
             raw,
             tx_count: 0,
             last_tx_at: 0,
@@ -338,6 +360,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             now,
             rng,
         )
+    }
+
+    /// Start a resource transfer on a link.
+    ///
+    /// Returns the outbound advertisement packet.
+    pub fn start_resource<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+        rng: &mut R,
+    ) -> Option<OutboundPacket> {
+        let pkt = self.transport.start_resource(link_id, data, rng)?;
+        Some(OutboundPacket::broadcast(pkt))
     }
 
     /// Build a path request packet for a destination.
@@ -417,7 +452,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 payload,
                 packet_hash,
             } => {
-                let decrypted = if dest_hash == self.dest_hash {
+                let decrypted = if dest_hash == *self.primary_dest.hash() {
                     let mut dec_buf = [0u8; MTU];
                     match self.identity.decrypt(payload, &mut dec_buf) {
                         Ok(n) => dec_buf[..n].to_vec(),
@@ -430,7 +465,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 let mut packets = Vec::new();
 
                 // Generate proof if strategy requires it
-                if self.proof_strategy == ProofStrategy::ProveAll {
+                if self.primary_dest.proof_strategy == ProofStrategy::ProveAll {
                     packets.extend(self.proof_outbound(&packet_hash));
                 }
 
@@ -531,7 +566,168 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 // Auto-prove buffered channel packets too (transport ACK ≠ application delivery)
                 packets: self.proof_outbound(&packet_hash).into_iter().collect(),
             },
-            IngestResult::Duplicate | IngestResult::Invalid => IngestOutcome::empty(),
+            IngestResult::ResourceOffered {
+                link_id,
+                resource_hash,
+                total_size,
+            } => {
+                // Auto-accept: send first request
+                let mut packets = Vec::new();
+                if let Some(pkt) =
+                    self.transport
+                        .accept_resource(&link_id, &resource_hash, rng)
+                {
+                    packets.push(OutboundPacket::broadcast(pkt));
+                }
+                // Drain any resource outbound packets queued during ingest
+                for pkt in self.transport.drain_resource_outbound() {
+                    packets.push(OutboundPacket::broadcast(pkt));
+                }
+                IngestOutcome {
+                    event: Some(NodeEvent::ResourceOffered {
+                        link_id,
+                        resource_hash,
+                        total_size,
+                    }),
+                    packets,
+                }
+            }
+            IngestResult::ResourceProgress {
+                link_id,
+                resource_hash,
+                current,
+                total,
+            } => {
+                let mut packets = Vec::new();
+                // If all parts received, assemble and send proof
+                if current == total {
+                    // Step 1: assemble data and build proof (borrows transport mutably)
+                    let assembly_result = {
+                        if let Some(res) =
+                            self.transport.get_resource_mut(&link_id, &resource_hash)
+                        {
+                            match res.assemble() {
+                                Ok(data) => {
+                                    let proof = res.build_proof();
+                                    Some(Ok((data, proof)))
+                                }
+                                Err(_) => Some(Err(())),
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    // Step 2: use transport.get_link() for encryption (separate borrow)
+                    if let Some(Ok((data, proof))) = assembly_result {
+                        if let Some(link) = self.transport.get_link(&link_id) {
+                            let mut ct_buf = [0u8; MTU];
+                            if let Ok(ct_len) = link.encrypt(&proof, rng, &mut ct_buf) {
+                                let mut pkt_buf = [0u8; MTU];
+                                if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
+                                    .packet_type(PacketType::Data)
+                                    .dest_type(DestType::Link)
+                                    .destination_hash(&link_id)
+                                    .context(rete_core::CONTEXT_RESOURCE_PRF)
+                                    .payload(&ct_buf[..ct_len])
+                                    .build()
+                                {
+                                    packets.push(OutboundPacket::broadcast(
+                                        pkt_buf[..pkt_len].to_vec(),
+                                    ));
+                                }
+                            }
+                        }
+                        // Drain any resource outbound packets
+                        for pkt in self.transport.drain_resource_outbound() {
+                            packets.push(OutboundPacket::broadcast(pkt));
+                        }
+                        return IngestOutcome {
+                            event: Some(NodeEvent::ResourceComplete {
+                                link_id,
+                                resource_hash,
+                                data,
+                            }),
+                            packets,
+                        };
+                    } else if let Some(Err(())) = assembly_result {
+                        for pkt in self.transport.drain_resource_outbound() {
+                            packets.push(OutboundPacket::broadcast(pkt));
+                        }
+                        return IngestOutcome {
+                            event: Some(NodeEvent::ResourceFailed {
+                                link_id,
+                                resource_hash,
+                            }),
+                            packets,
+                        };
+                    }
+                }
+                // Not all parts received yet — drain resource outbound
+                for pkt in self.transport.drain_resource_outbound() {
+                    packets.push(OutboundPacket::broadcast(pkt));
+                }
+                IngestOutcome {
+                    event: Some(NodeEvent::ResourceProgress {
+                        link_id,
+                        resource_hash,
+                        current,
+                        total,
+                    }),
+                    packets,
+                }
+            }
+            IngestResult::ResourceComplete {
+                link_id,
+                resource_hash,
+                data,
+            } => {
+                // Sender received proof — transfer complete on our end
+                self.transport.cleanup_resources();
+                let mut packets = Vec::new();
+                for pkt in self.transport.drain_resource_outbound() {
+                    packets.push(OutboundPacket::broadcast(pkt));
+                }
+                IngestOutcome {
+                    event: Some(NodeEvent::ResourceComplete {
+                        link_id,
+                        resource_hash,
+                        data,
+                    }),
+                    packets,
+                }
+            }
+            IngestResult::ResourceFailed {
+                link_id,
+                resource_hash,
+            } => {
+                self.transport.cleanup_resources();
+                let mut packets = Vec::new();
+                for pkt in self.transport.drain_resource_outbound() {
+                    packets.push(OutboundPacket::broadcast(pkt));
+                }
+                IngestOutcome {
+                    event: Some(NodeEvent::ResourceFailed {
+                        link_id,
+                        resource_hash,
+                    }),
+                    packets,
+                }
+            }
+            IngestResult::Duplicate | IngestResult::Invalid => {
+                // Drain any resource outbound packets that may have been queued
+                let resource_pkts = self.transport.drain_resource_outbound();
+                if resource_pkts.is_empty() {
+                    IngestOutcome::empty()
+                } else {
+                    IngestOutcome {
+                        event: None,
+                        packets: resource_pkts
+                            .into_iter()
+                            .map(OutboundPacket::broadcast)
+                            .collect(),
+                    }
+                }
+            }
         }
     }
 

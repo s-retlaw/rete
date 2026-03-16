@@ -97,6 +97,42 @@ pub enum NodeEvent {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
     },
+    /// A resource was offered on a link.
+    ResourceOffered {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+        /// Total size of the resource.
+        total_size: usize,
+    },
+    /// Resource transfer progress.
+    ResourceProgress {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+        /// Parts received so far.
+        current: usize,
+        /// Total parts.
+        total: usize,
+    },
+    /// Resource transfer completed.
+    ResourceComplete {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+        /// The assembled data.
+        data: alloc::vec::Vec<u8>,
+    },
+    /// Resource transfer failed.
+    ResourceFailed {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+    },
     /// Periodic tick completed.
     Tick {
         /// Number of paths expired.
@@ -107,7 +143,13 @@ pub enum NodeEvent {
 }
 
 #[cfg(feature = "alloc")]
+pub mod destination;
+
+#[cfg(feature = "alloc")]
 pub mod node_core;
+
+#[cfg(feature = "alloc")]
+pub use destination::{Destination, DestinationType, Direction};
 
 #[cfg(feature = "alloc")]
 pub use node_core::{

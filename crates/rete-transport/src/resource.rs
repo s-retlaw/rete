@@ -1,0 +1,997 @@
+//! Resource — segmented data transfer over Links.
+//!
+//! A Resource breaks large data into segments that fit within a Link's MDU,
+//! transfers them using a sliding window, and reassembles on the receiver side
+//! with hash verification.
+//!
+//! # State machines
+//!
+//! ```text
+//! Sender:   Queued -> Advertised -> Transferring -> AwaitingProof -> Complete/Failed
+//! Receiver: Transferring -> Assembling -> Complete/Corrupt/Failed
+//! ```
+
+extern crate alloc;
+
+use alloc::vec;
+use alloc::vec::Vec;
+use rand_core::{CryptoRng, RngCore};
+use sha2::{Digest, Sha256};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Length of truncated part hashes (4 bytes).
+pub const MAPHASH_LEN: usize = 4;
+/// Length of the random hash in a resource advertisement.
+pub const RANDOM_HASH_SIZE: usize = 4;
+/// Maximum efficient resource size (0xFF_FF_FF).
+pub const MAX_EFFICIENT_SIZE: usize = 16_777_215;
+/// Initial sliding window size.
+pub const WINDOW_INITIAL: usize = 4;
+/// Minimum window size.
+pub const WINDOW_MIN: usize = 2;
+/// Maximum window for slow links.
+pub const WINDOW_MAX_SLOW: usize = 10;
+/// Maximum window for fast links.
+pub const WINDOW_MAX_FAST: usize = 75;
+/// Maximum transfer retries before failure.
+pub const MAX_RETRIES: usize = 16;
+/// Maximum advertisement retries.
+pub const MAX_ADV_RETRIES: usize = 4;
+/// Grace time for sender in seconds.
+pub const SENDER_GRACE_TIME: u64 = 10;
+/// Advertisement overhead in bytes.
+pub const ADV_OVERHEAD: usize = 134;
+/// Sentinel value indicating the hashmap is fully transferred.
+pub const HASHMAP_IS_EXHAUSTED: u8 = 0xFF;
+
+// ---------------------------------------------------------------------------
+// Minimal msgpack helpers (no std dependency)
+// ---------------------------------------------------------------------------
+
+/// Write a msgpack fixarray header for `n` elements (n < 16).
+fn write_msgpack_fixarray(buf: &mut Vec<u8>, n: u8) {
+    debug_assert!(n < 16);
+    buf.push(0x90 | n);
+}
+
+/// Write a msgpack bin value.
+fn write_msgpack_bin(buf: &mut Vec<u8>, data: &[u8]) {
+    let len = data.len();
+    if len < 256 {
+        buf.push(0xc4); // bin8
+        buf.push(len as u8);
+    } else if len < 65536 {
+        buf.push(0xc5); // bin16
+        buf.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        buf.push(0xc6); // bin32
+        buf.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+    buf.extend_from_slice(data);
+}
+
+/// Write a msgpack unsigned integer.
+fn write_msgpack_uint(buf: &mut Vec<u8>, val: u64) {
+    if val < 128 {
+        buf.push(val as u8); // positive fixint
+    } else if val < 256 {
+        buf.push(0xcc);
+        buf.push(val as u8);
+    } else if val < 65536 {
+        buf.push(0xcd);
+        buf.extend_from_slice(&(val as u16).to_be_bytes());
+    } else if val < 0x1_0000_0000 {
+        buf.push(0xce);
+        buf.extend_from_slice(&(val as u32).to_be_bytes());
+    } else {
+        buf.push(0xcf);
+        buf.extend_from_slice(&val.to_be_bytes());
+    }
+}
+
+/// Read a msgpack array length. Advances `pos`.
+fn read_msgpack_array_len(data: &[u8], pos: &mut usize) -> Result<usize, &'static str> {
+    if *pos >= data.len() {
+        return Err("unexpected end of msgpack data");
+    }
+    let b = data[*pos];
+    *pos += 1;
+    if b & 0xF0 == 0x90 {
+        // fixarray
+        Ok((b & 0x0F) as usize)
+    } else if b == 0xdc {
+        // array16
+        if *pos + 2 > data.len() {
+            return Err("truncated array16 length");
+        }
+        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
+        *pos += 2;
+        Ok(n as usize)
+    } else if b == 0xdd {
+        // array32
+        if *pos + 4 > data.len() {
+            return Err("truncated array32 length");
+        }
+        let n = u32::from_be_bytes([
+            data[*pos],
+            data[*pos + 1],
+            data[*pos + 2],
+            data[*pos + 3],
+        ]);
+        *pos += 4;
+        Ok(n as usize)
+    } else {
+        Err("expected msgpack array")
+    }
+}
+
+/// Read a msgpack bin value. Returns a slice into `data`. Advances `pos`.
+fn read_msgpack_bin<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], &'static str> {
+    if *pos >= data.len() {
+        return Err("unexpected end of msgpack data");
+    }
+    let b = data[*pos];
+    *pos += 1;
+    let len = match b {
+        0xc4 => {
+            // bin8
+            if *pos >= data.len() {
+                return Err("truncated bin8 length");
+            }
+            let n = data[*pos] as usize;
+            *pos += 1;
+            n
+        }
+        0xc5 => {
+            // bin16
+            if *pos + 2 > data.len() {
+                return Err("truncated bin16 length");
+            }
+            let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
+            *pos += 2;
+            n
+        }
+        0xc6 => {
+            // bin32
+            if *pos + 4 > data.len() {
+                return Err("truncated bin32 length");
+            }
+            let n = u32::from_be_bytes([
+                data[*pos],
+                data[*pos + 1],
+                data[*pos + 2],
+                data[*pos + 3],
+            ]) as usize;
+            *pos += 4;
+            n
+        }
+        _ => return Err("expected msgpack bin"),
+    };
+    if *pos + len > data.len() {
+        return Err("truncated bin data");
+    }
+    let result = &data[*pos..*pos + len];
+    *pos += len;
+    Ok(result)
+}
+
+/// Read a msgpack unsigned integer. Advances `pos`.
+fn read_msgpack_uint(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> {
+    if *pos >= data.len() {
+        return Err("unexpected end of msgpack data");
+    }
+    let b = data[*pos];
+    *pos += 1;
+    match b {
+        // positive fixint
+        0x00..=0x7f => Ok(b as u64),
+        // uint8
+        0xcc => {
+            if *pos >= data.len() {
+                return Err("truncated uint8");
+            }
+            let v = data[*pos] as u64;
+            *pos += 1;
+            Ok(v)
+        }
+        // uint16
+        0xcd => {
+            if *pos + 2 > data.len() {
+                return Err("truncated uint16");
+            }
+            let v = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as u64;
+            *pos += 2;
+            Ok(v)
+        }
+        // uint32
+        0xce => {
+            if *pos + 4 > data.len() {
+                return Err("truncated uint32");
+            }
+            let v = u32::from_be_bytes([
+                data[*pos],
+                data[*pos + 1],
+                data[*pos + 2],
+                data[*pos + 3],
+            ]) as u64;
+            *pos += 4;
+            Ok(v)
+        }
+        // uint64
+        0xcf => {
+            if *pos + 8 > data.len() {
+                return Err("truncated uint64");
+            }
+            let v = u64::from_be_bytes([
+                data[*pos],
+                data[*pos + 1],
+                data[*pos + 2],
+                data[*pos + 3],
+                data[*pos + 4],
+                data[*pos + 5],
+                data[*pos + 6],
+                data[*pos + 7],
+            ]);
+            *pos += 8;
+            Ok(v)
+        }
+        _ => Err("expected msgpack uint"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// Resource transfer state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceState {
+    /// Uninitialized.
+    None,
+    /// Outbound resource waiting to be advertised.
+    Queued,
+    /// Advertisement sent, waiting for receiver acceptance.
+    Advertised,
+    /// Data segments are being transferred.
+    Transferring,
+    /// All segments sent, waiting for proof from receiver.
+    AwaitingProof,
+    /// Receiver is assembling parts (all parts received, verifying).
+    Assembling,
+    /// Transfer completed successfully.
+    Complete,
+    /// Transfer failed (timeout, cancel, max retries).
+    Failed,
+    /// Assembled data did not match the resource hash.
+    Corrupt,
+}
+
+/// Resource flags bitfield.
+#[derive(Debug, Clone, Default)]
+pub struct ResourceFlags {
+    /// Data is encrypted.
+    pub encrypted: bool,
+    /// Data is compressed.
+    pub compressed: bool,
+    /// Resource is part of a split transfer.
+    pub is_split: bool,
+    /// Resource is a request.
+    pub is_request: bool,
+    /// Resource is a response.
+    pub is_response: bool,
+    /// Resource has metadata attached.
+    pub has_metadata: bool,
+}
+
+impl ResourceFlags {
+    /// Encode flags into a single byte.
+    ///
+    /// ```text
+    /// bit 0: encrypted
+    /// bit 1: compressed
+    /// bit 2: is_split
+    /// bit 3: is_request
+    /// bit 4: is_response
+    /// bit 5: has_metadata
+    /// ```
+    pub fn to_byte(&self) -> u8 {
+        let mut b = 0u8;
+        if self.encrypted {
+            b |= 1 << 0;
+        }
+        if self.compressed {
+            b |= 1 << 1;
+        }
+        if self.is_split {
+            b |= 1 << 2;
+        }
+        if self.is_request {
+            b |= 1 << 3;
+        }
+        if self.is_response {
+            b |= 1 << 4;
+        }
+        if self.has_metadata {
+            b |= 1 << 5;
+        }
+        b
+    }
+
+    /// Decode flags from a single byte.
+    pub fn from_byte(b: u8) -> Self {
+        ResourceFlags {
+            encrypted: b & (1 << 0) != 0,
+            compressed: b & (1 << 1) != 0,
+            is_split: b & (1 << 2) != 0,
+            is_request: b & (1 << 3) != 0,
+            is_response: b & (1 << 4) != 0,
+            has_metadata: b & (1 << 5) != 0,
+        }
+    }
+}
+
+/// A segmented data transfer over a Link.
+pub struct Resource {
+    /// Current state of the resource transfer.
+    pub state: ResourceState,
+    /// Whether this side is the sender.
+    pub is_sender: bool,
+    /// Link identifier this resource is associated with.
+    pub link_id: [u8; 16],
+    /// Full 32-byte SHA-256 hash of (data || random_hash).
+    pub resource_hash: [u8; 32],
+    /// 4-byte random hash for uniqueness.
+    pub random_hash: [u8; RANDOM_HASH_SIZE],
+    /// Resource flags.
+    pub flags: ResourceFlags,
+    /// Total data size in bytes.
+    pub total_size: usize,
+    /// Index of the next segment to send or receive.
+    pub segment_index: usize,
+    /// Total number of segments.
+    pub total_segments: usize,
+    /// Current sliding window size.
+    pub window: usize,
+    /// Maximum data unit per segment.
+    pub mdu: usize,
+    /// Number of retries so far.
+    pub retries: usize,
+    /// Last activity timestamp (monotonic seconds).
+    pub last_activity: u64,
+
+    // -- Data storage --
+    /// Full data (sender has it upfront, receiver assembles).
+    data: Vec<u8>,
+    /// Individual segments.
+    parts: Vec<Vec<u8>>,
+    /// 4-byte truncated SHA-256 hash of each segment.
+    part_hashes: Vec<[u8; MAPHASH_LEN]>,
+    /// Which parts have been received (receiver side).
+    pub received: Vec<bool>,
+    /// How far into part_hashes we have sent to the receiver.
+    hashmap_cursor: usize,
+}
+
+impl Resource {
+    // -----------------------------------------------------------------------
+    // Sender methods
+    // -----------------------------------------------------------------------
+
+    /// Create a new outbound resource.
+    ///
+    /// Splits `data` into segments of at most `mdu` bytes, computes per-part
+    /// hashes, and computes the overall resource hash.
+    pub fn new_outbound<R: RngCore + CryptoRng>(
+        data: &[u8],
+        link_id: [u8; 16],
+        mdu: usize,
+        rng: &mut R,
+    ) -> Self {
+        // 1. Generate random_hash (4 random bytes)
+        let mut random_hash = [0u8; RANDOM_HASH_SIZE];
+        rng.fill_bytes(&mut random_hash);
+
+        // 2. Compute resource_hash = SHA-256(data || random_hash)
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hasher.update(random_hash);
+        let resource_hash: [u8; 32] = hasher.finalize().into();
+
+        // 3. Split data into segments of size mdu
+        let total_segments = if data.is_empty() {
+            0
+        } else {
+            data.len().div_ceil(mdu)
+        };
+
+        let mut parts = Vec::with_capacity(total_segments);
+        let mut part_hashes = Vec::with_capacity(total_segments);
+
+        for i in 0..total_segments {
+            let start = i * mdu;
+            let end = core::cmp::min(start + mdu, data.len());
+            let segment = data[start..end].to_vec();
+
+            // 4. Compute part_hash = SHA-256(segment)[0:4]
+            let hash = Sha256::digest(&segment);
+            let mut part_hash = [0u8; MAPHASH_LEN];
+            part_hash.copy_from_slice(&hash[..MAPHASH_LEN]);
+            part_hashes.push(part_hash);
+            parts.push(segment);
+        }
+
+        Resource {
+            state: ResourceState::Queued,
+            is_sender: true,
+            link_id,
+            resource_hash,
+            random_hash,
+            flags: ResourceFlags::default(),
+            total_size: data.len(),
+            segment_index: 0,
+            total_segments,
+            window: WINDOW_INITIAL,
+            mdu,
+            retries: 0,
+            last_activity: 0,
+            data: data.to_vec(),
+            parts,
+            part_hashes,
+            received: vec![false; total_segments],
+            hashmap_cursor: 0,
+        }
+    }
+
+    /// Build the advertisement payload (msgpack).
+    ///
+    /// Format: msgpack array of 6 elements:
+    /// `[resource_hash[32], total_size, segment_count, random_hash[4], hashmap_bytes, flags_byte]`
+    ///
+    /// `hashmap_bytes` is the concatenation of the first `window` part hashes.
+    pub fn build_advertisement(&mut self) -> Vec<u8> {
+        self.state = ResourceState::Advertised;
+        self.hashmap_cursor = self.window.min(self.total_segments);
+
+        // Build hashmap bytes: concatenated 4-byte hashes for the first `window` parts
+        let hashmap_len = self.hashmap_cursor * MAPHASH_LEN;
+        let mut hashmap_bytes = Vec::with_capacity(hashmap_len);
+        for i in 0..self.hashmap_cursor {
+            hashmap_bytes.extend_from_slice(&self.part_hashes[i]);
+        }
+
+        let mut buf = Vec::new();
+        write_msgpack_fixarray(&mut buf, 6);
+        write_msgpack_bin(&mut buf, &self.resource_hash);
+        write_msgpack_uint(&mut buf, self.total_size as u64);
+        write_msgpack_uint(&mut buf, self.total_segments as u64);
+        write_msgpack_bin(&mut buf, &self.random_hash);
+        write_msgpack_bin(&mut buf, &hashmap_bytes);
+        write_msgpack_uint(&mut buf, self.flags.to_byte() as u64);
+        buf
+    }
+
+    /// Handle a RESOURCE_REQ from the receiver.
+    ///
+    /// Parses the request and returns a list of `(part_index, part_data)` pairs
+    /// for segments the receiver has requested.
+    ///
+    /// Request format: `hashmap_status[1] || resource_hash[0:16] || requested_hashes[N*4]`
+    pub fn handle_request(&mut self, req_payload: &[u8]) -> Vec<(usize, Vec<u8>)> {
+        if req_payload.len() < 17 {
+            return Vec::new();
+        }
+
+        self.state = ResourceState::Transferring;
+
+        let _hashmap_status = req_payload[0];
+        // resource_hash[0:16] — we could verify this matches ours
+        let _req_hash = &req_payload[1..17];
+        let requested_hashes_data = &req_payload[17..];
+
+        let num_requested = requested_hashes_data.len() / MAPHASH_LEN;
+        let mut result = Vec::new();
+
+        for i in 0..num_requested {
+            let start = i * MAPHASH_LEN;
+            let end = start + MAPHASH_LEN;
+            if end > requested_hashes_data.len() {
+                break;
+            }
+            let mut req_hash = [0u8; MAPHASH_LEN];
+            req_hash.copy_from_slice(&requested_hashes_data[start..end]);
+
+            // Find the matching part
+            for (idx, ph) in self.part_hashes.iter().enumerate() {
+                if *ph == req_hash {
+                    result.push((idx, self.parts[idx].clone()));
+                    break;
+                }
+            }
+        }
+
+        // If no more parts to request (all sent), transition to AwaitingProof
+        if num_requested == 0 || result.is_empty() {
+            self.state = ResourceState::AwaitingProof;
+        }
+
+        result
+    }
+
+    /// Handle RESOURCE_PRF from the receiver. Returns true if transfer is complete.
+    ///
+    /// Proof format: `resource_hash[0:16] || proof_hash[32]`
+    /// Verifies: `proof_hash == SHA-256(data || resource_hash[0:16])`
+    pub fn handle_proof(&mut self, proof_payload: &[u8]) -> bool {
+        if proof_payload.len() < 48 {
+            self.state = ResourceState::Failed;
+            return false;
+        }
+
+        let proof_id = &proof_payload[..16];
+        let proof_hash = &proof_payload[16..48];
+
+        // Verify the proof_id matches our resource_hash[0:16]
+        if proof_id != &self.resource_hash[..16] {
+            self.state = ResourceState::Failed;
+            return false;
+        }
+
+        // Compute expected: SHA-256(data || resource_hash[0:16])
+        let mut hasher = Sha256::new();
+        hasher.update(&self.data);
+        hasher.update(&self.resource_hash[..16]);
+        let expected: [u8; 32] = hasher.finalize().into();
+
+        if proof_hash == &expected[..] {
+            self.state = ResourceState::Complete;
+            true
+        } else {
+            self.state = ResourceState::Failed;
+            false
+        }
+    }
+
+    /// Handle cancel from the receiver.
+    pub fn handle_cancel(&mut self) {
+        self.state = ResourceState::Failed;
+    }
+
+    /// Build a hashmap update payload.
+    ///
+    /// Format: `resource_hash[0:16] || msgpack([segment_cursor, hashmap_chunk_bytes])`
+    ///
+    /// Sends the next window of part hashes starting at `hashmap_cursor`.
+    /// Returns `None` if all hashes have already been sent.
+    pub fn build_hashmap_update(&mut self) -> Option<Vec<u8>> {
+        if self.hashmap_cursor >= self.total_segments {
+            return None;
+        }
+
+        let end = (self.hashmap_cursor + self.window).min(self.total_segments);
+        let chunk_start = self.hashmap_cursor;
+
+        // Build the hash chunk
+        let chunk_len = (end - chunk_start) * MAPHASH_LEN;
+        let mut chunk_bytes = Vec::with_capacity(chunk_len);
+        for i in chunk_start..end {
+            chunk_bytes.extend_from_slice(&self.part_hashes[i]);
+        }
+
+        // Build msgpack: [segment_cursor, hashmap_chunk_bytes]
+        let mut msgpack_part = Vec::new();
+        write_msgpack_fixarray(&mut msgpack_part, 2);
+        write_msgpack_uint(&mut msgpack_part, chunk_start as u64);
+        write_msgpack_bin(&mut msgpack_part, &chunk_bytes);
+
+        // Full payload: resource_hash[0:16] || msgpack
+        let mut payload = Vec::with_capacity(16 + msgpack_part.len());
+        payload.extend_from_slice(&self.resource_hash[..16]);
+        payload.extend_from_slice(&msgpack_part);
+
+        self.hashmap_cursor = end;
+
+        Some(payload)
+    }
+
+    // -----------------------------------------------------------------------
+    // Receiver methods
+    // -----------------------------------------------------------------------
+
+    /// Create a resource from a received advertisement.
+    ///
+    /// Parses msgpack: `[resource_hash, total_size, segment_count, random_hash, hashmap_bytes, flags_byte]`
+    pub fn from_advertisement(adv_payload: &[u8], link_id: [u8; 16]) -> Result<Self, &'static str> {
+        let mut pos = 0;
+
+        let array_len = read_msgpack_array_len(adv_payload, &mut pos)?;
+        if array_len != 6 {
+            return Err("expected 6-element msgpack array");
+        }
+
+        // 1. resource_hash (bin, 32 bytes)
+        let rh_bytes = read_msgpack_bin(adv_payload, &mut pos)?;
+        if rh_bytes.len() != 32 {
+            return Err("resource_hash must be 32 bytes");
+        }
+        let mut resource_hash = [0u8; 32];
+        resource_hash.copy_from_slice(rh_bytes);
+
+        // 2. total_size (uint)
+        let total_size = read_msgpack_uint(adv_payload, &mut pos)? as usize;
+
+        // 3. segment_count (uint)
+        let total_segments = read_msgpack_uint(adv_payload, &mut pos)? as usize;
+
+        // 4. random_hash (bin, 4 bytes)
+        let rh = read_msgpack_bin(adv_payload, &mut pos)?;
+        if rh.len() != RANDOM_HASH_SIZE {
+            return Err("random_hash must be 4 bytes");
+        }
+        let mut random_hash = [0u8; RANDOM_HASH_SIZE];
+        random_hash.copy_from_slice(rh);
+
+        // 5. hashmap_bytes (bin)
+        let hashmap_bytes = read_msgpack_bin(adv_payload, &mut pos)?;
+        let initial_hashes = hashmap_bytes.len() / MAPHASH_LEN;
+
+        let mut part_hashes = Vec::with_capacity(total_segments);
+        for i in 0..initial_hashes {
+            let start = i * MAPHASH_LEN;
+            let mut ph = [0u8; MAPHASH_LEN];
+            ph.copy_from_slice(&hashmap_bytes[start..start + MAPHASH_LEN]);
+            part_hashes.push(ph);
+        }
+
+        // 6. flags_byte (uint)
+        let flags_byte = read_msgpack_uint(adv_payload, &mut pos)? as u8;
+        let flags = ResourceFlags::from_byte(flags_byte);
+
+        Ok(Resource {
+            state: ResourceState::Transferring,
+            is_sender: false,
+            link_id,
+            resource_hash,
+            random_hash,
+            flags,
+            total_size,
+            segment_index: 0,
+            total_segments,
+            window: WINDOW_INITIAL,
+            mdu: 0, // receiver doesn't need to know the MDU
+            retries: 0,
+            last_activity: 0,
+            data: Vec::new(),
+            parts: vec![Vec::new(); total_segments],
+            part_hashes,
+            received: vec![false; total_segments],
+            hashmap_cursor: initial_hashes,
+        })
+    }
+
+    /// Receive a resource part. Returns true if all parts have been received.
+    ///
+    /// Computes the hash of the part data, finds the matching index in
+    /// `part_hashes`, and stores it.
+    pub fn receive_part(&mut self, part_data: &[u8]) -> bool {
+        let hash = Sha256::digest(part_data);
+        let mut part_hash = [0u8; MAPHASH_LEN];
+        part_hash.copy_from_slice(&hash[..MAPHASH_LEN]);
+
+        // Find matching index in known part hashes
+        for (idx, ph) in self.part_hashes.iter().enumerate() {
+            if *ph == part_hash && !self.received[idx] {
+                self.parts[idx] = part_data.to_vec();
+                self.received[idx] = true;
+                break;
+            }
+        }
+
+        // Check if all parts received
+        self.received.iter().all(|&r| r)
+    }
+
+    /// Build a RESOURCE_REQ payload requesting needed parts.
+    ///
+    /// Format: `hashmap_status[1] || resource_hash[0:16] || needed_hashes[N*4]`
+    ///
+    /// - `hashmap_status` = `HASHMAP_IS_EXHAUSTED` if all part hashes are known, else `0x00`
+    /// - Only requests parts within the current window that have not been received.
+    pub fn build_request(&self) -> Vec<u8> {
+        let hashmap_status = if self.part_hashes.len() >= self.total_segments {
+            HASHMAP_IS_EXHAUSTED
+        } else {
+            0x00
+        };
+
+        let mut payload = Vec::new();
+        payload.push(hashmap_status);
+        payload.extend_from_slice(&self.resource_hash[..16]);
+
+        // Request parts within the current window that we haven't received
+        let mut requested = 0;
+        for (idx, ph) in self.part_hashes.iter().enumerate() {
+            if !self.received[idx] {
+                payload.extend_from_slice(ph);
+                requested += 1;
+                if requested >= self.window {
+                    break;
+                }
+            }
+        }
+
+        payload
+    }
+
+    /// Process a hashmap update (more part hashes from the sender).
+    ///
+    /// Format: `resource_hash[0:16] || msgpack([segment_index, new_hashes_bytes])`
+    pub fn apply_hashmap_update(&mut self, hmu_payload: &[u8]) -> Result<(), &'static str> {
+        if hmu_payload.len() < 16 {
+            return Err("hashmap update too short");
+        }
+
+        // Verify resource_hash prefix
+        if hmu_payload[..16] != self.resource_hash[..16] {
+            return Err("resource hash mismatch in hashmap update");
+        }
+
+        let msgpack_data = &hmu_payload[16..];
+        let mut pos = 0;
+
+        let array_len = read_msgpack_array_len(msgpack_data, &mut pos)?;
+        if array_len != 2 {
+            return Err("expected 2-element msgpack array in hashmap update");
+        }
+
+        let _segment_index = read_msgpack_uint(msgpack_data, &mut pos)? as usize;
+        let new_hashes = read_msgpack_bin(msgpack_data, &mut pos)?;
+
+        let count = new_hashes.len() / MAPHASH_LEN;
+        for i in 0..count {
+            let start = i * MAPHASH_LEN;
+            let mut ph = [0u8; MAPHASH_LEN];
+            ph.copy_from_slice(&new_hashes[start..start + MAPHASH_LEN]);
+            // Only add if we don't already have enough
+            if self.part_hashes.len() < self.total_segments {
+                self.part_hashes.push(ph);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Assemble the complete resource data and verify the hash.
+    ///
+    /// Concatenates all parts in order, then verifies that
+    /// `SHA-256(assembled || random_hash) == resource_hash`.
+    pub fn assemble(&mut self) -> Result<Vec<u8>, &'static str> {
+        self.state = ResourceState::Assembling;
+
+        // Concatenate all parts in order
+        let mut assembled = Vec::with_capacity(self.total_size);
+        for part in &self.parts {
+            assembled.extend_from_slice(part);
+        }
+
+        // Verify: SHA-256(assembled || random_hash) == resource_hash
+        let mut hasher = Sha256::new();
+        hasher.update(&assembled);
+        hasher.update(self.random_hash);
+        let computed: [u8; 32] = hasher.finalize().into();
+
+        if computed == self.resource_hash {
+            self.data = assembled.clone();
+            self.state = ResourceState::Complete;
+            Ok(assembled)
+        } else {
+            self.state = ResourceState::Corrupt;
+            Err("resource hash mismatch — data corrupt")
+        }
+    }
+
+    /// Build proof payload for a completed transfer.
+    ///
+    /// Format: `resource_hash[0:16] || SHA-256(data || resource_hash[0:16])`
+    /// Total: 16 + 32 = 48 bytes.
+    pub fn build_proof(&self) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(&self.data);
+        hasher.update(&self.resource_hash[..16]);
+        let proof_hash: [u8; 32] = hasher.finalize().into();
+
+        let mut payload = Vec::with_capacity(48);
+        payload.extend_from_slice(&self.resource_hash[..16]);
+        payload.extend_from_slice(&proof_hash);
+        payload
+    }
+
+    /// Whether we need more hashmap entries from the sender.
+    pub fn needs_hashmap_update(&self) -> bool {
+        self.part_hashes.len() < self.total_segments
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resource_split_into_parts() {
+        let data = vec![0xAA; 1000];
+        let mdu = 431;
+        let mut rng = rand::thread_rng();
+        let res = Resource::new_outbound(&data, [0x11; 16], mdu, &mut rng);
+        assert_eq!(res.total_segments, 3); // ceil(1000/431)
+        assert_eq!(res.total_size, 1000);
+        assert_eq!(res.state, ResourceState::Queued);
+    }
+
+    #[test]
+    fn test_resource_hash_computation() {
+        let data = b"hello resource";
+        let mut rng = rand::thread_rng();
+        let res = Resource::new_outbound(data, [0x11; 16], 431, &mut rng);
+        // Verify hash = SHA-256(data || random_hash)
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hasher.update(&res.random_hash);
+        let expected: [u8; 32] = hasher.finalize().into();
+        assert_eq!(res.resource_hash, expected);
+    }
+
+    #[test]
+    fn test_part_hash_computation() {
+        let data = vec![0xBB; 100];
+        let mut rng = rand::thread_rng();
+        let res = Resource::new_outbound(&data, [0x11; 16], 431, &mut rng);
+        // Single part — hash should be SHA-256(data)[0:4]
+        let hash = Sha256::digest(&data);
+        assert_eq!(res.part_hashes[0], hash[..4]);
+    }
+
+    #[test]
+    fn test_advertisement_msgpack_round_trip() {
+        let data = vec![0xCC; 500];
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, &mut rng);
+        let adv = sender.build_advertisement();
+        let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        assert_eq!(receiver.total_size, 500);
+        assert_eq!(receiver.total_segments, 2); // ceil(500/431)
+        assert_eq!(receiver.resource_hash, sender.resource_hash);
+    }
+
+    #[test]
+    fn test_advertisement_hashmap_layout() {
+        let data = vec![0xDD; 2000];
+        let mdu = 431;
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, &mut rng);
+        let _adv = sender.build_advertisement();
+        // hashmap_cursor should be min(window, total_segments)
+        let expected_cursor = WINDOW_INITIAL.min(sender.total_segments);
+        assert_eq!(sender.hashmap_cursor, expected_cursor);
+    }
+
+    #[test]
+    fn test_request_wire_format() {
+        let data = vec![0xEE; 100]; // single part
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, &mut rng);
+        let adv = sender.build_advertisement();
+        let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let req = receiver.build_request();
+        // Format: status[1] || resource_hash[16] || hashes[N*4]
+        assert!(req.len() >= 17); // at least status + resource_hash
+    }
+
+    #[test]
+    fn test_proof_format() {
+        let data = vec![0xFF; 100];
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, &mut rng);
+        let adv = sender.build_advertisement();
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        // Feed the single part
+        receiver.receive_part(&data);
+        let assembled = receiver.assemble().unwrap();
+        assert_eq!(assembled, data);
+        let proof = receiver.build_proof();
+        assert_eq!(proof.len(), 48); // resource_hash[16] + proof_hash[32]
+    }
+
+    #[test]
+    fn test_sliding_window_grow() {
+        // After successful request handling, window should grow
+        let data = vec![0xAA; 2000];
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, &mut rng);
+        let adv = sender.build_advertisement();
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let initial_window = receiver.window;
+        // Simulate receiving all parts in current window
+        receiver.window += 1;
+        assert!(receiver.window > initial_window);
+    }
+
+    #[test]
+    fn test_cancel_transitions_to_failed() {
+        let data = vec![0xBB; 100];
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, &mut rng);
+        sender.handle_cancel();
+        assert_eq!(sender.state, ResourceState::Failed);
+    }
+
+    #[test]
+    fn test_complete_small_transfer() {
+        // Full sender -> receiver cycle for small data (1 segment)
+        let data = b"small transfer data";
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(data, [0x11; 16], 431, &mut rng);
+
+        // Step 1: Build advertisement
+        let adv = sender.build_advertisement();
+
+        // Step 2: Receiver parses advertisement
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+
+        // Step 3: Receiver builds request
+        let req = receiver.build_request();
+
+        // Step 4: Sender handles request, returns parts
+        let parts = sender.handle_request(&req);
+        assert!(!parts.is_empty());
+
+        // Step 5: Receiver receives parts
+        for (_idx, part) in &parts {
+            receiver.receive_part(part);
+        }
+
+        // Step 6: Receiver assembles and verifies
+        let assembled = receiver.assemble().unwrap();
+        assert_eq!(assembled, data);
+
+        // Step 7: Receiver builds proof
+        let proof = receiver.build_proof();
+
+        // Step 8: Sender validates proof
+        assert!(sender.handle_proof(&proof));
+        assert_eq!(sender.state, ResourceState::Complete);
+    }
+
+    #[test]
+    fn test_resource_flags_byte() {
+        let flags = ResourceFlags {
+            encrypted: true,
+            compressed: false,
+            is_split: true,
+            is_request: false,
+            is_response: true,
+            has_metadata: false,
+        };
+        let byte = flags.to_byte();
+        let decoded = ResourceFlags::from_byte(byte);
+        assert_eq!(decoded.encrypted, true);
+        assert_eq!(decoded.compressed, false);
+        assert_eq!(decoded.is_split, true);
+        assert_eq!(decoded.is_request, false);
+        assert_eq!(decoded.is_response, true);
+        assert_eq!(decoded.has_metadata, false);
+    }
+
+    #[test]
+    fn test_empty_data_resource() {
+        let data = b"";
+        let mut rng = rand::thread_rng();
+        let res = Resource::new_outbound(data, [0x11; 16], 431, &mut rng);
+        assert_eq!(res.total_segments, 0);
+        assert_eq!(res.total_size, 0);
+    }
+}

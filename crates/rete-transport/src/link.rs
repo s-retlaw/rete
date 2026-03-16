@@ -403,6 +403,13 @@ impl Link {
     }
 }
 
+/// Maximum data unit for link-encrypted payloads.
+///
+/// Computed as: `floor((MTU - 1 - HEADER_1_OVERHEAD - TOKEN_OVERHEAD) / 16) * 16 - 1`
+/// where TOKEN_OVERHEAD = 48 (32-byte FERNET token header + 16-byte IV).
+/// This gives 431 bytes — the largest plaintext that fits in one link packet.
+pub const LINK_MDU: usize = 431;
+
 /// Compute the link_id from a LINKREQUEST packet's raw bytes.
 ///
 /// ```text

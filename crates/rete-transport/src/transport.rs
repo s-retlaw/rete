@@ -6,10 +6,13 @@ use crate::receipt::ReceiptTable;
 use crate::{announce::PendingAnnounce, dedup::DedupWindow, path::Path};
 use heapless::{FnvIndexMap, FnvIndexSet};
 use rand_core::{CryptoRng, RngCore};
+use crate::link::LINK_MDU;
+use crate::resource::Resource;
 use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, CONTEXT_CHANNEL,
-    CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, NAME_HASH_LEN,
-    TRUNCATED_HASH_LEN,
+    CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, CONTEXT_RESOURCE,
+    CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF,
+    CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ, NAME_HASH_LEN, TRUNCATED_HASH_LEN,
 };
 use sha2::{Digest, Sha256};
 
@@ -144,6 +147,42 @@ pub enum IngestResult<'a> {
         /// The full 32-byte packet hash the proof covers.
         packet_hash: [u8; 32],
     },
+    /// A resource advertisement was received on a link.
+    ResourceOffered {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes for keying).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+        /// Total size of the resource data.
+        total_size: usize,
+    },
+    /// Resource transfer progress.
+    ResourceProgress {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+        /// Parts received so far.
+        current: usize,
+        /// Total parts.
+        total: usize,
+    },
+    /// Resource transfer completed successfully.
+    ResourceComplete {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+        /// The assembled resource data.
+        data: alloc::vec::Vec<u8>,
+    },
+    /// Resource transfer failed.
+    ResourceFailed {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+    },
     /// Packet was a duplicate and should be dropped.
     Duplicate,
     /// A channel message was accepted and buffered (out-of-order), not yet deliverable.
@@ -204,6 +243,10 @@ pub struct Transport<
     /// Receipts for channel messages: truncated packet hash → ChannelReceipt.
     /// Used to match incoming PROOFs to channel sequences and call mark_delivered().
     channel_receipts: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ChannelReceipt, 64>,
+    /// Active resource transfers.
+    resources: alloc::vec::Vec<Resource>,
+    /// Pending outbound resource packets (parts, HMU, etc.) built during ingest.
+    resource_outbound: alloc::vec::Vec<alloc::vec::Vec<u8>>,
 }
 
 impl<const P: usize, const A: usize, const D: usize, const L: usize> Default
@@ -229,6 +272,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             links: FnvIndexMap::new(),
             receipts: ReceiptTable::new(),
             channel_receipts: FnvIndexMap::new(),
+            resources: alloc::vec::Vec::new(),
+            resource_outbound: alloc::vec::Vec::new(),
         }
     }
 
@@ -589,7 +634,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 // Link data handling: dest_type == Link
                 if pkt.dest_type == DestType::Link {
-                    return self.handle_link_data(&dh, pkt.context, pkt.payload, now, pkt_hash);
+                    return self.handle_link_data(&dh, pkt.context, pkt.payload, now, pkt_hash, rng);
                 }
 
                 IngestResult::LocalData {
@@ -766,14 +811,46 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         IngestResult::LinkEstablished { link_id: *link_id }
     }
 
-    fn handle_link_data<'a>(
+    fn handle_link_data<'a, R: RngCore + CryptoRng>(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         context: u8,
         ciphertext: &[u8],
         now: u64,
         pkt_hash: [u8; 32],
+        rng: &mut R,
     ) -> IngestResult<'a> {
+        // For resource contexts, decrypt first in a sub-scope to release the link
+        // borrow, then handle resources using self.resources separately.
+        if matches!(
+            context,
+            CONTEXT_RESOURCE
+                | CONTEXT_RESOURCE_ADV
+                | CONTEXT_RESOURCE_REQ
+                | CONTEXT_RESOURCE_HMU
+                | CONTEXT_RESOURCE_PRF
+                | CONTEXT_RESOURCE_ICL
+                | CONTEXT_RESOURCE_RCL
+        ) {
+            let mut dec_buf = [0u8; rete_core::MTU];
+            let dec_len = {
+                let link = match self.links.get_mut(link_id) {
+                    Some(l) => l,
+                    None => return IngestResult::Invalid,
+                };
+                if !link.is_active() {
+                    return IngestResult::Invalid;
+                }
+                link.touch_inbound(now);
+                match link.decrypt(ciphertext, &mut dec_buf) {
+                    Ok(n) => n,
+                    Err(_) => return IngestResult::Invalid,
+                }
+            };
+            // self.links borrow is released. Now we can use self.resources.
+            return self.handle_resource_data(link_id, context, &dec_buf[..dec_len], now, rng);
+        }
+
         let link = match self.links.get_mut(link_id) {
             Some(l) => l,
             None => return IngestResult::Invalid,
@@ -850,6 +927,156 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     context,
                 }
             }
+        }
+    }
+
+    fn handle_resource_data<'a, R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        context: u8,
+        decrypted: &[u8],
+        _now: u64,
+        rng: &mut R,
+    ) -> IngestResult<'a> {
+        match context {
+            CONTEXT_RESOURCE => {
+                // A resource data part
+                if let Some(res) = self
+                    .resources
+                    .iter_mut()
+                    .find(|r| !r.is_sender && r.link_id == *link_id)
+                {
+                    let all_received = res.receive_part(decrypted);
+                    let mut rh = [0u8; TRUNCATED_HASH_LEN];
+                    rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
+                    if all_received {
+                        IngestResult::ResourceProgress {
+                            link_id: *link_id,
+                            resource_hash: rh,
+                            current: res.total_segments,
+                            total: res.total_segments,
+                        }
+                    } else {
+                        let received_count = res.received.iter().filter(|&&r| r).count();
+                        IngestResult::ResourceProgress {
+                            link_id: *link_id,
+                            resource_hash: rh,
+                            current: received_count,
+                            total: res.total_segments,
+                        }
+                    }
+                } else {
+                    IngestResult::Invalid
+                }
+            }
+            CONTEXT_RESOURCE_ADV => {
+                // Resource advertisement from sender
+                match Resource::from_advertisement(decrypted, *link_id) {
+                    Ok(res) => {
+                        let mut rh = [0u8; TRUNCATED_HASH_LEN];
+                        rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
+                        let total_size = res.total_size;
+                        self.resources.push(res);
+                        IngestResult::ResourceOffered {
+                            link_id: *link_id,
+                            resource_hash: rh,
+                            total_size,
+                        }
+                    }
+                    Err(_) => IngestResult::Invalid,
+                }
+            }
+            CONTEXT_RESOURCE_REQ => {
+                // Resource request from receiver (we are sender).
+                // Get the parts to send, then encrypt each via the link.
+                let parts_to_send = {
+                    if let Some(res) = self
+                        .resources
+                        .iter_mut()
+                        .find(|r| r.is_sender && r.link_id == *link_id)
+                    {
+                        res.handle_request(decrypted)
+                    } else {
+                        return IngestResult::Invalid;
+                    }
+                };
+                // resources borrow released. Now use links (immutable) for encryption
+                // and push to resource_outbound (disjoint fields, so this compiles).
+                for (_idx, part_data) in parts_to_send {
+                    if let Some(link) = self.links.get(link_id) {
+                        let mut ct_buf = [0u8; rete_core::MTU];
+                        if let Ok(ct_len) = link.encrypt(&part_data, rng, &mut ct_buf) {
+                            let mut pkt_buf = [0u8; rete_core::MTU];
+                            if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
+                                .packet_type(PacketType::Data)
+                                .dest_type(DestType::Link)
+                                .destination_hash(link_id)
+                                .context(CONTEXT_RESOURCE)
+                                .payload(&ct_buf[..ct_len])
+                                .build()
+                            {
+                                self.resource_outbound.push(pkt_buf[..pkt_len].to_vec());
+                            }
+                        }
+                    }
+                }
+                IngestResult::Duplicate // Parts queued in resource_outbound
+            }
+            CONTEXT_RESOURCE_HMU => {
+                // Hashmap update from sender
+                if let Some(res) = self
+                    .resources
+                    .iter_mut()
+                    .find(|r| !r.is_sender && r.link_id == *link_id)
+                {
+                    let _ = res.apply_hashmap_update(decrypted);
+                }
+                IngestResult::Duplicate
+            }
+            CONTEXT_RESOURCE_PRF => {
+                // Resource proof from receiver (we are sender)
+                if let Some(res) = self
+                    .resources
+                    .iter_mut()
+                    .find(|r| r.is_sender && r.link_id == *link_id)
+                {
+                    let mut rh = [0u8; TRUNCATED_HASH_LEN];
+                    rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
+                    if res.handle_proof(decrypted) {
+                        IngestResult::ResourceComplete {
+                            link_id: *link_id,
+                            resource_hash: rh,
+                            data: alloc::vec::Vec::new(), // sender doesn't return data
+                        }
+                    } else {
+                        IngestResult::ResourceFailed {
+                            link_id: *link_id,
+                            resource_hash: rh,
+                        }
+                    }
+                } else {
+                    IngestResult::Invalid
+                }
+            }
+            CONTEXT_RESOURCE_ICL | CONTEXT_RESOURCE_RCL => {
+                // Cancel from either side
+                if let Some(res) = self
+                    .resources
+                    .iter_mut()
+                    .find(|r| r.link_id == *link_id)
+                {
+                    res.handle_cancel();
+                    let mut rh = [0u8; TRUNCATED_HASH_LEN];
+                    rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
+                    IngestResult::ResourceFailed {
+                        link_id: *link_id,
+                        resource_hash: rh,
+                    }
+                } else {
+                    IngestResult::Duplicate
+                }
+            }
+            _ => IngestResult::Invalid,
         }
     }
 
@@ -1248,6 +1475,123 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             .build()?;
 
         Ok(n)
+    }
+
+    // -----------------------------------------------------------------------
+    // Resource management
+    // -----------------------------------------------------------------------
+
+    /// Start a new outbound resource transfer on a link.
+    ///
+    /// Returns the advertisement payload as raw packet bytes.
+    pub fn start_resource<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        // Check link is active (immutable borrow scope)
+        {
+            let link = self.links.get(link_id)?;
+            if !link.is_active() {
+                return None;
+            }
+        }
+
+        let mut resource = Resource::new_outbound(data, *link_id, LINK_MDU, rng);
+        let adv = resource.build_advertisement();
+
+        // Encrypt advertisement and build packet
+        let link = self.links.get(link_id)?;
+        let mut ct_buf = [0u8; rete_core::MTU];
+        let ct_len = link.encrypt(&adv, rng, &mut ct_buf).ok()?;
+
+        let mut pkt_buf = [0u8; rete_core::MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Link)
+            .destination_hash(link_id)
+            .context(CONTEXT_RESOURCE_ADV)
+            .payload(&ct_buf[..ct_len])
+            .build()
+            .ok()?;
+
+        self.resources.push(resource);
+        Some(pkt_buf[..pkt_len].to_vec())
+    }
+
+    /// Accept a resource offer and build the first request.
+    ///
+    /// Returns the encrypted RESOURCE_REQ packet.
+    pub fn accept_resource<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        resource_hash: &[u8; TRUNCATED_HASH_LEN],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let req = {
+            let res = self.resources.iter().find(|r| {
+                !r.is_sender
+                    && r.link_id == *link_id
+                    && r.resource_hash[..TRUNCATED_HASH_LEN] == *resource_hash
+            })?;
+            res.build_request()
+        };
+
+        let link = self.links.get(link_id)?;
+        let mut ct_buf = [0u8; rete_core::MTU];
+        let ct_len = link.encrypt(&req, rng, &mut ct_buf).ok()?;
+
+        let mut pkt_buf = [0u8; rete_core::MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Link)
+            .destination_hash(link_id)
+            .context(CONTEXT_RESOURCE_REQ)
+            .payload(&ct_buf[..ct_len])
+            .build()
+            .ok()?;
+
+        Some(pkt_buf[..pkt_len].to_vec())
+    }
+
+    /// Drain pending resource outbound packets.
+    pub fn drain_resource_outbound(&mut self) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        core::mem::take(&mut self.resource_outbound)
+    }
+
+    /// Get a resource by its truncated hash and link.
+    pub fn get_resource(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        resource_hash: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<&Resource> {
+        self.resources.iter().find(|r| {
+            r.link_id == *link_id && r.resource_hash[..TRUNCATED_HASH_LEN] == *resource_hash
+        })
+    }
+
+    /// Get a mutable resource by its truncated hash and link.
+    pub fn get_resource_mut(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        resource_hash: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<&mut Resource> {
+        self.resources.iter_mut().find(|r| {
+            r.link_id == *link_id && r.resource_hash[..TRUNCATED_HASH_LEN] == *resource_hash
+        })
+    }
+
+    /// Remove completed or failed resources.
+    pub fn cleanup_resources(&mut self) {
+        self.resources.retain(|r| {
+            !matches!(
+                r.state,
+                crate::resource::ResourceState::Complete
+                    | crate::resource::ResourceState::Failed
+                    | crate::resource::ResourceState::Corrupt
+            )
+        });
     }
 
     // -----------------------------------------------------------------------

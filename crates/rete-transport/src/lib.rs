@@ -16,6 +16,7 @@ pub mod dedup;
 pub mod link;
 pub mod path;
 pub mod receipt;
+pub mod resource;
 pub mod transport;
 
 pub use announce::{validate_announce, AnnounceError, AnnounceInfo, PendingAnnounce};
@@ -24,9 +25,10 @@ pub use channel::{
     Channel, ChannelEnvelope, DEFAULT_WINDOW, ENVELOPE_HEADER_SIZE, MSG_TYPE_STREAM,
 };
 pub use dedup::DedupWindow;
-pub use link::{compute_link_id, Link, LinkRole, LinkState, TeardownReason};
+pub use link::{compute_link_id, Link, LinkRole, LinkState, TeardownReason, LINK_MDU};
 pub use path::Path;
 pub use receipt::{PacketReceipt, ReceiptStatus, ReceiptTable};
+pub use resource::{Resource, ResourceFlags, ResourceState};
 pub use transport::{
     IngestResult, ReverseEntry, TickResult, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,
     REVERSE_TIMEOUT,

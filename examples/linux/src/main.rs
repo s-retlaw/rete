@@ -122,10 +122,23 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             };
             Some(NodeCommand::Announce { app_data })
         }
+        "resource" => {
+            // resource <link_id_hex:32chars> <text>
+            let parts: Vec<&str> = line.splitn(3, ' ').collect();
+            if parts.len() < 3 {
+                eprintln!("[rete] usage: resource <link_id_hex> <text>");
+                return None;
+            }
+            let link_id = parse_hex_16(parts[1])?;
+            Some(NodeCommand::SendResource {
+                link_id,
+                data: parts[2].as_bytes().to_vec(),
+            })
+        }
         "quit" => Some(NodeCommand::Shutdown),
         _ => {
             eprintln!("[rete] unknown command: {line}");
-            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | channel <link_id> <msg_type> <text> | path <dest_hex> | announce [data] | quit");
+            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | path <dest_hex> | announce [data] | quit");
             None
         }
     }
@@ -724,6 +737,75 @@ fn on_event(event: NodeEvent) {
         NodeEvent::LinkClosed { link_id } => {
             eprintln!("[rete] LINK closed: {}", hex::encode(link_id));
             println!("LINK_CLOSED:{}", hex::encode(link_id));
+        }
+        NodeEvent::ResourceOffered {
+            link_id,
+            resource_hash,
+            total_size,
+        } => {
+            eprintln!(
+                "[rete] RESOURCE offered on link={} hash={} size={}",
+                hex::encode(link_id),
+                hex::encode(resource_hash),
+                total_size
+            );
+            println!(
+                "RESOURCE_OFFERED:{}:{}:{}",
+                hex::encode(link_id),
+                hex::encode(resource_hash),
+                total_size
+            );
+        }
+        NodeEvent::ResourceProgress {
+            link_id,
+            resource_hash,
+            current,
+            total,
+        } => {
+            eprintln!(
+                "[rete] RESOURCE progress on link={} hash={} {}/{}",
+                hex::encode(link_id),
+                hex::encode(resource_hash),
+                current,
+                total
+            );
+        }
+        NodeEvent::ResourceComplete {
+            link_id,
+            resource_hash,
+            ref data,
+        } => {
+            let display = match std::str::from_utf8(data) {
+                Ok(text) => text.to_string(),
+                Err(_) => hex::encode(data),
+            };
+            eprintln!(
+                "[rete] RESOURCE complete on link={} hash={} len={}",
+                hex::encode(link_id),
+                hex::encode(resource_hash),
+                data.len()
+            );
+            println!(
+                "RESOURCE_COMPLETE:{}:{}:{}",
+                hex::encode(link_id),
+                hex::encode(resource_hash),
+                display
+            );
+        }
+        NodeEvent::ResourceFailed {
+            link_id,
+            resource_hash,
+        } => {
+            eprintln!(
+                "[rete] RESOURCE failed on link={} hash={}",
+                hex::encode(link_id),
+                hex::encode(resource_hash)
+            );
+            println!(
+                "RESOURCE_FAILED:{}:{}",
+                hex::encode(link_id),
+                hex::encode(resource_hash)
+            );
         }
         NodeEvent::Tick { expired_paths, .. } => {
             if expired_paths > 0 {

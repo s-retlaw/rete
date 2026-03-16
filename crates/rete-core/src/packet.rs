@@ -64,6 +64,22 @@ pub const CONTEXT_LRRTT: u8 = 0xFE;
 /// Link request proof (part of handshake).
 pub const CONTEXT_LRPROOF: u8 = 0xFF;
 
+// Resource transfer context bytes
+/// Part of a resource transfer.
+pub const CONTEXT_RESOURCE: u8 = 0x01;
+/// Resource advertisement.
+pub const CONTEXT_RESOURCE_ADV: u8 = 0x02;
+/// Resource part request.
+pub const CONTEXT_RESOURCE_REQ: u8 = 0x03;
+/// Resource hashmap update.
+pub const CONTEXT_RESOURCE_HMU: u8 = 0x04;
+/// Resource proof (transfer complete).
+pub const CONTEXT_RESOURCE_PRF: u8 = 0x05;
+/// Resource cancel (initiator).
+pub const CONTEXT_RESOURCE_ICL: u8 = 0x06;
+/// Resource cancel (receiver).
+pub const CONTEXT_RESOURCE_RCL: u8 = 0x07;
+
 // ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------

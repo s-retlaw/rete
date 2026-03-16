@@ -847,6 +847,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rete-lxmf"
+version = "0.1.0"
+dependencies = [
+ "rete-core",
+ "sha2",
+]
+
+[[package]]
 name = "rete-stack"
 version = "0.1.0"
 dependencies = [
@@ -856,6 +864,7 @@ dependencies = [
  "rand_core",
  "rete-core",
  "rete-transport",
+ "sha2",
 ]
 
 [[package]]

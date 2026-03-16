@@ -10,6 +10,7 @@ members = [
     "crates/rete-iface-serial",
     "crates/rete-iface-tcp",
     "crates/rete-iface-auto",
+    "crates/rete-lxmf",
     "examples/linux",
 ]
 
@@ -43,6 +44,7 @@ rete-iface-kiss   = { path = "crates/rete-iface-kiss" }
 rete-iface-serial = { path = "crates/rete-iface-serial" }
 rete-iface-tcp    = { path = "crates/rete-iface-tcp" }
 rete-iface-auto   = { path = "crates/rete-iface-auto" }
+rete-lxmf         = { path = "crates/rete-lxmf" }
 
 # Embassy (optional — only needed by rete-embassy and embedded examples)
 embassy-executor  = { version = "0.9",  default-features = false }

@@ -78,6 +78,41 @@ test-e2e-proof-routing:
     cargo build -p rete-example-linux
     cd tests/interop && uv run python proof_routing_interop.py
 
+# E2E link interop (Python establishes Link to Rust)
+test-e2e-link:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python link_interop.py
+
+# E2E channel interop (Python sends Channel messages to Rust via Link)
+test-e2e-channel:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python channel_interop.py
+
+# E2E resource interop (Python transfers Resource to/from Rust via Link)
+test-e2e-resource:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python resource_interop.py
+
+# E2E IFAC interop (Interface Access Control)
+test-e2e-ifac:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python ifac_interop.py
+
+# E2E local IPC interop (shared instance Unix socket)
+test-e2e-local-ipc:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python local_ipc_interop.py
+
+# E2E robustness interop (edge cases and error handling)
+test-e2e-robustness:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python robustness_interop.py
+
+# E2E auto interface interop (mDNS peer discovery)
+test-e2e-auto:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python auto_interop.py
+
 # All software tests (unit + E2E, no hardware)
 test-all:
     #!/usr/bin/env bash
@@ -144,10 +179,15 @@ test-all:
     }
 
     run_e2e LIVE live_interop.py
+    run_e2e LINK link_interop.py
+    run_e2e CHANNEL channel_interop.py
+    run_e2e RESOURCE resource_interop.py
     run_e2e RELAY relay_interop.py
     run_e2e TRANSPORT transport_relay_interop.py
     run_e2e PATHREQ path_request_interop.py
     run_e2e PROOF proof_routing_interop.py
+    run_e2e IFAC ifac_interop.py
+    run_e2e ROBUSTNESS robustness_interop.py
 
     # --- Combined summary ---
     echo ""
@@ -162,12 +202,17 @@ test-all:
     echo ""
     echo "  E2E tests:"
     printf "  %-30s %s passed, %s failed\n" "live-interop" "$LIVE_PASS" "$LIVE_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "link-interop" "$LINK_PASS" "$LINK_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "channel-interop" "$CHANNEL_PASS" "$CHANNEL_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "resource-interop" "$RESOURCE_PASS" "$RESOURCE_FAIL"
     printf "  %-30s %s passed, %s failed\n" "relay-interop" "$RELAY_PASS" "$RELAY_FAIL"
     printf "  %-30s %s passed, %s failed\n" "transport-relay-interop" "$TRANSPORT_PASS" "$TRANSPORT_FAIL"
     printf "  %-30s %s passed, %s failed\n" "path-request-interop" "$PATHREQ_PASS" "$PATHREQ_FAIL"
     printf "  %-30s %s passed, %s failed\n" "proof-routing-interop" "$PROOF_PASS" "$PROOF_FAIL"
-    E2E_PASS=$((LIVE_PASS + RELAY_PASS + TRANSPORT_PASS + PATHREQ_PASS + PROOF_PASS))
-    E2E_FAIL=$((LIVE_FAIL + RELAY_FAIL + TRANSPORT_FAIL + PATHREQ_FAIL + PROOF_FAIL))
+    printf "  %-30s %s passed, %s failed\n" "ifac-interop" "$IFAC_PASS" "$IFAC_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "robustness-interop" "$ROBUSTNESS_PASS" "$ROBUSTNESS_FAIL"
+    E2E_PASS=$((LIVE_PASS + LINK_PASS + CHANNEL_PASS + RESOURCE_PASS + RELAY_PASS + TRANSPORT_PASS + PATHREQ_PASS + PROOF_PASS + IFAC_PASS + ROBUSTNESS_PASS))
+    E2E_FAIL=$((LIVE_FAIL + LINK_FAIL + CHANNEL_FAIL + RESOURCE_FAIL + RELAY_FAIL + TRANSPORT_FAIL + PATHREQ_FAIL + PROOF_FAIL + IFAC_FAIL + ROBUSTNESS_FAIL))
     echo ""
     printf "  %-30s %s passed, %s failed\n" "e2e total" "$E2E_PASS" "$E2E_FAIL"
     echo "───────────────────────────────────────────────────"

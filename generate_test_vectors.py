@@ -759,6 +759,241 @@ def gen_roundtrip_vectors() -> list:
 
 
 # ---------------------------------------------------------------------------
+# Section: resource advertisement vectors
+# ---------------------------------------------------------------------------
+
+def gen_resource_advertisement_vectors() -> list:
+    """
+    Resource advertisement format vectors.
+
+    A Resource advertisement is a msgpack-encoded payload sent over a Link
+    with context=CONTEXT_RESOURCE_ADV (0x02).
+
+    The advertisement contains information about the resource being offered,
+    including its hash, size, segment count, random hash, initial hashmap
+    (part hashes), and flags.
+
+    resource_hash = SHA-256(data || random_hash)   [full 32 bytes]
+
+    Advertisement format (Python RNS uses a msgpack dict with keys):
+      "t" = transfer_size (encrypted data size)
+      "d" = data_size (original uncompressed size)
+      "n" = num_parts (total parts count)
+      "h" = resource_hash (32 bytes)
+      "r" = random_hash (4 bytes)
+      "o" = original_hash (hash of first segment)
+      "i" = segment_index (1 for initial advertisement)
+      "l" = total_segments (total advertisement segments)
+      "q" = request_id (None if unsolicited)
+      "f" = flags (bitfield: encryption, compression, etc.)
+      "m" = hashmap (initial part hashes, 4 bytes each)
+
+    The Rust implementation uses a simpler msgpack array:
+      [resource_hash[32], total_size, segment_count, random_hash[4], hashmap_bytes, flags_byte]
+
+    These vectors validate the resource_hash computation and basic layout.
+    """
+    vectors = []
+
+    test_cases = [
+        (b"hello resource", "short payload"),
+        (b"test_resource_data_12345 " * 40, "~1KB payload"),
+        (b"\x00" * 500, "500 null bytes"),
+        (b"A" * 1000, "1000 x 0x41"),
+        (b"", "empty payload"),
+    ]
+
+    for data, label in test_cases:
+        # Use a fixed random_hash for reproducibility
+        random_hash = hashlib.sha256(data + b"fixed_random_seed").digest()[:4]
+
+        # resource_hash = SHA-256(data || random_hash) — matches Python RNS
+        resource_hash = hashlib.sha256(data + random_hash).digest()
+
+        # Compute part hashes (4-byte truncated SHA-256 of each segment)
+        mdu = 431  # typical link MDU
+        segments = []
+        if len(data) == 0:
+            segments.append(b"")
+        else:
+            for i in range(0, len(data), mdu):
+                segments.append(data[i:i + mdu])
+
+        part_hashes = []
+        for seg in segments:
+            ph = hashlib.sha256(seg).digest()[:4]
+            part_hashes.append(ph)
+
+        hashmap_bytes = b"".join(part_hashes)
+
+        vectors.append({
+            "_description": f"Resource advertisement — {label} ({len(data)} bytes)",
+            "data_hex": h(data),
+            "data_len": len(data),
+            "random_hash_hex": h(random_hash),
+            "resource_hash_hex": h(resource_hash),
+            "resource_hash_len": len(resource_hash),
+            "segment_count": len(segments),
+            "mdu": mdu,
+            "part_hashes_hex": [h(ph) for ph in part_hashes],
+            "hashmap_bytes_hex": h(hashmap_bytes),
+            "_note": (
+                "resource_hash = SHA-256(data || random_hash). "
+                "part_hash = SHA-256(segment_data)[0:4] for each segment."
+            ),
+        })
+
+    return vectors
+
+
+# ---------------------------------------------------------------------------
+# Section: LXMF message vectors
+# ---------------------------------------------------------------------------
+
+def gen_lxmf_message_vectors() -> list:
+    """
+    LXMF message format vectors.
+
+    An LXMF message has this wire layout:
+      [destination_hash: 16 bytes]
+      [source_hash: 16 bytes]
+      [signature: 64 bytes]
+      [msgpack_payload]
+
+    The msgpack_payload is a list:
+      [timestamp, title_bytes, content_bytes, fields_dict]
+
+    message_hash = SHA-256(dest_hash || source_hash || msgpack_payload)
+
+    The signature covers: message_hash (signed by source identity).
+
+    These vectors are generated WITHOUT the lxmf package to avoid
+    a hard dependency. They use raw construction matching the LXMF spec.
+    The msgpack encoding uses umsgpack (bundled with RNS) or msgpack.
+    """
+    # Try to import a msgpack library
+    _msgpack_pack = None
+    try:
+        import umsgpack
+        _msgpack_pack = umsgpack.packb
+    except ImportError:
+        try:
+            import msgpack
+            _msgpack_pack = lambda obj: msgpack.packb(obj, use_bin_type=True)
+        except ImportError:
+            return [{
+                "_description": "LXMF vectors skipped - no msgpack library available",
+                "_note": "Install umsgpack or msgpack to generate LXMF vectors",
+            }]
+
+    vectors = []
+    id_alice = get_identity("alice")
+    id_bob = get_identity("bob")
+
+    # Compute destination hashes for messaging
+    # LXMF uses "lxmf" app name with "delivery" aspect
+    alice_lxmf_dest_hash = RNS.Destination.hash(
+        id_alice, "lxmf", "delivery"
+    )
+    bob_lxmf_dest_hash = RNS.Destination.hash(
+        id_bob, "lxmf", "delivery"
+    )
+
+    test_cases = [
+        {
+            "label": "simple text message",
+            "source": id_alice,
+            "source_label": "alice",
+            "dest_hash": bob_lxmf_dest_hash,
+            "dest_label": "bob",
+            "timestamp": 1700000000.0,
+            "title": "Hello",
+            "content": "This is a test message from Alice to Bob.",
+            "fields": {},
+        },
+        {
+            "label": "message with fields",
+            "source": id_bob,
+            "source_label": "bob",
+            "dest_hash": alice_lxmf_dest_hash,
+            "dest_label": "alice",
+            "timestamp": 1700001000.0,
+            "title": "Reply",
+            "content": "Got your message!",
+            "fields": {0x01: b"field_value_1"},  # field type 0x01
+        },
+        {
+            "label": "empty content message",
+            "source": id_alice,
+            "source_label": "alice",
+            "dest_hash": bob_lxmf_dest_hash,
+            "dest_label": "bob",
+            "timestamp": 1700002000.0,
+            "title": "",
+            "content": "",
+            "fields": {},
+        },
+    ]
+
+    for case in test_cases:
+        source = case["source"]
+        dest_hash = case["dest_hash"]
+        source_hash = source.hash
+
+        title_bytes = case["title"].encode("utf-8")
+        content_bytes = case["content"].encode("utf-8")
+
+        # Build msgpack payload: [timestamp, title, content, fields]
+        payload_list = [
+            case["timestamp"],
+            title_bytes,
+            content_bytes,
+            case["fields"],
+        ]
+        msgpack_payload = _msgpack_pack(payload_list)
+
+        # message_hash = SHA-256(dest_hash || source_hash || msgpack_payload)
+        message_hash = hashlib.sha256(
+            dest_hash + source_hash + msgpack_payload
+        ).digest()
+
+        # Signature covers the message hash
+        signature = source.sign(message_hash)
+
+        # Full packed message: dest_hash[16] || source_hash[16] || signature[64] || msgpack_payload
+        packed = dest_hash + source_hash + signature + msgpack_payload
+
+        vectors.append({
+            "_description": f"LXMF message — {case['label']}",
+            "source_label": case["source_label"],
+            "dest_label": case["dest_label"],
+            "source_hash_hex": h(source_hash),
+            "dest_hash_hex": h(dest_hash),
+            "timestamp": case["timestamp"],
+            "title": case["title"],
+            "content": case["content"],
+            "title_bytes_hex": h(title_bytes),
+            "content_bytes_hex": h(content_bytes),
+            "fields": {str(k): h(v) if isinstance(v, bytes) else v
+                       for k, v in case["fields"].items()},
+            "msgpack_payload_hex": h(msgpack_payload),
+            "msgpack_payload_len": len(msgpack_payload),
+            "message_hash_hex": h(message_hash),
+            "signature_hex": h(signature),
+            "packed_hex": h(packed),
+            "packed_len": len(packed),
+            "_layout": {
+                "dest_hash": "packed[0:16]",
+                "source_hash": "packed[16:32]",
+                "signature": "packed[32:96]  Ed25519(SHA-256(dest_hash||source_hash||msgpack_payload))",
+                "msgpack_payload": "packed[96:]  msgpack([timestamp, title, content, fields])",
+            },
+        })
+
+    return vectors
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -791,6 +1026,8 @@ def main():
         "encryption_vectors":       gen_encryption_vectors(),
         "packet_hash_vectors":      gen_packet_hash_vectors(),
         "roundtrip_vectors":        gen_roundtrip_vectors(),
+        "resource_advertisement_vectors": gen_resource_advertisement_vectors(),
+        "lxmf_message_vectors":     gen_lxmf_message_vectors(),
     }
 
     doc = {

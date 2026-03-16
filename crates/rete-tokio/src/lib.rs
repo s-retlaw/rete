@@ -31,6 +31,11 @@ pub enum NodeCommand {
     },
     /// Request a path to a destination.
     RequestPath { dest_hash: [u8; TRUNCATED_HASH_LEN] },
+    /// Send a resource (large data) over a link.
+    SendResource {
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        data: Vec<u8>,
+    },
     /// Emit an announce (optionally with app_data).
     Announce { app_data: Option<Vec<u8>> },
     /// Shut down the event loop.
@@ -122,6 +127,18 @@ impl TokioNode {
             NodeCommand::RequestPath { dest_hash } => {
                 eprintln!("[rete] cmd: requesting path to {}", hex(&dest_hash));
                 (vec![self.core.request_path(&dest_hash)], true)
+            }
+            NodeCommand::SendResource { link_id, data } => {
+                if let Some(pkt) = self.core.start_resource(&link_id, &data, rng) {
+                    eprintln!(
+                        "[rete] cmd: started resource transfer on link {}",
+                        hex(&link_id)
+                    );
+                    (vec![pkt], true)
+                } else {
+                    eprintln!("[rete] cmd: resource send failed");
+                    (vec![], true)
+                }
             }
             NodeCommand::Announce { app_data } => {
                 self.core.queue_announce(app_data.as_deref(), rng, now);
