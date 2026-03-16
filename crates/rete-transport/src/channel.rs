@@ -376,4 +376,98 @@ mod tests {
 
         assert!(ch.teardown);
     }
+
+    #[test]
+    fn test_sequence_wrap_around() {
+        // Send messages until sequence wraps at u16::MAX.
+        let mut ch = Channel::new();
+
+        // Set tx_sequence close to u16::MAX by sending and immediately
+        // clearing the pending queue.
+        ch.tx_sequence = u16::MAX - 1;
+
+        // Send at u16::MAX - 1
+        let p1 = ch.send(0x01, b"wrap-1").unwrap();
+        let e1 = ChannelEnvelope::unpack(&p1).unwrap();
+        assert_eq!(e1.sequence, u16::MAX - 1);
+        ch.mark_delivered(u16::MAX - 1);
+
+        // Send at u16::MAX
+        let p2 = ch.send(0x01, b"wrap-2").unwrap();
+        let e2 = ChannelEnvelope::unpack(&p2).unwrap();
+        assert_eq!(e2.sequence, u16::MAX);
+        ch.mark_delivered(u16::MAX);
+
+        // Send at 0 (wrapped)
+        assert_eq!(ch.next_tx_sequence(), 0, "sequence should wrap to 0");
+        let p3 = ch.send(0x01, b"wrap-3").unwrap();
+        let e3 = ChannelEnvelope::unpack(&p3).unwrap();
+        assert_eq!(e3.sequence, 0);
+    }
+
+    #[test]
+    fn test_rx_buffer_at_max() {
+        // Receive MAX_RX_BUFFER out-of-order messages (all with seq > current).
+        // Buffer should not grow beyond MAX_RX_BUFFER.
+        let mut ch = Channel::new();
+
+        // Send messages with sequences 1..=MAX_RX_BUFFER (skipping 0)
+        // so they are all out-of-order (waiting for seq 0).
+        for i in 1..=(MAX_RX_BUFFER as u16) {
+            let env = ChannelEnvelope {
+                message_type: 0x01,
+                sequence: i,
+                payload: alloc::format!("msg{}", i).into_bytes(),
+            };
+            ch.receive(&env.pack());
+        }
+
+        assert_eq!(ch.ready_count(), 0, "no messages should be ready (missing seq 0)");
+
+        // Try to add one more — should be dropped (buffer full)
+        let overflow = ChannelEnvelope {
+            message_type: 0x01,
+            sequence: (MAX_RX_BUFFER as u16) + 1,
+            payload: b"overflow".to_vec(),
+        };
+        ch.receive(&overflow.pack());
+
+        // Now deliver seq 0 — should flush all buffered messages
+        let e0 = ChannelEnvelope {
+            message_type: 0x01,
+            sequence: 0,
+            payload: b"msg0".to_vec(),
+        };
+        ch.receive(&e0.pack());
+
+        // seq 0 + all MAX_RX_BUFFER buffered = MAX_RX_BUFFER + 1 delivered
+        assert_eq!(ch.ready_count(), MAX_RX_BUFFER + 1);
+    }
+
+    #[test]
+    fn test_mark_delivered_nonexistent() {
+        // mark_delivered for a nonexistent sequence should not panic.
+        let mut ch = Channel::new();
+        ch.send(0x01, b"msg0").unwrap();
+
+        // Mark a sequence that doesn't exist
+        ch.mark_delivered(999); // should not panic
+        assert_eq!(ch.pending_count(), 1, "original pending should remain");
+    }
+
+    #[test]
+    fn test_next_tx_sequence_getter() {
+        // next_tx_sequence() should return the correct value after sending.
+        let mut ch = Channel::new();
+        assert_eq!(ch.next_tx_sequence(), 0);
+
+        ch.send(0x01, b"a").unwrap();
+        assert_eq!(ch.next_tx_sequence(), 1);
+
+        ch.send(0x01, b"b").unwrap();
+        assert_eq!(ch.next_tx_sequence(), 2);
+
+        ch.send(0x01, b"c").unwrap();
+        assert_eq!(ch.next_tx_sequence(), 3);
+    }
 }

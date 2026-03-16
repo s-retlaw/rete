@@ -263,4 +263,52 @@ mod tests {
         table.tick(131);
         assert_eq!(table.get(&trunc).unwrap().status, ReceiptStatus::Failed);
     }
+
+    #[test]
+    fn test_receipt_table_full() {
+        // Fill all slots, then register should return false.
+        let mut table: ReceiptTable<4> = ReceiptTable::new();
+        let identity = make_test_identity();
+
+        for i in 0u8..4 {
+            let mut hash = [0u8; 32];
+            hash[0] = i;
+            assert!(
+                table.register(hash, identity.public_key(), 100, 30),
+                "slot {} should succeed",
+                i
+            );
+        }
+        assert_eq!(table.len(), 4);
+
+        // 5th registration should fail (returns false, no panic)
+        let mut overflow_hash = [0u8; 32];
+        overflow_hash[0] = 0xFF;
+        assert!(
+            !table.register(overflow_hash, identity.public_key(), 100, 30),
+            "table full — register should return false"
+        );
+        assert_eq!(table.len(), 4);
+    }
+
+    #[test]
+    fn test_validate_proof_already_delivered() {
+        // validate_proof on an already-delivered receipt should return None.
+        let mut table: ReceiptTable<16> = ReceiptTable::new();
+        let identity = make_test_identity();
+        let packet_hash = [0x42u8; 32];
+
+        table.register(packet_hash, identity.public_key(), 100, 30);
+        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().unwrap();
+
+        // First proof — should succeed
+        let sig = identity.sign(&packet_hash).unwrap();
+        let result = table.validate_proof(&trunc, &sig);
+        assert_eq!(result, Some(packet_hash));
+        assert_eq!(table.get(&trunc).unwrap().status, ReceiptStatus::Delivered);
+
+        // Second proof on the same receipt — should return None
+        let result2 = table.validate_proof(&trunc, &sig);
+        assert_eq!(result2, None, "already-delivered receipt should reject proof");
+    }
 }

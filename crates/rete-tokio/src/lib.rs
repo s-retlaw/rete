@@ -3,6 +3,8 @@
 //! Provides [`TokioNode`] which drives transport + interfaces in an async
 //! event loop using `tokio::select!`.
 
+pub mod local;
+
 use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN};
 pub use rete_stack::NodeEvent;
 pub use rete_stack::ProofStrategy;
@@ -74,7 +76,7 @@ impl TokioNode {
     }
 
     /// Dispatch a single command, returning outbound packets and whether to continue.
-    fn handle_command<R>(&mut self, cmd: NodeCommand, rng: &mut R) -> (Vec<OutboundPacket>, bool)
+    pub fn handle_command<R>(&mut self, cmd: NodeCommand, rng: &mut R) -> (Vec<OutboundPacket>, bool)
     where
         R: rand_core::RngCore + rand_core::CryptoRng,
     {

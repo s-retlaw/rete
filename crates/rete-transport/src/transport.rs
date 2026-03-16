@@ -1335,3 +1335,81 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         to_send
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::path::Path;
+
+    type TestTransport = Transport<64, 16, 128, 4>;
+
+    #[test]
+    fn test_path_expiry() {
+        let mut transport = TestTransport::new();
+        let dest = [0xAAu8; TRUNCATED_HASH_LEN];
+
+        // Insert a path learned at timestamp 100
+        let path = Path::direct(100);
+        assert!(transport.insert_path(dest, path));
+        assert_eq!(transport.path_count(), 1);
+
+        // tick() before expiry — path should remain
+        let result = transport.tick(100 + PATH_EXPIRES);
+        assert_eq!(result.expired_paths, 0);
+        assert_eq!(transport.path_count(), 1);
+
+        // tick() after expiry — path should be cleared
+        let result = transport.tick(100 + PATH_EXPIRES + 1);
+        assert_eq!(result.expired_paths, 1);
+        assert_eq!(transport.path_count(), 0);
+    }
+
+    #[test]
+    fn test_announce_queue_at_capacity() {
+        // Try to queue more announces than MAX_ANNOUNCES (16).
+        let mut transport = TestTransport::new();
+
+        for i in 0u8..16 {
+            let mut raw = heapless::Vec::new();
+            let _ = raw.push(i);
+            let ann = PendingAnnounce {
+                dest_hash: [i; TRUNCATED_HASH_LEN],
+                raw,
+                tx_count: 0,
+                last_tx_at: 0,
+                local: false,
+            };
+            assert!(transport.queue_announce(ann), "announce {} should be queued", i);
+        }
+        assert_eq!(transport.announce_count(), 16);
+
+        // 17th announce should fail gracefully (returns false, no panic)
+        let mut raw = heapless::Vec::new();
+        let _ = raw.push(0xFF);
+        let overflow = PendingAnnounce {
+            dest_hash: [0xFF; TRUNCATED_HASH_LEN],
+            raw,
+            tx_count: 0,
+            last_tx_at: 0,
+            local: false,
+        };
+        assert!(!transport.queue_announce(overflow), "overflow announce should return false");
+        assert_eq!(transport.announce_count(), 16);
+    }
+
+    #[test]
+    fn test_tick_empty_tables() {
+        // tick() with completely empty tables should not panic.
+        let mut transport = TestTransport::new();
+        assert_eq!(transport.path_count(), 0);
+        assert_eq!(transport.announce_count(), 0);
+        assert_eq!(transport.link_count(), 0);
+
+        let result = transport.tick(1000);
+        assert_eq!(result.expired_paths, 0);
+        assert_eq!(result.closed_links, 0);
+    }
+}

@@ -299,4 +299,87 @@ mod tests {
         assert!(!dec.feed(FLAG));
         assert!(dec.frame().is_none());
     }
+
+    #[test]
+    fn test_partial_frame_across_chunks() {
+        // Simulate TCP chunking: encode a frame, split into 3 chunks,
+        // feed each chunk byte-by-byte, verify the frame is recovered.
+        let data = b"chunked frame data";
+        let mut encoded = [0u8; 128];
+        let n = encode(data, &mut encoded).unwrap();
+
+        // Split into 3 roughly equal chunks
+        let chunk1 = &encoded[..n / 3];
+        let chunk2 = &encoded[n / 3..2 * n / 3];
+        let chunk3 = &encoded[2 * n / 3..n];
+
+        let mut dec: HdlcDecoder<128> = HdlcDecoder::new();
+        let mut got_frame = false;
+
+        for &b in chunk1 {
+            if dec.feed(b) {
+                got_frame = true;
+            }
+        }
+        assert!(!got_frame, "frame should not be complete after chunk 1");
+
+        for &b in chunk2 {
+            if dec.feed(b) {
+                got_frame = true;
+            }
+        }
+        assert!(!got_frame, "frame should not be complete after chunk 2");
+
+        for &b in chunk3 {
+            if dec.feed(b) {
+                got_frame = true;
+            }
+        }
+        assert!(got_frame, "frame should be complete after all chunks");
+        assert_eq!(dec.frame().unwrap(), data);
+    }
+
+    #[test]
+    fn test_consecutive_flags() {
+        // FLAG FLAG FLAG data FLAG — should produce only one frame from the data.
+        let mut dec: HdlcDecoder<64> = HdlcDecoder::new();
+        let mut frame_count = 0;
+
+        // Feed three consecutive FLAGS
+        dec.feed(FLAG);
+        dec.feed(FLAG);
+        dec.feed(FLAG);
+
+        // Feed some data bytes then a closing FLAG
+        for &b in b"test" {
+            if dec.feed(b) {
+                frame_count += 1;
+            }
+        }
+        if dec.feed(FLAG) {
+            frame_count += 1;
+        }
+
+        assert_eq!(frame_count, 1, "should produce exactly one frame");
+        assert_eq!(dec.frame().unwrap(), b"test");
+    }
+
+    #[test]
+    fn test_single_byte_feed_loop() {
+        // Encode a frame, feed the entire encoded output byte by byte,
+        // verify the frame is decoded correctly.
+        let data = b"byte-by-byte decode test with special chars \x7e \x7d";
+        let mut encoded = [0u8; 256];
+        let n = encode(data, &mut encoded).unwrap();
+
+        let mut dec: HdlcDecoder<256> = HdlcDecoder::new();
+        let mut got_frame = false;
+        for &b in &encoded[..n] {
+            if dec.feed(b) {
+                got_frame = true;
+            }
+        }
+        assert!(got_frame, "should decode frame when fed byte by byte");
+        assert_eq!(dec.frame().unwrap(), data);
+    }
 }

@@ -437,4 +437,62 @@ mod tests {
             Err(Error::InvalidKey)
         );
     }
+
+    #[test]
+    fn test_encrypt_exact_block_multiple() {
+        // Plaintext that is an exact multiple of 16 bytes (PKCS7 edge case).
+        // PKCS7 must add a full 16-byte padding block when plaintext is
+        // already block-aligned.
+        let identity = Identity::from_seed(b"block-multiple-test").unwrap();
+        let plaintext = [0x42u8; 32]; // exactly 2 AES blocks
+        let mut rng = rand_core::OsRng;
+        let mut ct = [0u8; 512];
+        let ct_len = identity.encrypt(&plaintext, &mut rng, &mut ct).unwrap();
+
+        // Ciphertext should be: ephemeral_pub(32) + iv(16) + padded(32+16=48) + hmac(32)
+        // = 32 + 16 + 48 + 32 = 128
+        assert_eq!(ct_len, 128, "32B plaintext + PKCS7 full padding block = 128B ciphertext");
+
+        let mut pt = [0u8; 512];
+        let pt_len = identity.decrypt(&ct[..ct_len], &mut pt).unwrap();
+        assert_eq!(&pt[..pt_len], &plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_empty_plaintext() {
+        // Empty plaintext encryption/decryption round-trip.
+        let identity = Identity::from_seed(b"empty-plaintext-test").unwrap();
+        let mut rng = rand_core::OsRng;
+        let mut ct = [0u8; 512];
+        let ct_len = identity.encrypt(&[], &mut rng, &mut ct).unwrap();
+
+        // Empty plaintext → PKCS7 adds one full padding block (16 bytes)
+        // Ciphertext = ephemeral_pub(32) + iv(16) + padded(16) + hmac(32) = 96
+        assert_eq!(ct_len, 96, "empty plaintext should produce 96 bytes");
+
+        let mut pt = [0u8; 512];
+        let pt_len = identity.decrypt(&ct[..ct_len], &mut pt).unwrap();
+        assert_eq!(pt_len, 0, "decrypted empty plaintext should be 0 bytes");
+    }
+
+    #[test]
+    fn test_encrypt_max_mdu_payload() {
+        // Encrypt max MDU size payload for SINGLE (383 bytes).
+        // Verify the output fits within expected bounds.
+        let identity = Identity::from_seed(b"max-mdu-test").unwrap();
+        let plaintext = [0xABu8; crate::ENCRYPTED_MDU]; // 383 bytes
+        let mut rng = rand_core::OsRng;
+        let mut ct = [0u8; 1024];
+        let ct_len = identity.encrypt(&plaintext, &mut rng, &mut ct).unwrap();
+
+        // 383 bytes → padded to 384 (pad_len=1), then:
+        // ephemeral_pub(32) + iv(16) + padded(384) + hmac(32) = 464
+        assert_eq!(ct_len, 464, "383B plaintext should produce 464B ciphertext");
+
+        // Verify it round-trips
+        let mut pt = [0u8; 1024];
+        let pt_len = identity.decrypt(&ct[..ct_len], &mut pt).unwrap();
+        assert_eq!(pt_len, 383);
+        assert_eq!(&pt[..pt_len], &plaintext);
+    }
 }

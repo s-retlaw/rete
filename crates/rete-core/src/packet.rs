@@ -539,4 +539,95 @@ mod tests {
         let err = PacketBuilder::new(&mut buf).payload(b"test").build();
         assert_eq!(err, Err(Error::MissingField("destination_hash")));
     }
+
+    #[test]
+    fn test_mtu_boundary_packet() {
+        // Build a HEADER_1 packet that is exactly MTU (500) bytes.
+        // HEADER_1 overhead = 19, so payload = 500 - 19 = 481 bytes.
+        let dest = [0xAAu8; TRUNCATED_HASH_LEN];
+        let payload = [0xBBu8; MTU - HEADER_1_OVERHEAD];
+        let mut buf = [0u8; MTU];
+
+        let n = PacketBuilder::new(&mut buf)
+            .dest_type(DestType::Plain)
+            .destination_hash(&dest)
+            .payload(&payload)
+            .build()
+            .unwrap();
+
+        assert_eq!(n, MTU, "packet should be exactly MTU bytes");
+
+        let pkt = Packet::parse(&buf[..n]).unwrap();
+        assert_eq!(pkt.payload.len(), MTU - HEADER_1_OVERHEAD);
+        assert_eq!(pkt.destination_hash, &dest);
+    }
+
+    #[test]
+    fn test_zero_length_payload() {
+        // Build a HEADER_1 DATA packet with empty payload.
+        let dest = [0xCCu8; TRUNCATED_HASH_LEN];
+        let mut buf = [0u8; MTU];
+
+        let n = PacketBuilder::new(&mut buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Plain)
+            .destination_hash(&dest)
+            .payload(&[])
+            .build()
+            .unwrap();
+
+        assert_eq!(n, HEADER_1_OVERHEAD);
+
+        let pkt = Packet::parse(&buf[..n]).unwrap();
+        assert_eq!(pkt.packet_type, PacketType::Data);
+        assert_eq!(pkt.payload.len(), 0);
+        assert_eq!(pkt.destination_hash, &dest);
+    }
+
+    #[test]
+    fn test_header2_max_payload() {
+        // Build a HEADER_2 packet with maximum payload size.
+        // HEADER_2 overhead = 35, so payload = 500 - 35 = 465 bytes.
+        let dest = [0xAAu8; TRUNCATED_HASH_LEN];
+        let tid = [0xBBu8; TRUNCATED_HASH_LEN];
+        let payload = [0xCCu8; MTU - HEADER_2_OVERHEAD];
+        let mut buf = [0u8; MTU];
+
+        let n = PacketBuilder::new(&mut buf)
+            .header_type(HeaderType::Header2)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .transport_type(1)
+            .transport_id(&tid)
+            .destination_hash(&dest)
+            .payload(&payload)
+            .build()
+            .unwrap();
+
+        assert_eq!(n, MTU, "HEADER_2 max payload packet should be exactly MTU");
+
+        let pkt = Packet::parse(&buf[..n]).unwrap();
+        assert_eq!(pkt.header_type, HeaderType::Header2);
+        assert_eq!(pkt.payload.len(), MTU - HEADER_2_OVERHEAD);
+        assert_eq!(pkt.transport_id.unwrap(), &tid);
+        assert_eq!(pkt.destination_hash, &dest);
+    }
+
+    #[test]
+    fn test_mtu_plus_one_returns_packet_too_long() {
+        // A packet of exactly MTU+1 (501) bytes must return PacketTooLong.
+        let raw = [0u8; MTU + 1];
+        assert_eq!(Packet::parse(&raw), Err(Error::PacketTooLong));
+
+        // Also verify the builder rejects it:
+        let dest = [0xAAu8; TRUNCATED_HASH_LEN];
+        let payload = [0xBBu8; MTU - HEADER_1_OVERHEAD + 1]; // 1 byte too many
+        let mut buf = [0u8; MTU + 16];
+        let err = PacketBuilder::new(&mut buf)
+            .dest_type(DestType::Plain)
+            .destination_hash(&dest)
+            .payload(&payload)
+            .build();
+        assert_eq!(err, Err(Error::PacketTooLong));
+    }
 }

@@ -100,4 +100,28 @@ mod tests {
         }
         assert_eq!(w.len(), 8);
     }
+
+    #[test]
+    fn test_window_at_exact_capacity() {
+        // Fill window to exactly N entries, verify all N are tracked
+        // and duplicates are detected for each one.
+        let mut w: DedupWindow<8> = DedupWindow::new();
+
+        // Insert exactly 8 unique hashes
+        for i in 0u8..8 {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            assert!(!w.check_and_insert(&h), "hash {} should be new", i);
+        }
+        assert_eq!(w.len(), 8, "window should contain exactly 8 entries");
+
+        // Verify all 8 are tracked as duplicates
+        for i in 0u8..8 {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            assert!(w.check_and_insert(&h), "hash {} should be a duplicate", i);
+        }
+        // Length should remain 8 (duplicates don't add entries)
+        assert_eq!(w.len(), 8);
+    }
 }

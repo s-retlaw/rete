@@ -1363,4 +1363,81 @@ mod tests {
         });
         assert!(has_proof, "buffered channel packet should still be proved");
     }
+
+    // -----------------------------------------------------------------------
+    // Edge-case tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ingest_oversized_packet() {
+        // Pass a 501-byte buffer to handle_ingest — should not panic,
+        // should return empty outcome (no event).
+        let mut core = make_core(b"oversized-test");
+        let mut rng = rand::thread_rng();
+
+        let oversized = [0u8; 501];
+        let outcome = core.handle_ingest(&oversized, 1000, 0, &mut rng);
+        assert!(
+            outcome.event.is_none(),
+            "oversized packet should produce no event"
+        );
+        assert!(
+            outcome.packets.is_empty(),
+            "oversized packet should produce no outbound packets"
+        );
+    }
+
+    #[test]
+    fn test_ingest_undersized_packet() {
+        // Pass a 1-byte buffer (< minimum 2 bytes for flags+hops).
+        // Should not crash and should return empty outcome.
+        let mut core = make_core(b"undersized-test");
+        let mut rng = rand::thread_rng();
+
+        let tiny = [0x08u8]; // just flags byte, no hops
+        let outcome = core.handle_ingest(&tiny, 1000, 0, &mut rng);
+        assert!(
+            outcome.event.is_none(),
+            "undersized packet should produce no event"
+        );
+
+        // Also try empty
+        let empty: [u8; 0] = [];
+        let outcome2 = core.handle_ingest(&empty, 1000, 0, &mut rng);
+        assert!(
+            outcome2.event.is_none(),
+            "empty packet should produce no event"
+        );
+    }
+
+    #[test]
+    fn test_build_data_packet_no_cached_key() {
+        // build_data_packet when no public key is cached for the destination.
+        // Should return None.
+        let mut core = make_core(b"no-key-test");
+        let mut rng = rand::thread_rng();
+
+        let unknown_dest = [0xFFu8; TRUNCATED_HASH_LEN];
+        let result = core.build_data_packet(&unknown_dest, b"hello", &mut rng, 100);
+        assert!(result.is_none(), "should return None when no cached key");
+    }
+
+    #[test]
+    fn test_queue_announce_when_full() {
+        // Queue announces until the transport queue is full, then verify
+        // the next queue attempt handles gracefully.
+        type SmallNodeCore = NodeCore<64, 4, 128, 4>; // only 4 announce slots
+        let identity = Identity::from_seed(b"queue-full-test").unwrap();
+        let mut core = SmallNodeCore::new(identity, "testapp", &["aspect1"]);
+        let mut rng = rand::thread_rng();
+
+        // Queue 4 announces (filling the queue)
+        for _ in 0..4 {
+            assert!(core.queue_announce(None, &mut rng, 1000));
+        }
+
+        // 5th queue attempt should return false (not crash)
+        let result = core.queue_announce(None, &mut rng, 1000);
+        assert!(!result, "queue should be full, returning false");
+    }
 }

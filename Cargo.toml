@@ -9,6 +9,7 @@ members = [
     "crates/rete-iface-kiss",
     "crates/rete-iface-serial",
     "crates/rete-iface-tcp",
+    "crates/rete-iface-auto",
     "examples/linux",
 ]
 
@@ -41,6 +42,7 @@ rete-tokio        = { path = "crates/rete-tokio" }
 rete-iface-kiss   = { path = "crates/rete-iface-kiss" }
 rete-iface-serial = { path = "crates/rete-iface-serial" }
 rete-iface-tcp    = { path = "crates/rete-iface-tcp" }
+rete-iface-auto   = { path = "crates/rete-iface-auto" }
 
 # Embassy (optional — only needed by rete-embassy and embedded examples)
 embassy-executor  = { version = "0.9",  default-features = false }

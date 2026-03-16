@@ -263,4 +263,65 @@ mod tests {
     fn token_invalid_key_length() {
         assert_eq!(Token::new(&[0u8; 32]), Err(Error::InvalidKey));
     }
+
+    #[test]
+    fn test_token_exact_one_block_plaintext() {
+        // Plaintext of exactly 16 bytes (one AES block) — round-trip.
+        // PKCS7 adds a full padding block, so ciphertext body = 32 bytes.
+        let key = make_test_key();
+        let token = Token::new(&key).unwrap();
+        let mut rng = rand_core::OsRng;
+
+        let plaintext = [0x42u8; 16]; // exactly one AES block
+        let mut ct = [0u8; 256];
+        let ct_len = token.encrypt(&plaintext, &mut rng, &mut ct).unwrap();
+
+        // iv(16) + aes_body(32: 16 data + 16 padding) + hmac(32) = 80
+        assert_eq!(ct_len, 80, "16B plaintext should produce 80B token");
+
+        let mut pt = [0u8; 256];
+        let pt_len = token.decrypt(&ct[..ct_len], &mut pt).unwrap();
+        assert_eq!(&pt[..pt_len], &plaintext);
+    }
+
+    #[test]
+    fn test_token_empty_plaintext() {
+        // Zero-byte plaintext (empty) — round-trip.
+        let key = make_test_key();
+        let token = Token::new(&key).unwrap();
+        let mut rng = rand_core::OsRng;
+
+        let mut ct = [0u8; 256];
+        let ct_len = token.encrypt(&[], &mut rng, &mut ct).unwrap();
+
+        // iv(16) + aes_body(16: full padding block) + hmac(32) = 64
+        assert_eq!(ct_len, 64, "empty plaintext should produce 64B token");
+
+        let mut pt = [0u8; 256];
+        let pt_len = token.decrypt(&ct[..ct_len], &mut pt).unwrap();
+        assert_eq!(pt_len, 0, "decrypted empty plaintext should be 0 bytes");
+    }
+
+    #[test]
+    fn test_token_truncated_ciphertext() {
+        // Truncated ciphertext (less than 64 bytes) should return CryptoError.
+        let key = make_test_key();
+        let token = Token::new(&key).unwrap();
+
+        let short_ct = [0u8; 63];
+        let mut pt = [0u8; 256];
+        assert_eq!(
+            token.decrypt(&short_ct, &mut pt),
+            Err(Error::CryptoError),
+            "ciphertext shorter than 64 bytes must fail"
+        );
+
+        // Also try even shorter
+        let tiny_ct = [0u8; 16];
+        assert_eq!(
+            token.decrypt(&tiny_ct, &mut pt),
+            Err(Error::CryptoError),
+            "16-byte ciphertext must fail"
+        );
+    }
 }

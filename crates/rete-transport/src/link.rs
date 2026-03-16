@@ -82,6 +82,7 @@ pub struct Link {
     /// Our ephemeral X25519 public key.
     pub our_x25519_pub: [u8; 32],
     /// Our Ed25519 public key (sent in LINKREQUEST for initiator).
+    #[allow(dead_code)]
     our_ed25519_pub: [u8; 32],
     /// Measured round-trip time (seconds).
     pub rtt: f32,
@@ -172,13 +173,17 @@ impl Link {
     /// Build the LRPROOF payload for the responder.
     ///
     /// Format: `Ed25519_signature[64] || X25519_responder_pub[32]`
-    /// Signature covers: `link_id || peer_x25519_pub || peer_ed25519_pub`
+    /// Signature covers: `link_id || responder_x25519_pub || responder_ed25519_pub`
+    ///
+    /// The signed data uses the responder's own keys (not the initiator's peer keys).
+    /// This matches the Python reference: `Link.prove()` signs
+    /// `self.link_id + self.pub_bytes + self.sig_pub_bytes`.
     pub fn build_proof(&self, owner_identity: &Identity) -> Result<[u8; 96], rete_core::Error> {
-        // Build signed data: link_id || peer_x25519_pub || peer_ed25519_pub
+        // Build signed data: link_id || our_x25519_pub || owner_ed25519_pub
         let mut signed_data = [0u8; 80]; // 16 + 32 + 32
         signed_data[..16].copy_from_slice(&self.link_id);
-        signed_data[16..48].copy_from_slice(&self.peer_x25519_pub);
-        signed_data[48..80].copy_from_slice(&self.peer_ed25519_pub);
+        signed_data[16..48].copy_from_slice(&self.our_x25519_pub);
+        signed_data[48..80].copy_from_slice(owner_identity.ed25519_pub());
 
         let signature = owner_identity.sign(&signed_data)?;
 
@@ -241,8 +246,11 @@ impl Link {
     /// Validate the LRPROOF as initiator.
     ///
     /// Proof format: `signature[64] || responder_x25519_pub[32]`
-    /// Verifies signature over (link_id || our_x25519_pub || our_ed25519_pub),
+    /// Verifies signature over (link_id || responder_x25519_pub || responder_ed25519_pub),
     /// performs ECDH+HKDF, and creates the Token.
+    ///
+    /// The signed data uses the responder's own keys. This matches the Python reference:
+    /// `Link.validate_proof()` verifies `link_id + peer_pub_bytes + peer_sig_pub_bytes`.
     pub fn validate_proof(
         &mut self,
         proof_payload: &[u8],
@@ -256,11 +264,11 @@ impl Link {
         let mut responder_x25519_pub = [0u8; 32];
         responder_x25519_pub.copy_from_slice(&proof_payload[64..96]);
 
-        // Verify signature: responder signed (link_id || initiator_x25519_pub || initiator_ed25519_pub)
+        // Verify signature: responder signed (link_id || responder_x25519_pub || responder_ed25519_pub)
         let mut signed_data = [0u8; 80];
         signed_data[..16].copy_from_slice(&self.link_id);
-        signed_data[16..48].copy_from_slice(&self.our_x25519_pub);
-        signed_data[48..80].copy_from_slice(&self.our_ed25519_pub);
+        signed_data[16..48].copy_from_slice(&responder_x25519_pub);
+        signed_data[48..80].copy_from_slice(dest_identity.ed25519_pub());
 
         dest_identity.verify(&signed_data, signature)?;
 
@@ -540,12 +548,13 @@ mod tests {
         let proof = link.build_proof(&owner).unwrap();
         assert_eq!(proof.len(), 96); // sig[64] + x25519_pub[32]
 
-        // Verify the signature
+        // Verify the signature: should cover link_id || responder_x25519_pub || responder_ed25519_pub
         let sig = &proof[..64];
+        let responder_x25519_pub = &proof[64..96];
         let mut signed_data = [0u8; 80];
         signed_data[..16].copy_from_slice(&link_id);
-        signed_data[16..48].copy_from_slice(&peer_x25519);
-        signed_data[48..80].copy_from_slice(&peer_ed25519);
+        signed_data[16..48].copy_from_slice(responder_x25519_pub);
+        signed_data[48..80].copy_from_slice(owner.ed25519_pub());
 
         assert!(owner.verify(&signed_data, sig).is_ok());
     }
@@ -734,6 +743,87 @@ mod tests {
         let wrong_id = [0xFFu8; TRUNCATED_HASH_LEN];
         assert!(!link.handle_close(&wrong_id));
         assert_eq!(link.state, LinkState::Active);
+    }
+
+    #[test]
+    fn test_keepalive_on_pending_link() {
+        // handle_keepalive on a non-active (Pending) link should still work.
+        let mut rng = rand_core::OsRng;
+        let identity = Identity::from_seed(b"keepalive-pending").unwrap();
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+
+        let (mut link, _payload) =
+            Link::new_initiator(dest_hash, identity.ed25519_pub(), &mut rng, 100);
+
+        assert_eq!(link.state, LinkState::Pending);
+
+        // handle_keepalive on a Pending link — should not panic and should respond
+        let response = link.handle_keepalive(&[0xFF], 200);
+        assert_eq!(response, Some(0xFE), "should respond to keepalive request even when Pending");
+        // touch_inbound doesn't change Pending to Active (it only revives Stale)
+        assert_eq!(link.last_inbound, 200);
+    }
+
+    #[test]
+    fn test_double_close() {
+        // close() twice should not panic, state should be Closed.
+        let mut rng = rand_core::OsRng;
+        let payload = [0xBBu8; 64];
+        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+        link.activate(100);
+
+        assert_eq!(link.state, LinkState::Active);
+
+        link.close();
+        assert_eq!(link.state, LinkState::Closed);
+
+        link.close(); // second close should not panic
+        assert_eq!(link.state, LinkState::Closed);
+    }
+
+    #[test]
+    fn test_linkrequest_with_oversized_payload() {
+        // LINKREQUEST with payload > 64 bytes (MTU signalling).
+        // compute_link_id should still work — it strips the extra bytes.
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let x25519_pub = [0xBBu8; 32];
+        let ed25519_pub = [0xCCu8; 32];
+
+        // 64 bytes standard + 4 bytes MTU signalling
+        let mut payload = [0u8; 68];
+        payload[..32].copy_from_slice(&x25519_pub);
+        payload[32..64].copy_from_slice(&ed25519_pub);
+        payload[64..68].copy_from_slice(&[0x01, 0xF4, 0x00, 0x00]); // MTU signalling
+
+        let mut buf = [0u8; MTU];
+        let n = PacketBuilder::new(&mut buf)
+            .packet_type(PacketType::LinkRequest)
+            .dest_type(DestType::Link)
+            .destination_hash(&dest_hash)
+            .context(0x00)
+            .payload(&payload)
+            .build()
+            .unwrap();
+
+        // compute_link_id should not fail
+        let link_id = compute_link_id(&buf[..n]).unwrap();
+        assert_eq!(link_id.len(), 16);
+
+        // Also compute with standard 64-byte payload for comparison
+        let mut buf2 = [0u8; MTU];
+        let n2 = PacketBuilder::new(&mut buf2)
+            .packet_type(PacketType::LinkRequest)
+            .dest_type(DestType::Link)
+            .destination_hash(&dest_hash)
+            .context(0x00)
+            .payload(&payload[..64])
+            .build()
+            .unwrap();
+
+        let link_id2 = compute_link_id(&buf2[..n2]).unwrap();
+        // The link_ids should be the same (MTU signalling is stripped)
+        assert_eq!(link_id, link_id2, "link_id should be same with or without MTU signalling");
     }
 
     #[test]
