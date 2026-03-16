@@ -171,9 +171,14 @@ impl EmbassyNode {
         R: RngCore + CryptoRng,
         F: FnMut(NodeEvent),
     {
-        // Send initial announce
-        let announce = self.build_announce(None, rng);
-        let _ = iface.send(&announce).await;
+        // Queue initial announce through transport (gets immediate + one retransmit)
+        {
+            let now = Instant::now().as_secs();
+            self.core.queue_announce(None, rng, self.announce_time());
+            for pkt in &self.core.flush_announces(now) {
+                let _ = iface.send(&pkt.data).await;
+            }
+        }
 
         let mut recv_buf = [0u8; MTU];
         let mut next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
@@ -206,8 +211,12 @@ impl EmbassyNode {
                 },
                 Either3::Second(()) => {
                     next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
-                    let announce = self.build_announce(None, rng);
-                    let _ = iface.send(&announce).await;
+                    let now = Instant::now().as_secs();
+                    self.core
+                        .queue_announce(None, rng, self.announce_time());
+                    for pkt in &self.core.flush_announces(now) {
+                        let _ = iface.send(&pkt.data).await;
+                    }
                 }
                 Either3::Third(()) => {
                     next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);

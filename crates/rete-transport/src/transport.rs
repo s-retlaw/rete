@@ -35,6 +35,17 @@ pub const REVERSE_TIMEOUT: u64 = 480;
 /// Default receipt proof timeout in seconds.
 pub const RECEIPT_TIMEOUT: u64 = 30;
 
+/// A receipt for a channel message awaiting proof-of-delivery.
+#[derive(Debug, Clone)]
+pub struct ChannelReceipt {
+    /// Link the channel message was sent on.
+    pub link_id: [u8; TRUNCATED_HASH_LEN],
+    /// Sequence number in the channel.
+    pub sequence: u16,
+    /// Monotonic timestamp when sent.
+    pub sent_at: u64,
+}
+
 /// Destination hash for `rnstransport.path.request` (PLAIN, no identity).
 ///
 /// Precomputed: `destination_hash("rnstransport.path.request", None)`.
@@ -120,6 +131,8 @@ pub enum IngestResult<'a> {
         link_id: [u8; TRUNCATED_HASH_LEN],
         /// Delivered channel envelopes.
         messages: alloc::vec::Vec<crate::channel::ChannelEnvelope>,
+        /// The packet hash of the DATA packet carrying these channel messages.
+        packet_hash: [u8; 32],
     },
     /// A link was closed (teardown or timeout).
     LinkClosed {
@@ -134,7 +147,10 @@ pub enum IngestResult<'a> {
     /// Packet was a duplicate and should be dropped.
     Duplicate,
     /// A channel message was accepted and buffered (out-of-order), not yet deliverable.
-    Buffered,
+    Buffered {
+        /// The packet hash of the DATA packet (receiver should prove it).
+        packet_hash: [u8; 32],
+    },
     /// Packet was malformed or invalid.
     Invalid,
 }
@@ -185,6 +201,9 @@ pub struct Transport<
     /// Receipts for sent packets, awaiting delivery proofs.
     /// Fixed at 64 entries — receipts are short-lived, not proportional to path count.
     receipts: ReceiptTable<64>,
+    /// Receipts for channel messages: truncated packet hash → ChannelReceipt.
+    /// Used to match incoming PROOFs to channel sequences and call mark_delivered().
+    channel_receipts: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ChannelReceipt, 64>,
 }
 
 impl<const P: usize, const A: usize, const D: usize, const L: usize> Default
@@ -209,6 +228,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             local_destinations: FnvIndexSet::new(),
             links: FnvIndexMap::new(),
             receipts: ReceiptTable::new(),
+            channel_receipts: FnvIndexMap::new(),
         }
     }
 
@@ -313,6 +333,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     ) -> bool {
         self.receipts
             .register(packet_hash, dest_pub_key, now, timeout)
+    }
+
+    /// Number of tracked channel receipts (pending channel ACKs).
+    pub fn channel_receipt_count(&self) -> usize {
+        self.channel_receipts.len()
     }
 
     /// Number of tracked receipts.
@@ -564,7 +589,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 // Link data handling: dest_type == Link
                 if pkt.dest_type == DestType::Link {
-                    return self.handle_link_data(&dh, pkt.context, pkt.payload, now);
+                    return self.handle_link_data(&dh, pkt.context, pkt.payload, now, pkt_hash);
                 }
 
                 IngestResult::LocalData {
@@ -584,9 +609,43 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 let mut dh = [0u8; TRUNCATED_HASH_LEN];
                 dh.copy_from_slice(pkt.destination_hash);
 
-                // Check receipt table for delivery proof
+                // Check receipt table for delivery proof (DATA packets)
                 if let Some(packet_hash) = self.receipts.validate_proof(&dh, pkt.payload) {
                     return IngestResult::ProofReceived { packet_hash };
+                }
+
+                // Check channel receipts for delivery proof (channel messages).
+                // build_proof_packet creates explicit proofs: packet_hash[32] || sig[64].
+                if pkt.payload.len() >= 96 {
+                    if let Some(cr) = self.channel_receipts.get(&dh) {
+                        let link_id = cr.link_id;
+                        let sequence = cr.sequence;
+                        let mut full_hash = [0u8; 32];
+                        full_hash.copy_from_slice(&pkt.payload[..32]);
+                        let sig = &pkt.payload[32..96];
+                        // Verify using the link peer's node identity (not ephemeral keys).
+                        // The proof is signed by the peer's Ed25519 identity key.
+                        let verified = if let Some(link) = self.links.get(&link_id) {
+                            self.known_identities
+                                .get(&link.destination_hash)
+                                .and_then(|pk| Identity::from_public_key(pk).ok())
+                                .map(|id| id.verify(&full_hash, sig).is_ok())
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        if verified {
+                            self.channel_receipts.remove(&dh);
+                            if let Some(link) = self.links.get_mut(&link_id) {
+                                if let Some(channel) = link.channel.as_mut() {
+                                    channel.mark_delivered(sequence);
+                                }
+                            }
+                            return IngestResult::ProofReceived {
+                                packet_hash: full_hash,
+                            };
+                        }
+                    }
                 }
 
                 if self.local_identity_hash.is_some() {
@@ -713,6 +772,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         context: u8,
         ciphertext: &[u8],
         now: u64,
+        pkt_hash: [u8; 32],
     ) -> IngestResult<'a> {
         let link = match self.links.get_mut(link_id) {
             Some(l) => l,
@@ -767,11 +827,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     messages.push(env);
                 }
                 if messages.is_empty() {
-                    IngestResult::Buffered // out-of-order, buffered for later
+                    IngestResult::Buffered {
+                        packet_hash: pkt_hash,
+                    }
                 } else {
                     IngestResult::ChannelMessages {
                         link_id: *link_id,
                         messages,
+                        packet_hash: pkt_hash,
                     }
                 }
             }
@@ -953,10 +1016,28 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         let channel = link
             .channel
             .get_or_insert_with(crate::channel::Channel::new);
+        let sequence = channel.next_tx_sequence();
         let envelope_bytes = channel.send(message_type, payload)?;
         channel.mark_sent(now);
         link.last_outbound = now;
-        Self::build_link_packet(link, link_id, &envelope_bytes, CONTEXT_CHANNEL, rng)
+        let raw = Self::build_link_packet(link, link_id, &envelope_bytes, CONTEXT_CHANNEL, rng)?;
+
+        // Register channel receipt: parse the built packet to get its hash
+        if let Ok(parsed) = Packet::parse(&raw) {
+            let pkt_hash = parsed.compute_hash();
+            let mut trunc = [0u8; TRUNCATED_HASH_LEN];
+            trunc.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
+            let _ = self.channel_receipts.insert(
+                trunc,
+                ChannelReceipt {
+                    link_id: *link_id,
+                    sequence,
+                    sent_at: now,
+                },
+            );
+        }
+
+        Some(raw)
     }
 
     // -----------------------------------------------------------------------
@@ -1212,6 +1293,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         // Expire timed-out receipts
         self.receipts.tick(now);
+
+        // Expire stale channel receipts
+        let mut expired_cr = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
+        for (hash, cr) in self.channel_receipts.iter() {
+            if now.saturating_sub(cr.sent_at) > RECEIPT_TIMEOUT {
+                let _ = expired_cr.push(*hash);
+            }
+        }
+        for hash in &expired_cr {
+            self.channel_receipts.remove(hash);
+        }
 
         TickResult {
             expired_paths: expired_count,

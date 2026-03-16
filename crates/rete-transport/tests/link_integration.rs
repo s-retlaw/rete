@@ -458,6 +458,7 @@ fn channel_data_over_link() {
         IngestResult::ChannelMessages {
             link_id: lid,
             messages,
+            ..
         } => {
             assert_eq!(lid, link_id);
             assert_eq!(messages.len(), 1);
@@ -551,6 +552,7 @@ fn channel_send_receive_through_transport() {
         IngestResult::ChannelMessages {
             link_id: lid,
             messages,
+            ..
         } => {
             assert_eq!(lid, link_id);
             assert_eq!(messages.len(), 1);
@@ -584,7 +586,7 @@ fn channel_reorder_through_transport() {
     // Deliver seq 1 first (out of order)
     let mut buf1 = pkt1;
     match resp_t.ingest(&mut buf1, 202, &mut rng, &resp_id) {
-        IngestResult::Buffered => {} // out-of-order, held for reordering
+        IngestResult::Buffered { .. } => {} // out-of-order, held for reordering
         other => panic!("expected Buffered (out-of-order), got {:?}", other),
     }
 

@@ -122,9 +122,9 @@ impl TokioNode {
                 (vec![self.core.request_path(&dest_hash)], true)
             }
             NodeCommand::Announce { app_data } => {
-                let announce = self.core.build_announce(app_data.as_deref(), rng, now);
-                eprintln!("[rete] cmd: sent announce");
-                (vec![OutboundPacket::broadcast(announce)], true)
+                self.core.queue_announce(app_data.as_deref(), rng, now);
+                eprintln!("[rete] cmd: queued announce");
+                (self.core.flush_announces(now), true)
             }
             NodeCommand::Shutdown => {
                 eprintln!("[rete] cmd: shutdown requested");
@@ -156,18 +156,16 @@ impl TokioNode {
     {
         let mut rng = rand::thread_rng();
 
-        // Send initial announce
-        let announce = self
-            .core
-            .build_announce(None, &mut rng, current_time_secs());
-        if let Err(e) = iface.send(&announce).await {
-            eprintln!("[rete] failed to send initial announce: {:?}", e);
-        } else {
-            eprintln!(
-                "[rete] sent announce for dest {}",
-                hex(self.core.dest_hash())
-            );
+        // Queue initial announce through transport (gets immediate + one retransmit)
+        {
+            let now = current_time_secs();
+            self.core.queue_announce(None, &mut rng, now);
+            dispatch_single(iface, &self.core.flush_announces(now)).await;
         }
+        eprintln!(
+            "[rete] sent announce for dest {}",
+            hex(self.core.dest_hash())
+        );
 
         // Send initial data to pre-registered peer (if configured)
         if let Some((data, dest)) = self.initial_send.take() {
@@ -227,10 +225,9 @@ impl TokioNode {
                     }
                 }
                 _ = announce_timer.tick() => {
-                    let announce = self.core.build_announce(None, &mut rng, current_time_secs());
-                    if let Err(e) = iface.send(&announce).await {
-                        eprintln!("[rete] failed to send periodic announce: {:?}", e);
-                    }
+                    let now = current_time_secs();
+                    self.core.queue_announce(None, &mut rng, now);
+                    dispatch_single(iface, &self.core.flush_announces(now)).await;
                 }
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();
@@ -294,12 +291,11 @@ impl TokioNode {
     {
         let mut rng = rand::thread_rng();
 
-        // Send initial announce to all interfaces
-        let announce = self
-            .core
-            .build_announce(None, &mut rng, current_time_secs());
-        for tx in &iface_senders {
-            let _ = tx.send(announce.clone()).await;
+        // Queue initial announce through transport (gets immediate + one retransmit)
+        {
+            let now = current_time_secs();
+            self.core.queue_announce(None, &mut rng, now);
+            dispatch_multi(&iface_senders, &self.core.flush_announces(now), 0).await;
         }
         eprintln!("[rete] sent announce on {} interfaces", iface_senders.len());
 
@@ -339,10 +335,9 @@ impl TokioNode {
                     }
                 }
                 _ = announce_timer.tick() => {
-                    let announce = self.core.build_announce(None, &mut rng, current_time_secs());
-                    for tx in &iface_senders {
-                        let _ = tx.send(announce.clone()).await;
-                    }
+                    let now = current_time_secs();
+                    self.core.queue_announce(None, &mut rng, now);
+                    dispatch_multi(&iface_senders, &self.core.flush_announces(now), 0).await;
                 }
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();

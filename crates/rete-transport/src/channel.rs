@@ -234,6 +234,11 @@ impl Channel {
     pub fn ready_count(&self) -> usize {
         self.rx_ready.len()
     }
+
+    /// The sequence number that will be assigned to the next `send()` call.
+    pub fn next_tx_sequence(&self) -> u16 {
+        self.tx_sequence
+    }
 }
 
 // ---------------------------------------------------------------------------

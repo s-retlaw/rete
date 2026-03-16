@@ -15,7 +15,7 @@ use rand_core::{CryptoRng, RngCore};
 use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
 };
-use rete_transport::{IngestResult, Transport, RECEIPT_TIMEOUT};
+use rete_transport::{IngestResult, PendingAnnounce, Transport, RECEIPT_TIMEOUT};
 
 use crate::{NodeEvent, ProofStrategy};
 
@@ -231,6 +231,58 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         buf[..n].to_vec()
     }
 
+    /// Queue a local announce into the transport's announce queue.
+    ///
+    /// The announce will be sent immediately on the next `flush_announces()` or
+    /// `handle_tick()` call, then retransmitted once after ~10s (matching
+    /// Python RNS's `PATHFINDER_R=1` behavior).
+    pub fn queue_announce<R: RngCore + CryptoRng>(
+        &mut self,
+        app_data: Option<&[u8]>,
+        rng: &mut R,
+        now: u64,
+    ) -> bool {
+        // Build directly into a stack buffer, then copy into heapless::Vec
+        // to avoid an intermediate heap allocation via build_announce().
+        let aspects_refs: Vec<&str> = self.aspects.iter().map(|s| s.as_str()).collect();
+        let mut buf = [0u8; MTU];
+        let n = match Transport::<P, A, D, L>::create_announce(
+            &self.identity,
+            &self.app_name,
+            &aspects_refs,
+            app_data,
+            rng,
+            now,
+            &mut buf,
+        ) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let mut raw = heapless::Vec::new();
+        if raw.extend_from_slice(&buf[..n]).is_err() {
+            return false;
+        }
+        self.transport.queue_announce(PendingAnnounce {
+            dest_hash: self.dest_hash,
+            raw,
+            tx_count: 0,
+            last_tx_at: 0,
+            local: true,
+        })
+    }
+
+    /// Drain pending announces from the transport queue, returning them as outbound packets.
+    ///
+    /// Call after `queue_announce()` to flush the announce immediately, or rely
+    /// on `handle_tick()` which calls this internally.
+    pub fn flush_announces(&mut self, now: u64) -> Vec<OutboundPacket> {
+        self.transport
+            .pending_outbound(now)
+            .into_iter()
+            .map(|raw| OutboundPacket::broadcast(raw.to_vec()))
+            .collect()
+    }
+
     /// Initiate a link to a destination.
     ///
     /// Returns the outbound LINKREQUEST packet and the link_id on success.
@@ -294,6 +346,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         OutboundPacket::broadcast(raw)
     }
 
+    /// Build a proof OutboundPacket for a received packet hash, if possible.
+    fn proof_outbound(&self, packet_hash: &[u8; 32]) -> Option<OutboundPacket> {
+        Transport::<P, A, D, L>::build_proof_packet(&self.identity, packet_hash).map(|data| {
+            OutboundPacket {
+                data,
+                routing: PacketRouting::SourceInterface,
+            }
+        })
+    }
+
     /// Process an inbound raw packet and return the outcome.
     ///
     /// The runtime loop dispatches packets based on `IngestOutcome.packets`
@@ -338,10 +400,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 }
 
                 // Flush pending announces (retransmissions) to all interfaces
-                let pending = self.transport.pending_outbound(now);
-                for ann_raw in pending {
-                    packets.push(OutboundPacket::broadcast(ann_raw.to_vec()));
-                }
+                packets.extend(self.flush_announces(now));
 
                 IngestOutcome {
                     event: Some(NodeEvent::AnnounceReceived {
@@ -372,14 +431,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
                 // Generate proof if strategy requires it
                 if self.proof_strategy == ProofStrategy::ProveAll {
-                    if let Some(proof) =
-                        Transport::<P, A, D, L>::build_proof_packet(&self.identity, &packet_hash)
-                    {
-                        packets.push(OutboundPacket {
-                            data: proof,
-                            routing: PacketRouting::SourceInterface,
-                        });
-                    }
+                    packets.extend(self.proof_outbound(&packet_hash));
                 }
 
                 // Echo data back to sender if echo mode is on
@@ -451,7 +503,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 }),
                 packets: Vec::new(),
             },
-            IngestResult::ChannelMessages { link_id, messages } => IngestOutcome {
+            IngestResult::ChannelMessages {
+                link_id,
+                messages,
+                packet_hash,
+            } => IngestOutcome {
                 event: Some(NodeEvent::ChannelMessages {
                     link_id,
                     messages: messages
@@ -459,7 +515,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         .map(|e| (e.message_type, e.payload))
                         .collect(),
                 }),
-                packets: Vec::new(),
+                // Auto-prove received channel packets (transport-layer delivery proof)
+                packets: self.proof_outbound(&packet_hash).into_iter().collect(),
             },
             IngestResult::LinkClosed { link_id } => IngestOutcome {
                 event: Some(NodeEvent::LinkClosed { link_id }),
@@ -469,20 +526,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 event: Some(NodeEvent::ProofReceived { packet_hash }),
                 packets: Vec::new(),
             },
-            IngestResult::Duplicate | IngestResult::Buffered | IngestResult::Invalid => {
-                IngestOutcome::empty()
-            }
+            IngestResult::Buffered { packet_hash } => IngestOutcome {
+                event: None,
+                // Auto-prove buffered channel packets too (transport ACK ≠ application delivery)
+                packets: self.proof_outbound(&packet_hash).into_iter().collect(),
+            },
+            IngestResult::Duplicate | IngestResult::Invalid => IngestOutcome::empty(),
         }
     }
 
     /// Periodic maintenance: expire paths, collect pending announces, send keepalives.
     pub fn handle_tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> IngestOutcome {
         let result = self.transport.tick(now);
-        let pending = self.transport.pending_outbound(now);
-        let mut packets: Vec<OutboundPacket> = pending
-            .into_iter()
-            .map(|raw| OutboundPacket::broadcast(raw.to_vec()))
-            .collect();
+        let mut packets = self.flush_announces(now);
 
         // Send keepalives for idle links
         for ka in self.transport.build_pending_keepalives(now, rng) {
@@ -1138,5 +1194,173 @@ mod tests {
         assert_eq!(parsed.dest_type, rete_core::DestType::Plain);
         assert_eq!(parsed.destination_hash, &rete_transport::PATH_REQUEST_DEST);
         assert_eq!(parsed.payload, &dest);
+    }
+
+    // -----------------------------------------------------------------------
+    // Announce queue tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn queue_announce_adds_to_transport() {
+        let mut core = make_core(b"queue-announce");
+        let mut rng = rand::thread_rng();
+
+        assert_eq!(core.transport.announce_count(), 0);
+        assert!(core.queue_announce(None, &mut rng, 1000));
+        assert_eq!(core.transport.announce_count(), 1);
+    }
+
+    #[test]
+    fn queue_announce_local_flushes_immediately() {
+        let mut core = make_core(b"queue-flush");
+        let mut rng = rand::thread_rng();
+
+        core.queue_announce(None, &mut rng, 1000);
+        let pending = core.transport.pending_outbound(1000);
+
+        // local=true means it's sent immediately
+        assert_eq!(pending.len(), 1);
+        // The announce should be valid
+        let pkt = Packet::parse(&pending[0]).unwrap();
+        assert_eq!(pkt.packet_type, PacketType::Announce);
+    }
+
+    #[test]
+    fn queue_announce_retransmits_once() {
+        let mut core = make_core(b"queue-retx");
+        let mut rng = rand::thread_rng();
+
+        core.queue_announce(None, &mut rng, 1000);
+
+        // First flush: immediate (local=true)
+        let p1 = core.transport.pending_outbound(1000);
+        assert_eq!(p1.len(), 1);
+
+        // Still in queue (tx_count=1, PATHFINDER_R=1)
+        assert_eq!(core.transport.announce_count(), 1);
+
+        // Too early for retransmit (delay = 5 * 2^1 = 10s)
+        let p2 = core.transport.pending_outbound(1005);
+        assert_eq!(p2.len(), 0);
+
+        // After delay: retransmit
+        let p3 = core.transport.pending_outbound(1011);
+        assert_eq!(p3.len(), 1);
+
+        // Now tx_count=2 > PATHFINDER_R=1, so dropped from queue
+        assert_eq!(core.transport.announce_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Channel proof (ACK) tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn channel_receive_generates_proof() {
+        let (mut init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Initiator sends channel message
+        let outbound = init
+            .send_channel_message(&link_id, 0x42, b"prove this", 200, &mut rng)
+            .expect("should send");
+
+        // Responder ingests — should generate a proof in the packets
+        let outcome = resp.handle_ingest(&outbound.data, 200, 0, &mut rng);
+        assert!(
+            matches!(outcome.event, Some(NodeEvent::ChannelMessages { .. })),
+            "expected ChannelMessages, got {:?}",
+            outcome.event
+        );
+        let proof_pkt = outcome
+            .packets
+            .iter()
+            .find(|p| {
+                Packet::parse(&p.data)
+                    .map(|pkt| pkt.packet_type == PacketType::Proof)
+                    .unwrap_or(false)
+            })
+            .expect("responder should auto-prove channel packet");
+        assert_eq!(
+            proof_pkt.routing,
+            PacketRouting::SourceInterface,
+            "proof should route back to source"
+        );
+    }
+
+    #[test]
+    fn channel_proof_marks_delivered() {
+        let (mut init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Initiator sends channel message
+        let outbound = init
+            .send_channel_message(&link_id, 0x42, b"ack me", 200, &mut rng)
+            .expect("should send");
+
+        // Confirm channel has 1 pending
+        let init_link = init.transport.get_link(&link_id).unwrap();
+        assert_eq!(init_link.channel().unwrap().pending_count(), 1);
+
+        // Responder ingests → gets proof packet
+        let outcome = resp.handle_ingest(&outbound.data, 200, 0, &mut rng);
+        let proof_pkt = outcome
+            .packets
+            .iter()
+            .find(|p| {
+                Packet::parse(&p.data)
+                    .map(|pkt| pkt.packet_type == PacketType::Proof)
+                    .unwrap_or(false)
+            })
+            .expect("should have proof");
+
+        // Verify channel receipt was registered
+        assert_eq!(
+            init.transport.channel_receipt_count(),
+            1,
+            "should have 1 channel receipt after send"
+        );
+
+        // Initiator ingests the proof → should fire ProofReceived + mark_delivered
+        let init_outcome = init.handle_ingest(&proof_pkt.data, 201, 0, &mut rng);
+        assert!(
+            matches!(init_outcome.event, Some(NodeEvent::ProofReceived { .. })),
+            "expected ProofReceived, got {:?}",
+            init_outcome.event
+        );
+
+        // Channel should now have 0 pending
+        let init_link = init.transport.get_link(&link_id).unwrap();
+        assert_eq!(
+            init_link.channel().unwrap().pending_count(),
+            0,
+            "proof should clear pending channel message"
+        );
+    }
+
+    #[test]
+    fn buffered_channel_packet_also_proved() {
+        let (mut init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Send two messages — deliver seq 1 first (out of order)
+        let _pkt0 = init
+            .send_channel_message(&link_id, 0x01, b"msg0", 200, &mut rng)
+            .unwrap();
+        let pkt1 = init
+            .send_channel_message(&link_id, 0x01, b"msg1", 201, &mut rng)
+            .unwrap();
+
+        // Deliver seq 1 first — should be buffered
+        let outcome = resp.handle_ingest(&pkt1.data, 202, 0, &mut rng);
+        assert!(outcome.event.is_none(), "buffered should not emit event");
+
+        // But should still have a proof packet
+        let has_proof = outcome.packets.iter().any(|p| {
+            Packet::parse(&p.data)
+                .map(|pkt| pkt.packet_type == PacketType::Proof)
+                .unwrap_or(false)
+        });
+        assert!(has_proof, "buffered channel packet should still be proved");
     }
 }

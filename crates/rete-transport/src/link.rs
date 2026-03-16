@@ -321,6 +321,11 @@ impl Link {
         self.state == LinkState::Active
     }
 
+    /// Access the channel (if initialized).
+    pub fn channel(&self) -> Option<&Channel> {
+        self.channel.as_ref()
+    }
+
     /// Update last inbound timestamp.
     pub fn touch_inbound(&mut self, now: u64) {
         self.last_inbound = now;
