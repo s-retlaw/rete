@@ -249,6 +249,16 @@ fn on_event(event: NodeEvent) {
                 Err(_) => println!("LINK_DATA:{}:{}", hex::encode(link_id), hex::encode(&data)),
             }
         }
+        NodeEvent::ChannelMessages { link_id, messages } => {
+            eprintln!(
+                "[rete] CHANNEL messages on {}: {} msgs",
+                hex::encode(link_id),
+                messages.len()
+            );
+            for (msg_type, payload) in &messages {
+                eprintln!("  type=0x{:04x} len={}", msg_type, payload.len());
+            }
+        }
         NodeEvent::LinkClosed { link_id } => {
             eprintln!("[rete] LINK closed: {}", hex::encode(link_id));
             println!("LINK_CLOSED:{}", hex::encode(link_id));

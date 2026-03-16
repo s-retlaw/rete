@@ -127,7 +127,7 @@ impl TokioNode {
                 }
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();
-                    let outcome = self.core.handle_tick(now);
+                    let outcome = self.core.handle_tick(now, &mut rng);
                     dispatch_single(iface, &outcome.packets).await;
                     if let Some(event) = outcome.event {
                         on_event(event);
@@ -215,7 +215,7 @@ impl TokioNode {
                 }
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();
-                    let outcome = self.core.handle_tick(now);
+                    let outcome = self.core.handle_tick(now, &mut rng);
                     dispatch_multi(&iface_senders, &outcome.packets, 0).await;
                     if let Some(event) = outcome.event {
                         on_event(event);

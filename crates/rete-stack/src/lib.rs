@@ -85,6 +85,13 @@ pub enum NodeEvent {
         /// Context byte.
         context: u8,
     },
+    /// Channel messages received on a link.
+    ChannelMessages {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Delivered messages: (message_type, payload).
+        messages: alloc::vec::Vec<(u16, alloc::vec::Vec<u8>)>,
+    },
     /// A link was closed.
     LinkClosed {
         /// The link_id.

@@ -44,6 +44,31 @@ impl StreamDataMessage {
         out
     }
 
+    /// Pack a stream message from parts into a caller-provided buffer.
+    ///
+    /// Writes the 2-byte flags header followed by `data`. Returns the number
+    /// of bytes written. Avoids allocating a `StreamDataMessage` on the heap.
+    pub fn pack_into(
+        stream_id: u16,
+        eof: bool,
+        compressed: bool,
+        data: &[u8],
+        out: &mut [u8],
+    ) -> usize {
+        let mut flags: u16 = stream_id & 0x3FFF;
+        if eof {
+            flags |= 0x8000;
+        }
+        if compressed {
+            flags |= 0x4000;
+        }
+        let header = flags.to_be_bytes();
+        out[..2].copy_from_slice(&header);
+        let len = data.len();
+        out[2..2 + len].copy_from_slice(data);
+        2 + len
+    }
+
     /// Unpack a message from bytes.
     pub fn unpack(data: &[u8]) -> Option<Self> {
         if data.len() < 2 {

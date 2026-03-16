@@ -170,6 +170,7 @@ async fn main(spawner: Spawner) -> ! {
                 println!("[rete] tick: expired {} paths", expired_paths);
             }
         }
+        _ => {}
     })
     .await;
 

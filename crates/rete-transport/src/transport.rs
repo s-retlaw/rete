@@ -6,8 +6,9 @@ use crate::{announce::PendingAnnounce, dedup::DedupWindow, path::Path};
 use heapless::{FnvIndexMap, FnvIndexSet};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, CONTEXT_KEEPALIVE,
-    CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, NAME_HASH_LEN, TRUNCATED_HASH_LEN,
+    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, CONTEXT_CHANNEL,
+    CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, NAME_HASH_LEN,
+    TRUNCATED_HASH_LEN,
 };
 use sha2::{Digest, Sha256};
 
@@ -109,6 +110,13 @@ pub enum IngestResult<'a> {
         /// The context byte from the packet.
         context: u8,
     },
+    /// Channel messages received on a link (reliable ordered delivery).
+    ChannelMessages {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Delivered channel envelopes.
+        messages: alloc::vec::Vec<crate::channel::ChannelEnvelope>,
+    },
     /// A link was closed (teardown or timeout).
     LinkClosed {
         /// The link_id.
@@ -116,6 +124,8 @@ pub enum IngestResult<'a> {
     },
     /// Packet was a duplicate and should be dropped.
     Duplicate,
+    /// A channel message was accepted and buffered (out-of-order), not yet deliverable.
+    Buffered,
     /// Packet was malformed or invalid.
     Invalid,
 }
@@ -706,6 +716,29 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     IngestResult::Invalid
                 }
             }
+            CONTEXT_CHANNEL => {
+                if !link.is_active() {
+                    return IngestResult::Invalid;
+                }
+                link.touch_inbound(now);
+                // Lazy-init channel
+                let channel = link
+                    .channel
+                    .get_or_insert_with(crate::channel::Channel::new);
+                channel.receive(&dec_buf[..dec_len]);
+                let mut messages = alloc::vec::Vec::new();
+                while let Some(env) = channel.next_received() {
+                    messages.push(env);
+                }
+                if messages.is_empty() {
+                    IngestResult::Buffered // out-of-order, buffered for later
+                } else {
+                    IngestResult::ChannelMessages {
+                        link_id: *link_id,
+                        messages,
+                    }
+                }
+            }
             _ => {
                 // Regular link data — only this branch allocates
                 if !link.is_active() {
@@ -858,6 +891,125 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         }
 
         IngestResult::Duplicate
+    }
+
+    // -----------------------------------------------------------------------
+    // Channel message send
+    // -----------------------------------------------------------------------
+
+    /// Send a channel message on a link.
+    ///
+    /// Lazy-inits the channel, enqueues the message, encrypts it, and returns
+    /// the raw packet bytes. Returns `None` if the link is not active or the
+    /// channel window is full.
+    pub fn send_channel_message<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        message_type: u16,
+        payload: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let link = self.links.get_mut(link_id)?;
+        if !link.is_active() {
+            return None;
+        }
+        let channel = link
+            .channel
+            .get_or_insert_with(crate::channel::Channel::new);
+        let envelope_bytes = channel.send(message_type, payload)?;
+        channel.mark_sent(now);
+        link.last_outbound = now;
+        Self::build_link_packet(link, link_id, &envelope_bytes, CONTEXT_CHANNEL, rng)
+    }
+
+    // -----------------------------------------------------------------------
+    // Channel retransmission
+    // -----------------------------------------------------------------------
+
+    /// Build retransmit packets for all channels that have timed-out messages.
+    ///
+    /// Also checks for channel teardown (max retries exceeded) and closes
+    /// the associated link.
+    pub fn pending_channel_retransmits<R: RngCore + CryptoRng>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        let mut packets = alloc::vec::Vec::new();
+        let mut teardown_links = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], L>::new();
+
+        // Collect link_ids with channels first (heapless to avoid heap alloc on MCU)
+        let mut link_ids = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], L>::new();
+        for (lid, l) in self.links.iter() {
+            if l.channel.is_some() && l.is_active() {
+                let _ = link_ids.push(*lid);
+            }
+        }
+
+        for lid in link_ids {
+            let link = match self.links.get_mut(&lid) {
+                Some(l) => l,
+                None => continue,
+            };
+            let channel = match link.channel.as_mut() {
+                Some(c) => c,
+                None => continue,
+            };
+            let retransmits = channel.pending_retransmit(now);
+            if channel.teardown {
+                let _ = teardown_links.push(lid);
+                continue;
+            }
+            for envelope_bytes in retransmits {
+                if let Some(pkt) =
+                    Self::build_link_packet(link, &lid, &envelope_bytes, CONTEXT_CHANNEL, rng)
+                {
+                    packets.push(pkt);
+                }
+            }
+        }
+
+        // Close links that hit max retries
+        for lid in teardown_links {
+            self.links.remove(&lid);
+        }
+
+        packets
+    }
+
+    // -----------------------------------------------------------------------
+    // Keepalive generation
+    // -----------------------------------------------------------------------
+
+    /// Build keepalive request packets for links that need them.
+    ///
+    /// Iterates active links and generates a keepalive request for each
+    /// that has been idle for more than half the keepalive interval.
+    /// Updates `last_outbound` on each link that gets a keepalive.
+    pub fn build_pending_keepalives<R: RngCore + CryptoRng>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        // Collect link_ids that need keepalive first (heapless to avoid heap alloc on MCU)
+        let mut need_ka = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], L>::new();
+        for (lid, link) in self.links.iter() {
+            if link.needs_keepalive(now) {
+                let _ = need_ka.push(*lid);
+            }
+        }
+
+        let mut packets = alloc::vec::Vec::new();
+        for lid in need_ka {
+            if let Some(pkt) = self.build_keepalive_packet(&lid, true, rng) {
+                if let Some(link) = self.links.get_mut(&lid) {
+                    link.last_outbound = now;
+                }
+                packets.push(pkt);
+            }
+        }
+        packets
     }
 
     // -----------------------------------------------------------------------

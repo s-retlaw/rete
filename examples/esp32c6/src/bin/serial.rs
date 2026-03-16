@@ -97,6 +97,7 @@ async fn main(_spawner: Spawner) -> ! {
                 println!("[rete-serial] tick: expired {}", expired_paths);
             }
         }
+        _ => {}
     })
     .await;
 

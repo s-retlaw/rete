@@ -22,6 +22,7 @@
 //! 7. HKDF-SHA256(ikm=shared_key, salt=link_id, info=b"", length=64) → derived_key
 //! 8. Create Token from derived_key
 
+use crate::channel::Channel;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{Identity, Token, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
@@ -94,6 +95,8 @@ pub struct Link {
     pub stale_time: u64,
     /// Destination hash this link is associated with.
     pub destination_hash: [u8; TRUNCATED_HASH_LEN],
+    /// Reliable ordered channel (lazy-initialized on first channel message).
+    pub(crate) channel: Option<Channel>,
 }
 
 impl Link {
@@ -162,6 +165,7 @@ impl Link {
             keepalive_interval: 360,
             stale_time: 720,
             destination_hash: [0u8; TRUNCATED_HASH_LEN],
+            channel: None,
         })
     }
 
@@ -222,6 +226,7 @@ impl Link {
             keepalive_interval: 360,
             stale_time: 720,
             destination_hash: dest_hash,
+            channel: None,
         };
 
         (link, payload)
@@ -358,6 +363,15 @@ impl Link {
         out: &mut [u8],
     ) -> Result<usize, rete_core::Error> {
         self.encrypt(&self.link_id, rng, out)
+    }
+
+    /// Whether a keepalive should be sent proactively.
+    ///
+    /// Returns true if the link is active and half the keepalive interval
+    /// has elapsed since our last outbound packet.
+    pub fn needs_keepalive(&self, now: u64) -> bool {
+        self.state == LinkState::Active
+            && now.saturating_sub(self.last_outbound) > self.keepalive_interval / 2
     }
 
     /// Check for staleness. Returns true if the link should be closed.

@@ -212,7 +212,7 @@ impl EmbassyNode {
                 Either3::Third(()) => {
                     next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
                     let now = Instant::now().as_secs();
-                    let outcome = self.core.handle_tick(now);
+                    let outcome = self.core.handle_tick(now, rng);
                     for pkt in &outcome.packets {
                         let _ = iface.send(&pkt.data).await;
                     }

@@ -443,22 +443,28 @@ fn channel_data_over_link() {
     let mut lrrtt_buf = lrrtt;
     let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
 
-    // Send data with CONTEXT_CHANNEL
+    // Send a properly-formed channel envelope with CONTEXT_CHANNEL
+    let envelope = rete_transport::ChannelEnvelope {
+        message_type: 0x01,
+        sequence: 0,
+        payload: b"channel msg".to_vec(),
+    };
+    let packed = envelope.pack();
     let pkt = init_t
-        .build_link_data_packet(
-            &link_id,
-            b"channel msg",
-            rete_core::CONTEXT_CHANNEL,
-            &mut rng,
-        )
+        .build_link_data_packet(&link_id, &packed, rete_core::CONTEXT_CHANNEL, &mut rng)
         .unwrap();
     let mut buf = pkt;
     match resp_t.ingest(&mut buf, 103, &mut rng, &resp_id) {
-        IngestResult::LinkData { data, context, .. } => {
-            assert_eq!(data, b"channel msg");
-            assert_eq!(context, rete_core::CONTEXT_CHANNEL);
+        IngestResult::ChannelMessages {
+            link_id: lid,
+            messages,
+        } => {
+            assert_eq!(lid, link_id);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].message_type, 0x01);
+            assert_eq!(messages[0].payload, b"channel msg");
         }
-        other => panic!("expected LinkData with channel context, got {:?}", other),
+        other => panic!("expected ChannelMessages, got {:?}", other),
     }
 }
 
@@ -482,4 +488,206 @@ fn initiate_link_returns_request() {
     assert_eq!(t.link_count(), 1);
     let link = t.get_link(&link_id).unwrap();
     assert_eq!(link.state, LinkState::Handshake);
+}
+
+// ---------------------------------------------------------------------------
+// Keepalive timer tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn transport_keepalive_sent_when_due() {
+    let (init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
+    let mut rng = rand::thread_rng();
+
+    // Activate responder via LRRTT
+    let lrrtt = init_t
+        .build_lrrtt_packet(&link_id, b"rtt", &mut rng)
+        .unwrap();
+    let mut lrrtt_buf = lrrtt;
+    let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
+
+    let link = resp_t.get_link(&link_id).unwrap();
+    let ka_interval = link.keepalive_interval;
+
+    // Not due yet
+    let keepalives = resp_t.build_pending_keepalives(102, &mut rng);
+    assert!(keepalives.is_empty(), "no keepalive should be needed yet");
+
+    // Advance past half keepalive interval
+    let keepalives = resp_t.build_pending_keepalives(102 + ka_interval / 2 + 1, &mut rng);
+    assert_eq!(keepalives.len(), 1, "should produce one keepalive");
+
+    // Verify it's a parseable packet
+    let parsed = Packet::parse(&keepalives[0]).unwrap();
+    assert_eq!(parsed.packet_type, PacketType::Data);
+    assert_eq!(parsed.dest_type, DestType::Link);
+    assert_eq!(parsed.context, CONTEXT_KEEPALIVE);
+}
+
+// ---------------------------------------------------------------------------
+// Channel through Transport tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn channel_send_receive_through_transport() {
+    let (mut init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
+    let mut rng = rand::thread_rng();
+
+    // Activate both sides
+    let lrrtt = init_t
+        .build_lrrtt_packet(&link_id, b"rtt", &mut rng)
+        .unwrap();
+    let mut lrrtt_buf = lrrtt;
+    let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
+
+    // Initiator sends channel message
+    let pkt = init_t
+        .send_channel_message(&link_id, 0x42, b"hello channel", 200, &mut rng)
+        .expect("should send channel message");
+
+    // Responder ingests
+    let mut buf = pkt;
+    match resp_t.ingest(&mut buf, 200, &mut rng, &resp_id) {
+        IngestResult::ChannelMessages {
+            link_id: lid,
+            messages,
+        } => {
+            assert_eq!(lid, link_id);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].message_type, 0x42);
+            assert_eq!(messages[0].payload, b"hello channel");
+        }
+        other => panic!("expected ChannelMessages, got {:?}", other),
+    }
+}
+
+#[test]
+fn channel_reorder_through_transport() {
+    let (mut init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
+    let mut rng = rand::thread_rng();
+
+    // Activate responder
+    let lrrtt = init_t
+        .build_lrrtt_packet(&link_id, b"rtt", &mut rng)
+        .unwrap();
+    let mut lrrtt_buf = lrrtt;
+    let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
+
+    // Send two channel messages
+    let pkt0 = init_t
+        .send_channel_message(&link_id, 0x01, b"msg0", 200, &mut rng)
+        .unwrap();
+    let pkt1 = init_t
+        .send_channel_message(&link_id, 0x01, b"msg1", 201, &mut rng)
+        .unwrap();
+
+    // Deliver seq 1 first (out of order)
+    let mut buf1 = pkt1;
+    match resp_t.ingest(&mut buf1, 202, &mut rng, &resp_id) {
+        IngestResult::Buffered => {} // out-of-order, held for reordering
+        other => panic!("expected Buffered (out-of-order), got {:?}", other),
+    }
+
+    // Now deliver seq 0 — should flush both
+    let mut buf0 = pkt0;
+    match resp_t.ingest(&mut buf0, 203, &mut rng, &resp_id) {
+        IngestResult::ChannelMessages { messages, .. } => {
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0].sequence, 0);
+            assert_eq!(messages[1].sequence, 1);
+            assert_eq!(messages[0].payload, b"msg0");
+            assert_eq!(messages[1].payload, b"msg1");
+        }
+        other => panic!("expected ChannelMessages with 2 messages, got {:?}", other),
+    }
+}
+
+#[test]
+fn channel_retransmit_on_timeout() {
+    let (mut init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
+    let mut rng = rand::thread_rng();
+
+    // Activate responder
+    let lrrtt = init_t
+        .build_lrrtt_packet(&link_id, b"rtt", &mut rng)
+        .unwrap();
+    let mut lrrtt_buf = lrrtt;
+    let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
+
+    // Send channel message from initiator (marks sent_at=200)
+    let _pkt = init_t
+        .send_channel_message(&link_id, 0x01, b"retry me", 200, &mut rng)
+        .unwrap();
+
+    // Before timeout: no retransmits
+    let retx = init_t.pending_channel_retransmits(210, &mut rng);
+    assert!(retx.is_empty());
+
+    // After timeout (15s default)
+    let retx = init_t.pending_channel_retransmits(216, &mut rng);
+    assert_eq!(retx.len(), 1, "should retransmit one message");
+}
+
+#[test]
+fn channel_window_blocks_at_capacity() {
+    let (mut init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
+    let mut rng = rand::thread_rng();
+
+    // Activate responder
+    let lrrtt = init_t
+        .build_lrrtt_packet(&link_id, b"rtt", &mut rng)
+        .unwrap();
+    let mut lrrtt_buf = lrrtt;
+    let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
+
+    // Fill the window (DEFAULT_WINDOW = 4)
+    for i in 0..rete_transport::DEFAULT_WINDOW {
+        assert!(
+            init_t
+                .send_channel_message(&link_id, 0x01, &[i as u8], 200, &mut rng)
+                .is_some(),
+            "message {} should succeed",
+            i
+        );
+    }
+
+    // Next should be blocked
+    assert!(
+        init_t
+            .send_channel_message(&link_id, 0x01, b"blocked", 201, &mut rng)
+            .is_none(),
+        "window should be full"
+    );
+}
+
+#[test]
+fn channel_teardown_on_max_retries() {
+    let (mut init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
+    let mut rng = rand::thread_rng();
+
+    // Activate responder
+    let lrrtt = init_t
+        .build_lrrtt_packet(&link_id, b"rtt", &mut rng)
+        .unwrap();
+    let mut lrrtt_buf = lrrtt;
+    let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
+
+    // Send one message
+    let _pkt = init_t
+        .send_channel_message(&link_id, 0x01, b"will fail", 100, &mut rng)
+        .unwrap();
+
+    // Exhaust retries (MAX_RETRIES = 5, timeout = 15s)
+    let mut now = 100u64;
+    for _ in 0..=rete_transport::channel::MAX_RETRIES {
+        now += 16; // past retry_timeout
+        let _ = init_t.pending_channel_retransmits(now, &mut rng);
+    }
+
+    // Link should be removed (teardown)
+    assert_eq!(
+        init_t.link_count(),
+        0,
+        "link should be removed after max retries"
+    );
 }

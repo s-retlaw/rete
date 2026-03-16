@@ -43,6 +43,16 @@ pub struct OutboundPacket {
     pub routing: PacketRouting,
 }
 
+impl OutboundPacket {
+    /// Create a packet to be sent on all interfaces.
+    pub fn broadcast(data: Vec<u8>) -> Self {
+        OutboundPacket {
+            data,
+            routing: PacketRouting::All,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // IngestOutcome
 // ---------------------------------------------------------------------------
@@ -209,6 +219,63 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         buf[..n].to_vec()
     }
 
+    /// Initiate a link to a destination.
+    ///
+    /// Returns the outbound LINKREQUEST packet and the link_id on success.
+    pub fn initiate_link<R: RngCore + CryptoRng>(
+        &mut self,
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        now: u64,
+        rng: &mut R,
+    ) -> Option<(OutboundPacket, [u8; TRUNCATED_HASH_LEN])> {
+        let (raw, link_id) = self
+            .transport
+            .initiate_link(dest_hash, &self.identity, rng, now)?;
+        Some((OutboundPacket::broadcast(raw), link_id))
+    }
+
+    /// Send a channel message on a link.
+    ///
+    /// Returns the outbound packet if the message was queued, or `None` if
+    /// the link is not active or the channel window is full.
+    pub fn send_channel_message<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        message_type: u16,
+        payload: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Option<OutboundPacket> {
+        let raw = self
+            .transport
+            .send_channel_message(link_id, message_type, payload, now, rng)?;
+        Some(OutboundPacket::broadcast(raw))
+    }
+
+    /// Send stream data on a link via channel.
+    ///
+    /// Packs a `StreamDataMessage` and sends it as a channel message with
+    /// `MSG_TYPE_STREAM`. Uses stack buffer to avoid intermediate heap allocations.
+    pub fn send_stream_data<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        stream_id: u16,
+        data: &[u8],
+        eof: bool,
+        now: u64,
+        rng: &mut R,
+    ) -> Option<OutboundPacket> {
+        let mut buf = [0u8; MTU];
+        let n = rete_transport::StreamDataMessage::pack_into(stream_id, eof, false, data, &mut buf);
+        self.send_channel_message(
+            link_id,
+            rete_transport::MSG_TYPE_STREAM,
+            &buf[..n],
+            now,
+            rng,
+        )
+    }
+
     /// Process an inbound raw packet and return the outcome.
     ///
     /// The runtime loop dispatches packets based on `IngestOutcome.packets`
@@ -253,10 +320,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 // Flush pending announces (retransmissions) to all interfaces
                 let pending = self.transport.pending_outbound(now);
                 for ann_raw in pending {
-                    packets.push(OutboundPacket {
-                        data: ann_raw.to_vec(),
-                        routing: PacketRouting::All,
-                    });
+                    packets.push(OutboundPacket::broadcast(ann_raw.to_vec()));
                 }
 
                 IngestOutcome {
@@ -335,10 +399,26 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                     routing: PacketRouting::SourceInterface,
                 }],
             },
-            IngestResult::LinkEstablished { link_id } => IngestOutcome {
-                event: Some(NodeEvent::LinkEstablished { link_id }),
-                packets: Vec::new(),
-            },
+            IngestResult::LinkEstablished { link_id } => {
+                let mut packets = Vec::new();
+                // Auto-send LRRTT if we are the initiator (activates responder).
+                // Uses the low 32 bits of epoch seconds as a timing marker for RTT calculation.
+                if self
+                    .transport
+                    .get_link(&link_id)
+                    .map(|l| l.role == rete_transport::LinkRole::Initiator)
+                    .unwrap_or(false)
+                {
+                    let rtt_bytes = &now.to_be_bytes()[4..8];
+                    if let Some(pkt) = self.transport.build_lrrtt_packet(&link_id, rtt_bytes, rng) {
+                        packets.push(OutboundPacket::broadcast(pkt));
+                    }
+                }
+                IngestOutcome {
+                    event: Some(NodeEvent::LinkEstablished { link_id }),
+                    packets,
+                }
+            }
             IngestResult::LinkData {
                 link_id,
                 data,
@@ -351,25 +431,44 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 }),
                 packets: Vec::new(),
             },
+            IngestResult::ChannelMessages { link_id, messages } => IngestOutcome {
+                event: Some(NodeEvent::ChannelMessages {
+                    link_id,
+                    messages: messages
+                        .into_iter()
+                        .map(|e| (e.message_type, e.payload))
+                        .collect(),
+                }),
+                packets: Vec::new(),
+            },
             IngestResult::LinkClosed { link_id } => IngestOutcome {
                 event: Some(NodeEvent::LinkClosed { link_id }),
                 packets: Vec::new(),
             },
-            IngestResult::Duplicate | IngestResult::Invalid => IngestOutcome::empty(),
+            IngestResult::Duplicate | IngestResult::Buffered | IngestResult::Invalid => {
+                IngestOutcome::empty()
+            }
         }
     }
 
-    /// Periodic maintenance: expire paths, collect pending announces.
-    pub fn handle_tick(&mut self, now: u64) -> IngestOutcome {
+    /// Periodic maintenance: expire paths, collect pending announces, send keepalives.
+    pub fn handle_tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> IngestOutcome {
         let result = self.transport.tick(now);
         let pending = self.transport.pending_outbound(now);
-        let packets: Vec<OutboundPacket> = pending
+        let mut packets: Vec<OutboundPacket> = pending
             .into_iter()
-            .map(|raw| OutboundPacket {
-                data: raw.to_vec(),
-                routing: PacketRouting::All,
-            })
+            .map(|raw| OutboundPacket::broadcast(raw.to_vec()))
             .collect();
+
+        // Send keepalives for idle links
+        for ka in self.transport.build_pending_keepalives(now, rng) {
+            packets.push(OutboundPacket::broadcast(ka));
+        }
+
+        // Channel retransmissions
+        for retx in self.transport.pending_channel_retransmits(now, rng) {
+            packets.push(OutboundPacket::broadcast(retx));
+        }
 
         IngestOutcome {
             event: Some(NodeEvent::Tick {
@@ -626,8 +725,9 @@ mod tests {
     #[test]
     fn node_core_handle_tick() {
         let mut core = make_core(b"tick-node");
+        let mut rng = rand::thread_rng();
 
-        let outcome = core.handle_tick(1000);
+        let outcome = core.handle_tick(1000, &mut rng);
         match outcome.event {
             Some(NodeEvent::Tick { expired_paths, .. }) => {
                 assert_eq!(expired_paths, 0);
@@ -651,5 +751,270 @@ mod tests {
         // Should be able to build data packet to registered peer
         let pkt = core.build_data_packet(&peer_dest, b"hello peer", &mut rng);
         assert!(pkt.is_some(), "should build data packet to registered peer");
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: full handshake between two NodeCores
+    // -----------------------------------------------------------------------
+
+    /// Set up two NodeCores and perform a full handshake.
+    /// Returns (initiator, responder, link_id).
+    fn two_core_handshake() -> (TestNodeCore, TestNodeCore, [u8; TRUNCATED_HASH_LEN]) {
+        let mut rng = rand::thread_rng();
+
+        // Responder
+        let mut resp = make_core(b"resp-core");
+
+        // Initiator — register responder's identity so proof can be verified
+        let mut init = make_core(b"init-core");
+        let resp_id = Identity::from_seed(b"resp-core").unwrap();
+        init.register_peer(&resp_id, "testapp", &["aspect1"], 100);
+
+        // Initiator sends LINKREQUEST
+        let (outbound, link_id) = init
+            .initiate_link(*resp.dest_hash(), 100, &mut rng)
+            .expect("should produce LINKREQUEST");
+
+        // Responder ingests LINKREQUEST → emits LinkEstablished + proof
+        let resp_outcome = resp.handle_ingest(&outbound.data, 100, 0, &mut rng);
+        assert!(
+            matches!(resp_outcome.event, Some(NodeEvent::LinkEstablished { .. })),
+            "responder should emit LinkEstablished"
+        );
+        assert!(
+            !resp_outcome.packets.is_empty(),
+            "responder should send LRPROOF"
+        );
+        let proof_pkt = &resp_outcome.packets[0];
+
+        // Initiator ingests LRPROOF → emits LinkEstablished + auto-sends LRRTT
+        let init_outcome = init.handle_ingest(&proof_pkt.data, 101, 0, &mut rng);
+        assert!(
+            matches!(init_outcome.event, Some(NodeEvent::LinkEstablished { .. })),
+            "initiator should emit LinkEstablished"
+        );
+
+        // Find the LRRTT packet in initiator's outcome
+        let lrrtt_pkt = init_outcome
+            .packets
+            .iter()
+            .find(|p| {
+                rete_core::Packet::parse(&p.data)
+                    .map(|pkt| pkt.context == rete_core::CONTEXT_LRRTT)
+                    .unwrap_or(false)
+            })
+            .expect("initiator should auto-send LRRTT");
+
+        // Responder ingests LRRTT → activates
+        let resp_outcome2 = resp.handle_ingest(&lrrtt_pkt.data, 102, 0, &mut rng);
+        assert!(
+            matches!(resp_outcome2.event, Some(NodeEvent::LinkEstablished { .. })),
+            "responder should emit LinkEstablished on LRRTT"
+        );
+
+        (init, resp, link_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1: LRRTT auto-send tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node_core_link_established_initiator_sends_lrrtt() {
+        let mut rng = rand::thread_rng();
+
+        let mut resp = make_core(b"lrrtt-resp");
+        let mut init = make_core(b"lrrtt-init");
+        let resp_id = Identity::from_seed(b"lrrtt-resp").unwrap();
+        init.register_peer(&resp_id, "testapp", &["aspect1"], 100);
+
+        let (outbound, _link_id) = init
+            .initiate_link(*resp.dest_hash(), 100, &mut rng)
+            .unwrap();
+
+        // Responder ingests LINKREQUEST
+        let resp_outcome = resp.handle_ingest(&outbound.data, 100, 0, &mut rng);
+        let proof_pkt = &resp_outcome.packets[0];
+
+        // Initiator ingests LRPROOF
+        let init_outcome = init.handle_ingest(&proof_pkt.data, 101, 0, &mut rng);
+
+        // Should have LRRTT in packets
+        let has_lrrtt = init_outcome.packets.iter().any(|p| {
+            rete_core::Packet::parse(&p.data)
+                .map(|pkt| pkt.context == rete_core::CONTEXT_LRRTT)
+                .unwrap_or(false)
+        });
+        assert!(has_lrrtt, "initiator should auto-send LRRTT after LRPROOF");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Link initiation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node_core_initiate_link_produces_request() {
+        let mut core = make_core(b"init-link-test");
+        let mut rng = rand::thread_rng();
+        let dest_hash = [0xAA; TRUNCATED_HASH_LEN];
+
+        let (outbound, link_id) = core
+            .initiate_link(dest_hash, 100, &mut rng)
+            .expect("should produce a link request");
+
+        let parsed = Packet::parse(&outbound.data).unwrap();
+        assert_eq!(parsed.packet_type, PacketType::LinkRequest);
+        assert_eq!(outbound.routing, PacketRouting::All);
+        assert!(core.transport.get_link(&link_id).is_some());
+    }
+
+    #[test]
+    fn node_core_full_link_lifecycle_two_cores() {
+        let (init, resp, link_id) = two_core_handshake();
+
+        // Both links should be active
+        let init_link = init.transport.get_link(&link_id).unwrap();
+        assert_eq!(init_link.state, rete_transport::LinkState::Active);
+
+        let resp_link = resp.transport.get_link(&link_id).unwrap();
+        assert_eq!(resp_link.state, rete_transport::LinkState::Active);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Keepalive tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node_core_tick_sends_keepalives() {
+        let (mut init, _resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        let ka_interval = init
+            .transport
+            .get_link(&link_id)
+            .unwrap()
+            .keepalive_interval;
+
+        // Tick with time well past half keepalive interval
+        let outcome = init.handle_tick(101 + ka_interval / 2 + 1, &mut rng);
+        let has_keepalive = outcome.packets.iter().any(|p| {
+            rete_core::Packet::parse(&p.data)
+                .map(|pkt| pkt.context == rete_core::CONTEXT_KEEPALIVE)
+                .unwrap_or(false)
+        });
+        assert!(has_keepalive, "tick should produce keepalive packet");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Channel through NodeCore tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node_core_channel_send_receive() {
+        let (mut init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Send channel message from initiator
+        let outbound = init
+            .send_channel_message(&link_id, 0x42, b"core channel msg", 200, &mut rng)
+            .expect("should send channel message");
+
+        // Responder ingests
+        let outcome = resp.handle_ingest(&outbound.data, 200, 0, &mut rng);
+        match outcome.event {
+            Some(NodeEvent::ChannelMessages {
+                link_id: lid,
+                messages,
+            }) => {
+                assert_eq!(lid, link_id);
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].0, 0x42); // message_type
+                assert_eq!(messages[0].1, b"core channel msg"); // payload
+            }
+            other => panic!("expected ChannelMessages, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn node_core_channel_in_tick_retransmit() {
+        let (mut init, _resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Send a channel message (sent_at=200)
+        let _outbound = init
+            .send_channel_message(&link_id, 0x01, b"tick retx", 200, &mut rng)
+            .unwrap();
+
+        // Tick before timeout — no retransmit
+        let outcome = init.handle_tick(210, &mut rng);
+        let channel_pkts: Vec<_> = outcome
+            .packets
+            .iter()
+            .filter(|p| {
+                rete_core::Packet::parse(&p.data)
+                    .map(|pkt| pkt.context == rete_core::CONTEXT_CHANNEL)
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(channel_pkts.is_empty(), "no retransmit before timeout");
+
+        // Tick after timeout (15s)
+        let outcome = init.handle_tick(216, &mut rng);
+        let channel_pkts: Vec<_> = outcome
+            .packets
+            .iter()
+            .filter(|p| {
+                rete_core::Packet::parse(&p.data)
+                    .map(|pkt| pkt.context == rete_core::CONTEXT_CHANNEL)
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(channel_pkts.len(), 1, "should retransmit one channel msg");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5: Stream convenience tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node_core_stream_data_round_trip() {
+        let (mut init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Send stream data
+        let outbound = init
+            .send_stream_data(&link_id, 1, b"stream payload", false, 200, &mut rng)
+            .expect("should send stream data");
+
+        // Responder receives it
+        let outcome = resp.handle_ingest(&outbound.data, 200, 0, &mut rng);
+        match outcome.event {
+            Some(NodeEvent::ChannelMessages { messages, .. }) => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].0, rete_transport::MSG_TYPE_STREAM);
+                // Unpack the stream message
+                let sdm = rete_transport::StreamDataMessage::unpack(&messages[0].1).unwrap();
+                assert_eq!(sdm.stream_id, 1);
+                assert_eq!(sdm.data, b"stream payload");
+                assert!(!sdm.eof);
+            }
+            other => panic!("expected ChannelMessages, got {:?}", other),
+        }
+
+        // Send EOF segment
+        let outbound2 = init
+            .send_stream_data(&link_id, 1, b"final", true, 201, &mut rng)
+            .expect("should send stream EOF");
+
+        let outcome2 = resp.handle_ingest(&outbound2.data, 201, 0, &mut rng);
+        match outcome2.event {
+            Some(NodeEvent::ChannelMessages { messages, .. }) => {
+                let sdm = rete_transport::StreamDataMessage::unpack(&messages[0].1).unwrap();
+                assert_eq!(sdm.stream_id, 1);
+                assert!(sdm.eof);
+                assert_eq!(sdm.data, b"final");
+            }
+            other => panic!("expected ChannelMessages, got {:?}", other),
+        }
     }
 }
