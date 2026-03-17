@@ -952,13 +952,15 @@ def gen_lxmf_message_vectors() -> list:
         ]
         msgpack_payload = _msgpack_pack(payload_list)
 
-        # message_hash = SHA-256(dest_hash || source_hash || msgpack_payload)
-        message_hash = hashlib.sha256(
-            dest_hash + source_hash + msgpack_payload
-        ).digest()
+        # hashed_part = dest_hash || source_hash || msgpack_payload
+        hashed_part = dest_hash + source_hash + msgpack_payload
 
-        # Signature covers the message hash
-        signature = source.sign(message_hash)
+        # message_hash = SHA-256(hashed_part)
+        message_hash = hashlib.sha256(hashed_part).digest()
+
+        # Signature covers: hashed_part + message_hash (matches Python LXMF library)
+        signed_part = hashed_part + message_hash
+        signature = source.sign(signed_part)
 
         # Full packed message: dest_hash[16] || source_hash[16] || signature[64] || msgpack_payload
         packed = dest_hash + source_hash + signature + msgpack_payload

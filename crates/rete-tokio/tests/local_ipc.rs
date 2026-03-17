@@ -4,9 +4,9 @@
 //! LocalClient instances and the TokioNode transport layer.
 
 use rete_core::{Identity, Packet, PacketType, MTU};
+use rete_stack::ReteInterface;
 use rete_tokio::local::{LocalClient, LocalServer};
 use rete_tokio::{InboundMsg, TokioNode};
-use rete_stack::ReteInterface;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 

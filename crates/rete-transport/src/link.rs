@@ -766,7 +766,11 @@ mod tests {
 
         // handle_keepalive on a Pending link — should not panic and should respond
         let response = link.handle_keepalive(&[0xFF], 200);
-        assert_eq!(response, Some(0xFE), "should respond to keepalive request even when Pending");
+        assert_eq!(
+            response,
+            Some(0xFE),
+            "should respond to keepalive request even when Pending"
+        );
         // touch_inbound doesn't change Pending to Active (it only revives Stale)
         assert_eq!(link.last_inbound, 200);
     }
@@ -830,7 +834,10 @@ mod tests {
 
         let link_id2 = compute_link_id(&buf2[..n2]).unwrap();
         // The link_ids should be the same (MTU signalling is stripped)
-        assert_eq!(link_id, link_id2, "link_id should be same with or without MTU signalling");
+        assert_eq!(
+            link_id, link_id2,
+            "link_id should be same with or without MTU signalling"
+        );
     }
 
     #[test]

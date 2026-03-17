@@ -1,13 +1,13 @@
 //! Core Transport struct — path table, announce queue, packet processing, links.
 
 use crate::announce::validate_announce;
+use crate::link::LINK_MDU;
 use crate::link::{compute_link_id, Link};
 use crate::receipt::ReceiptTable;
+use crate::resource::Resource;
 use crate::{announce::PendingAnnounce, dedup::DedupWindow, path::Path};
 use heapless::{FnvIndexMap, FnvIndexSet};
 use rand_core::{CryptoRng, RngCore};
-use crate::link::LINK_MDU;
-use crate::resource::Resource;
 use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, CONTEXT_CHANNEL,
     CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, CONTEXT_RESOURCE,
@@ -634,7 +634,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 // Link data handling: dest_type == Link
                 if pkt.dest_type == DestType::Link {
-                    return self.handle_link_data(&dh, pkt.context, pkt.payload, now, pkt_hash, rng);
+                    return self.handle_link_data(
+                        &dh,
+                        pkt.context,
+                        pkt.payload,
+                        now,
+                        pkt_hash,
+                        rng,
+                    );
                 }
 
                 IngestResult::LocalData {
@@ -1007,13 +1014,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             }
             CONTEXT_RESOURCE_REQ => {
                 // Resource request from receiver (we are sender).
-                // Get the parts to send, then encrypt each via the link.
+                // Extract the resource hash from the request to match the correct resource
+                // (multiple sender resources may exist on the same link).
+                let req_hash = Resource::extract_request_hash(decrypted);
                 let parts_to_send = {
-                    if let Some(res) = self
-                        .resources
-                        .iter_mut()
-                        .find(|r| r.is_sender && r.link_id == *link_id)
-                    {
+                    if let Some(res) = self.resources.iter_mut().find(|r| {
+                        r.is_sender
+                            && r.link_id == *link_id
+                            && req_hash.map_or(true, |h| h == r.resource_hash)
+                    }) {
                         res.handle_request(decrypted)
                     } else {
                         return IngestResult::Invalid;
@@ -1049,12 +1058,20 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 IngestResult::Duplicate
             }
             CONTEXT_RESOURCE_PRF => {
-                // Resource proof from receiver (we are sender)
-                if let Some(res) = self
-                    .resources
-                    .iter_mut()
-                    .find(|r| r.is_sender && r.link_id == *link_id)
-                {
+                // Resource proof from receiver (we are sender).
+                // Match by resource_hash from proof payload (first 32 bytes).
+                let proof_rh: Option<[u8; 32]> = if decrypted.len() >= 32 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&decrypted[..32]);
+                    Some(h)
+                } else {
+                    None
+                };
+                if let Some(res) = self.resources.iter_mut().find(|r| {
+                    r.is_sender
+                        && r.link_id == *link_id
+                        && proof_rh.map_or(true, |h| h == r.resource_hash)
+                }) {
                     let mut rh = [0u8; TRUNCATED_HASH_LEN];
                     rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
                     if res.handle_proof(decrypted) {
@@ -1075,11 +1092,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             }
             CONTEXT_RESOURCE_ICL | CONTEXT_RESOURCE_RCL => {
                 // Cancel from either side
-                if let Some(res) = self
-                    .resources
-                    .iter_mut()
-                    .find(|r| r.link_id == *link_id)
-                {
+                if let Some(res) = self.resources.iter_mut().find(|r| r.link_id == *link_id) {
                     res.handle_cancel();
                     let mut rh = [0u8; TRUNCATED_HASH_LEN];
                     rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
@@ -1537,9 +1550,26 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         // Step 2: Create Resource from the encrypted blob
         let original_size = data.len();
-        let mut resource = Resource::new_outbound(&encrypted, *link_id, LINK_MDU, original_size, rng);
+        let mut resource =
+            Resource::new_outbound(&encrypted, *link_id, LINK_MDU, original_size, rng);
         // Set the encrypted flag (Python: self.flags |= Resource.FLAG_ENCRYPTED)
         resource.flags.encrypted = true;
+
+        // Python computes resource_hash from the ORIGINAL PLAINTEXT (the `data`
+        // parameter of Resource.__init__), not the encrypted blob. Override the
+        // hash to match Python convention: SHA-256(plaintext || random_hash).
+        {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(data); // original plaintext
+            hasher.update(&resource.random_hash);
+            resource.resource_hash = hasher.finalize().into();
+        }
+        // Also store the original plaintext in resource.data for proof validation.
+        // Python receiver proves with SHA-256(plaintext || resource_hash), so the
+        // sender needs the plaintext (not ciphertext) for handle_proof verification.
+        resource.data = data.to_vec();
+
         let adv = resource.build_advertisement();
 
         // Step 3: Encrypt advertisement and build packet
@@ -1767,7 +1797,11 @@ mod tests {
                 last_tx_at: 0,
                 local: false,
             };
-            assert!(transport.queue_announce(ann), "announce {} should be queued", i);
+            assert!(
+                transport.queue_announce(ann),
+                "announce {} should be queued",
+                i
+            );
         }
         assert_eq!(transport.announce_count(), 16);
 
@@ -1781,7 +1815,10 @@ mod tests {
             last_tx_at: 0,
             local: false,
         };
-        assert!(!transport.queue_announce(overflow), "overflow announce should return false");
+        assert!(
+            !transport.queue_announce(overflow),
+            "overflow announce should return false"
+        );
         assert_eq!(transport.announce_count(), 16);
     }
 

@@ -6,6 +6,18 @@ edition.workspace    = true
 license.workspace    = true
 repository.workspace = true
 
+[features]
+default = ["router"]
+router = ["rete-stack", "rete-transport", "rand_core"]
+
 [dependencies]
 rete-core = { workspace = true }
+rete-stack = { workspace = true, optional = true }
+rete-transport = { workspace = true, optional = true }
+rand_core = { workspace = true, optional = true }
 sha2 = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+rand = "0.8"
+serde_json = { workspace = true }
+hex = "0.4"

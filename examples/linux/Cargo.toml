@@ -16,6 +16,7 @@ rete-tokio        = { workspace = true }
 rete-iface-tcp    = { workspace = true }
 rete-iface-serial = { workspace = true }
 rete-iface-auto   = { workspace = true }
+rete-lxmf         = { workspace = true }
 tokio             = { workspace = true }
 rand              = "0.8"
 hex               = "0.4"

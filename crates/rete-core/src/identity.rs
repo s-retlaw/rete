@@ -451,7 +451,10 @@ mod tests {
 
         // Ciphertext should be: ephemeral_pub(32) + iv(16) + padded(32+16=48) + hmac(32)
         // = 32 + 16 + 48 + 32 = 128
-        assert_eq!(ct_len, 128, "32B plaintext + PKCS7 full padding block = 128B ciphertext");
+        assert_eq!(
+            ct_len, 128,
+            "32B plaintext + PKCS7 full padding block = 128B ciphertext"
+        );
 
         let mut pt = [0u8; 512];
         let pt_len = identity.decrypt(&ct[..ct_len], &mut pt).unwrap();

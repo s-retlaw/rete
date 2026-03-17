@@ -16,6 +16,7 @@ use rete_core::Identity;
 use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
+use rete_lxmf::{LxmfEvent, LxmfRouter};
 use rete_tokio::local::{LocalClient, LocalServer};
 use rete_tokio::{interface_task, InboundMsg, NodeCommand, NodeEvent, TokioNode};
 
@@ -97,7 +98,6 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             dest_hash: parse_hex_16(parts[1])?,
         }),
         "channel" => {
-            // channel <link_id_hex:32chars> <msg_type:hex_u16> <text>
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
             if parts.len() < 4 {
                 eprintln!("[rete] usage: channel <link_id_hex> <msg_type_hex> <text>");
@@ -123,7 +123,6 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             Some(NodeCommand::Announce { app_data })
         }
         "resource" => {
-            // resource <link_id_hex:32chars> <text>
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
             if parts.len() < 3 {
                 eprintln!("[rete] usage: resource <link_id_hex> <text>");
@@ -135,10 +134,36 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
                 data: parts[2].as_bytes().to_vec(),
             })
         }
+        "lxmf" => {
+            let parts: Vec<&str> = line.splitn(3, ' ').collect();
+            if parts.len() < 3 {
+                eprintln!("[rete] usage: lxmf <dest_hash_hex> <message>");
+                return None;
+            }
+            Some(NodeCommand::AppCommand {
+                name: "lxmf-send".to_string(),
+                dest_hash: Some(parse_hex_16(parts[1])?),
+                link_id: None,
+                payload: parts[2].as_bytes().to_vec(),
+            })
+        }
+        "lxmf-link" => {
+            let parts: Vec<&str> = line.splitn(4, ' ').collect();
+            if parts.len() < 4 {
+                eprintln!("[rete] usage: lxmf-link <link_id_hex> <dest_hash_hex> <message>");
+                return None;
+            }
+            Some(NodeCommand::AppCommand {
+                name: "lxmf-link-send".to_string(),
+                dest_hash: Some(parse_hex_16(parts[2])?),
+                link_id: Some(parse_hex_16(parts[1])?),
+                payload: parts[3].as_bytes().to_vec(),
+            })
+        }
         "quit" => Some(NodeCommand::Shutdown),
         _ => {
             eprintln!("[rete] unknown command: {line}");
-            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | path <dest_hex> | announce [data] | quit");
+            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | quit");
             None
         }
     }
@@ -327,19 +352,47 @@ async fn main() {
         hex::encode(node.core.dest_hash())
     );
 
+    // Register LXMF delivery destination
+    let mut lxmf_router = LxmfRouter::register(&mut node.core);
+
+    // Parse --lxmf-name <display_name>
+    let lxmf_name = args
+        .windows(2)
+        .find(|w| w[0] == "--lxmf-name")
+        .map(|w| w[1].clone());
+    if let Some(name) = lxmf_name {
+        lxmf_router.set_display_name(name.into_bytes());
+    }
+
+    eprintln!(
+        "[rete] LXMF delivery hash: {}",
+        hex::encode(lxmf_router.delivery_dest_hash())
+    );
+
+    // Note: LXMF delivery announce is NOT queued at startup to avoid
+    // confusing E2E test scripts that expect a single announce. Use the
+    // "announce" stdin command or --lxmf-announce flag to send it explicitly.
+
     // Create command channel + stdin reader
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<NodeCommand>(64);
     spawn_stdin_reader(cmd_tx);
 
     // Dispatch based on interface type
-    if auto_enabled && addrs.is_empty() && serial_path.is_none() && local_client_name.is_none() && local_server_name.is_none() {
+    if auto_enabled
+        && addrs.is_empty()
+        && serial_path.is_none()
+        && local_client_name.is_none()
+        && local_server_name.is_none()
+    {
         // AutoInterface-only mode (single interface)
         let mut config = AutoInterfaceConfig::default();
         if let Some(ref gid) = auto_group {
             config.group_id = gid.as_bytes().to_vec();
         }
-        eprintln!("[rete] starting AutoInterface (group={}) ...",
-            String::from_utf8_lossy(&config.group_id));
+        eprintln!(
+            "[rete] starting AutoInterface (group={}) ...",
+            String::from_utf8_lossy(&config.group_id)
+        );
         let mut iface = match AutoInterface::new(config).await {
             Ok(i) => i,
             Err(e) => {
@@ -348,10 +401,14 @@ async fn main() {
             }
         };
         for info in iface.interfaces() {
-            eprintln!("[rete]   interface: {} (index {}, addr {})", info.name, info.index, info.link_local);
+            eprintln!(
+                "[rete]   interface: {} (index {}, addr {})",
+                info.name, info.index, info.link_local
+            );
         }
         eprintln!("[rete] AutoInterface ready, discovering peers ...");
-        node.run_with_commands(&mut iface, cmd_rx, on_event).await;
+        node.run_with_commands(&mut iface, cmd_rx, |e| on_event(e, &lxmf_router))
+            .await;
     } else if let Some(ref client_name) = local_client_name {
         // Local client mode: connect to a shared instance server via Unix socket.
         // Uses single-interface mode (ReteInterface trait).
@@ -364,7 +421,8 @@ async fn main() {
             }
         };
         eprintln!("[rete] connected to local instance '{}'", client_name);
-        node.run_with_commands(&mut iface, cmd_rx, on_event).await;
+        node.run_with_commands(&mut iface, cmd_rx, |e| on_event(e, &lxmf_router))
+            .await;
     } else if let Some(path) = serial_path {
         eprintln!("[rete] opening serial port {} at {} baud ...", path, baud);
         let mut iface = match SerialInterface::open(path, baud) {
@@ -375,8 +433,10 @@ async fn main() {
             }
         };
         eprintln!("[rete] serial port open");
-        node.run_with_commands(&mut iface, cmd_rx, on_event).await;
-    } else if local_server_name.is_some() || addrs.len() > 1 || (auto_enabled && !addrs.is_empty()) {
+        node.run_with_commands(&mut iface, cmd_rx, |e| on_event(e, &lxmf_router))
+            .await;
+    } else if local_server_name.is_some() || addrs.len() > 1 || (auto_enabled && !addrs.is_empty())
+    {
         // Multi-interface mode: TCP endpoints + optional local server + optional AutoInterface.
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<InboundMsg>(256);
         let mut senders = Vec::new();
@@ -395,11 +455,9 @@ async fn main() {
                 }
             };
             if ifac_enabled {
-                let key = rete_core::IfacKey::derive(
-                    ifac_netname.as_deref(),
-                    ifac_netkey.as_deref(),
-                )
-                .unwrap();
+                let key =
+                    rete_core::IfacKey::derive(ifac_netname.as_deref(), ifac_netkey.as_deref())
+                        .unwrap();
                 iface.set_ifac(key);
             }
             eprintln!("[rete] connected to {} (iface {})", addr, idx);
@@ -473,18 +531,15 @@ async fn main() {
         // If we have a local server, we need to also broadcast outbound packets
         // to local clients. We wrap the multi-interface loop with a broadcaster.
         if let Some(broadcaster) = local_broadcaster {
-            run_multi_with_local_server(
-                &mut node,
-                senders,
-                inbound_rx,
-                cmd_rx,
-                broadcaster,
-                on_event,
-            )
+            run_multi_with_local_server(&mut node, senders, inbound_rx, cmd_rx, broadcaster, |e| {
+                on_event(e, &lxmf_router)
+            })
             .await;
         } else {
-            node.run_multi_with_commands(senders, inbound_rx, cmd_rx, on_event)
-                .await;
+            node.run_multi_with_commands(senders, inbound_rx, cmd_rx, |e| {
+                on_event(e, &lxmf_router)
+            })
+            .await;
         }
     } else {
         let addr = addrs.first().copied().unwrap_or(DEFAULT_ADDR);
@@ -497,15 +552,13 @@ async fn main() {
             }
         };
         if ifac_enabled {
-            let key = rete_core::IfacKey::derive(
-                ifac_netname.as_deref(),
-                ifac_netkey.as_deref(),
-            )
-            .unwrap();
+            let key = rete_core::IfacKey::derive(ifac_netname.as_deref(), ifac_netkey.as_deref())
+                .unwrap();
             iface.set_ifac(key);
         }
         eprintln!("[rete] connected");
-        node.run_with_commands(&mut iface, cmd_rx, on_event).await;
+        node.run_with_commands(&mut iface, cmd_rx, |e| on_event(e, &lxmf_router))
+            .await;
     }
 }
 
@@ -548,8 +601,7 @@ async fn run_multi_with_local_server<F>(
 
     let mut announce_timer =
         tokio::time::interval(std::time::Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
-    let mut tick_timer =
-        tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
+    let mut tick_timer = tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
     announce_timer.tick().await;
     tick_timer.tick().await;
 
@@ -646,7 +698,43 @@ async fn dispatch_with_local(
     }
 }
 
-fn on_event(event: NodeEvent) {
+fn on_event(event: NodeEvent, lxmf_router: &LxmfRouter) {
+    // Try LXMF parsing first
+    let lxmf_event = lxmf_router.handle_event(event);
+    match lxmf_event {
+        LxmfEvent::MessageReceived { message, method } => {
+            let source = hex::encode(message.source_hash);
+            let title = String::from_utf8_lossy(&message.title);
+            let content = String::from_utf8_lossy(&message.content);
+            eprintln!(
+                "[rete] LXMF_RECEIVED from={} method={:?} title=\"{}\" content=\"{}\"",
+                source, method, title, content,
+            );
+            println!("LXMF_RECEIVED:{}:{}:{}", source, title, content);
+        }
+        LxmfEvent::PeerAnnounced {
+            dest_hash,
+            display_name,
+        } => {
+            let name = display_name
+                .as_deref()
+                .map(|n| String::from_utf8_lossy(n).to_string())
+                .unwrap_or_default();
+            eprintln!(
+                "[rete] LXMF_PEER dest={} name=\"{}\"",
+                hex::encode(dest_hash),
+                name,
+            );
+            println!("LXMF_PEER:{}:{}", hex::encode(dest_hash), name);
+        }
+        LxmfEvent::Other(event) => {
+            // Fall through to normal event handling
+            on_node_event(event);
+        }
+    }
+}
+
+fn on_node_event(event: NodeEvent) {
     match event {
         NodeEvent::AnnounceReceived {
             dest_hash,
@@ -729,8 +817,18 @@ fn on_event(event: NodeEvent) {
             for (msg_type, payload) in &messages {
                 eprintln!("  type=0x{:04x} len={}", msg_type, payload.len());
                 match std::str::from_utf8(payload) {
-                    Ok(text) => println!("CHANNEL_MSG:{}:{:#06x}:{}", hex::encode(link_id), msg_type, text),
-                    Err(_) => println!("CHANNEL_MSG:{}:{:#06x}:{}", hex::encode(link_id), msg_type, hex::encode(payload)),
+                    Ok(text) => println!(
+                        "CHANNEL_MSG:{}:{:#06x}:{}",
+                        hex::encode(link_id),
+                        msg_type,
+                        text
+                    ),
+                    Err(_) => println!(
+                        "CHANNEL_MSG:{}:{:#06x}:{}",
+                        hex::encode(link_id),
+                        msg_type,
+                        hex::encode(payload)
+                    ),
                 }
             }
         }

@@ -38,6 +38,21 @@ pub enum NodeCommand {
     },
     /// Emit an announce (optionally with app_data).
     Announce { app_data: Option<Vec<u8>> },
+    /// Application-layer command, opaque to the runtime.
+    ///
+    /// Used by example binaries for LXMF or other protocol-specific commands.
+    /// `handle_command` logs a warning and returns; callers should intercept
+    /// these before passing to TokioNode.
+    AppCommand {
+        /// Subcommand name (e.g. "lxmf-send", "lxmf-link-send").
+        name: String,
+        /// Target destination hash (if applicable).
+        dest_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
+        /// Target link ID (if applicable).
+        link_id: Option<[u8; TRUNCATED_HASH_LEN]>,
+        /// Payload / message text.
+        payload: Vec<u8>,
+    },
     /// Shut down the event loop.
     Shutdown,
 }
@@ -81,7 +96,11 @@ impl TokioNode {
     }
 
     /// Dispatch a single command, returning outbound packets and whether to continue.
-    pub fn handle_command<R>(&mut self, cmd: NodeCommand, rng: &mut R) -> (Vec<OutboundPacket>, bool)
+    pub fn handle_command<R>(
+        &mut self,
+        cmd: NodeCommand,
+        rng: &mut R,
+    ) -> (Vec<OutboundPacket>, bool)
     where
         R: rand_core::RngCore + rand_core::CryptoRng,
     {
@@ -144,6 +163,12 @@ impl TokioNode {
                 self.core.queue_announce(app_data.as_deref(), rng, now);
                 eprintln!("[rete] cmd: queued announce");
                 (self.core.flush_announces(now), true)
+            }
+            NodeCommand::AppCommand { name, .. } => {
+                eprintln!(
+                    "[rete] cmd: app command '{name}' not handled (no app handler installed)"
+                );
+                (vec![], true)
             }
             NodeCommand::Shutdown => {
                 eprintln!("[rete] cmd: shutdown requested");

@@ -39,9 +39,8 @@ use sha2::{Digest, Sha256};
 
 /// HKDF salt used for IFAC key derivation (from Python `Reticulum.IFAC_SALT`).
 pub const IFAC_SALT: [u8; 32] = [
-    0xad, 0xf5, 0x4d, 0x88, 0x2c, 0x9a, 0x9b, 0x80, 0x77, 0x1e, 0xb4, 0x99, 0x5d, 0x70, 0x2d,
-    0x4a, 0x3e, 0x73, 0x33, 0x91, 0xb2, 0xa0, 0xf5, 0x3f, 0x41, 0x6d, 0x9f, 0x90, 0x7e, 0x55,
-    0xcf, 0xf8,
+    0xad, 0xf5, 0x4d, 0x88, 0x2c, 0x9a, 0x9b, 0x80, 0x77, 0x1e, 0xb4, 0x99, 0x5d, 0x70, 0x2d, 0x4a,
+    0x3e, 0x73, 0x33, 0x91, 0xb2, 0xa0, 0xf5, 0x3f, 0x41, 0x6d, 0x9f, 0x90, 0x7e, 0x55, 0xcf, 0xf8,
 ];
 
 /// Default IFAC tag size in bytes (16 bytes = 128 bits).
@@ -292,12 +291,12 @@ mod tests {
         let mut pkt = [0u8; 30];
         pkt[0] = 0x08; // PLAIN DATA
         pkt[1] = 0x00; // hops
-        // dest_hash: 16 bytes of 0xAA
+                       // dest_hash: 16 bytes of 0xAA
         for i in 2..18 {
             pkt[i] = 0xAA;
         }
         pkt[18] = 0x00; // context
-        // payload: "hello world"
+                        // payload: "hello world"
         let payload = b"hello world";
         pkt[19..19 + payload.len()].copy_from_slice(payload);
         pkt
@@ -318,7 +317,9 @@ mod tests {
 
         // Unprotect
         let mut recovered = [0u8; MAX_PROTECTED_LEN];
-        let rec_len = ifac.unprotect(&protected[..prot_len], &mut recovered).unwrap();
+        let rec_len = ifac
+            .unprotect(&protected[..prot_len], &mut recovered)
+            .unwrap();
         assert_eq!(rec_len, raw.len());
         assert_eq!(&recovered[..rec_len], &raw[..]);
     }
@@ -465,7 +466,9 @@ mod tests {
         assert_eq!(prot_len, 2 + DEFAULT_IFAC_SIZE);
 
         let mut recovered = [0u8; MAX_PROTECTED_LEN];
-        let rec_len = ifac.unprotect(&protected[..prot_len], &mut recovered).unwrap();
+        let rec_len = ifac
+            .unprotect(&protected[..prot_len], &mut recovered)
+            .unwrap();
         assert_eq!(rec_len, 2);
         assert_eq!(&recovered[..2], &raw[..]);
     }
@@ -486,7 +489,9 @@ mod tests {
         assert_eq!(prot_len, 480 + DEFAULT_IFAC_SIZE);
 
         let mut recovered = [0u8; MAX_PROTECTED_LEN];
-        let rec_len = ifac.unprotect(&protected[..prot_len], &mut recovered).unwrap();
+        let rec_len = ifac
+            .unprotect(&protected[..prot_len], &mut recovered)
+            .unwrap();
         assert_eq!(rec_len, 480);
         assert_eq!(&recovered[..480], &raw[..]);
     }
@@ -510,7 +515,9 @@ mod tests {
         assert_eq!(prot_len, raw.len() + 8);
 
         let mut recovered = [0u8; MAX_PROTECTED_LEN];
-        let rec_len = ifac.unprotect(&protected[..prot_len], &mut recovered).unwrap();
+        let rec_len = ifac
+            .unprotect(&protected[..prot_len], &mut recovered)
+            .unwrap();
         assert_eq!(rec_len, raw.len());
         assert_eq!(&recovered[..rec_len], &raw[..]);
     }

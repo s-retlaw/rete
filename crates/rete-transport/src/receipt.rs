@@ -309,6 +309,9 @@ mod tests {
 
         // Second proof on the same receipt — should return None
         let result2 = table.validate_proof(&trunc, &sig);
-        assert_eq!(result2, None, "already-delivered receipt should reject proof");
+        assert_eq!(
+            result2, None,
+            "already-delivered receipt should reject proof"
+        );
     }
 }

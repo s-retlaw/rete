@@ -841,6 +841,7 @@ dependencies = [
  "rete-iface-auto",
  "rete-iface-serial",
  "rete-iface-tcp",
+ "rete-lxmf",
  "rete-stack",
  "rete-tokio",
  "rete-transport",
@@ -892,7 +893,13 @@ dependencies = [
 name = "rete-lxmf"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "rand",
+ "rand_core",
  "rete-core",
+ "rete-stack",
+ "rete-transport",
+ "serde_json",
  "sha2",
 ]
 

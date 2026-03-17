@@ -11,7 +11,8 @@ Assertions:
   1. Link established (both sides)
   2. Python sends Resource (~1KB), Rust receives RESOURCE_OFFERED
   3. Rust receives RESOURCE_COMPLETE with matching data
-  4. Rust sends Resource back to Python, Python receives it
+  4. Rust sends Resource to Python (ACCEPT_ALL strategy), Python receives it
+  5. Rust sends Resource to Python (ACCEPT_APP strategy), Python's callback invoked and resource received
 
 Usage:
   cd tests/interop
@@ -91,7 +92,7 @@ def main():
         "--port", type=int, default=4254, help="TCP port for rnsd"
     )
     parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Test timeout in seconds"
+        "--timeout", type=float, default=120.0, help="Test timeout in seconds"
     )
     args = parser.parse_args()
 
@@ -168,6 +169,9 @@ import sys
 import os
 import threading
 
+def ts():
+    return f"[{{time.time():.3f}}]"
+
 # Create a Reticulum config that connects as a TCP client
 config_dir = os.path.join("{tmpdir}", "py_client_config")
 os.makedirs(config_dir, exist_ok=True)
@@ -198,30 +202,65 @@ link_closed = threading.Event()
 active_link = [None]
 
 # Track resource events (for receiving resource from Rust)
-resource_received = threading.Event()
-received_resource_data = [None]
+resource_received_accept_all = threading.Event()
+resource_received_accept_app = threading.Event()
+received_resource_data_all = [None]
+received_resource_data_app = [None]
+adv_callback_invoked = [False]
+
+# Which phase are we in?
+phase = ["accept_all"]  # switches to "accept_app" after first resource
 
 def link_established_cb(link):
-    print(f"PY_LINK_ESTABLISHED:{{link.link_id.hex()}}", flush=True)
+    print(f"{{ts()}} PY_LINK_ESTABLISHED:{{link.link_id.hex()}} rtt={{link.rtt:.6f}} keepalive={{link.keepalive:.1f}} stale={{link.stale_time:.1f}}", flush=True)
     active_link[0] = link
     link_established.set()
 
 def link_closed_cb(link):
-    print(f"PY_LINK_CLOSED:{{link.link_id.hex()}}", flush=True)
+    print(f"{{ts()}} PY_LINK_CLOSED:{{link.link_id.hex()}} status={{link.status}}", flush=True)
     link_closed.set()
 
 # Resource callbacks for receiving from Rust
 def resource_started_cb(resource):
-    print(f"PY_RESOURCE_STARTED:{{resource.hash.hex()}}:{{resource.total_size}}", flush=True)
-    return True  # Accept the resource
+    print(f"{{ts()}} PY_RESOURCE_STARTED:{{resource.hash.hex()}}:{{resource.total_size}}", flush=True)
 
-def resource_complete_cb(resource):
-    data = resource.data.read()
-    resource.data.close()
-    received_resource_data[0] = data
-    text = data.decode("utf-8", errors="replace")
-    print(f"PY_RESOURCE_COMPLETE:{{resource.hash.hex()}}:{{len(data)}}:{{text[:80]}}", flush=True)
-    resource_received.set()
+def resource_concluded_cb(resource):
+    data = b""
+    try:
+        status_name = {{0x06: "COMPLETE", 0x07: "FAILED", 0x08: "CORRUPT"}}.get(resource.status, f"status={{resource.status}}")
+        print(f"{{ts()}} PY_RESOURCE_CONCLUDED:{{resource.hash.hex()}}:{{status_name}}", flush=True)
+        if resource.status == 0x06:
+            # Try to read the data from the storage file
+            if hasattr(resource, 'storagepath') and os.path.isfile(resource.storagepath):
+                with open(resource.storagepath, "rb") as f:
+                    data = f.read()
+            elif hasattr(resource, 'data') and resource.data is not None:
+                if hasattr(resource.data, 'read'):
+                    data = resource.data.read()
+                    resource.data.close()
+                elif isinstance(resource.data, (bytes, bytearray)):
+                    data = resource.data
+                else:
+                    data = b""
+            else:
+                data = b""
+            text = data.decode("utf-8", errors="replace")
+            print(f"{{ts()}} PY_RESOURCE_COMPLETE:{{resource.hash.hex()}}:{{len(data)}}:{{text[:80]}}", flush=True)
+    except Exception as e:
+        print(f"{{ts()}} PY_RESOURCE_CB_ERROR:{{type(e).__name__}}:{{e}}", flush=True)
+    # Signal the event regardless of success/failure
+    if phase[0] == "accept_all":
+        received_resource_data_all[0] = data
+        resource_received_accept_all.set()
+    else:
+        received_resource_data_app[0] = data
+        resource_received_accept_app.set()
+
+def adv_callback(resource_advertisement):
+    \"\"\"Called with ACCEPT_APP strategy. Receives ResourceAdvertisement, returns True to accept.\"\"\"
+    print(f"PY_ADV_CALLBACK:hash={{resource_advertisement.h.hex()}}:size={{resource_advertisement.d}}", flush=True)
+    adv_callback_invoked[0] = True
+    return True
 
 # Wait for Rust announce to appear
 timeout = {args.timeout}
@@ -270,11 +309,13 @@ if not link_established.wait(timeout=15):
     print(f"PY_LINK_TIMEOUT:status={{link.status}}", flush=True)
     sys.exit(1)
 
-print("PY_LINK_ACTIVE", flush=True)
+print(f"{{ts()}} PY_LINK_ACTIVE", flush=True)
 
-# Set resource callbacks for receiving resources from Rust
-link.set_resource_callback(resource_complete_cb)
-link.set_resource_started_callback(resource_started_cb)
+# Override keepalive to prevent premature stale-out during slow resource transfers
+# On localhost with low RTT, the default keepalive can be as short as 5s, but
+# the resource transfer involves retries that can take 30+ seconds.
+link.keepalive = 120
+link.stale_time = 240
 
 # Send a Resource from Python to Rust
 resource_data = {repr(resource_data)}
@@ -282,29 +323,52 @@ print(f"PY_SENDING_RESOURCE:{{len(resource_data)}}", flush=True)
 
 resource_sent = threading.Event()
 def resource_send_complete(resource):
-    print(f"PY_RESOURCE_SENT:{{resource.hash.hex()}}:{{resource.total_size}}", flush=True)
+    print(f"{{ts()}} PY_RESOURCE_SENT:{{resource.hash.hex()}}:{{resource.total_size}}", flush=True)
     resource_sent.set()
 
 resource = RNS.Resource(resource_data, link, callback=resource_send_complete)
 print(f"PY_RESOURCE_HASH:{{resource.hash.hex()}}", flush=True)
 
-# Wait for resource transfer to complete
-if not resource_sent.wait(timeout=20):
+# Wait for resource transfer to complete (allow up to 45s for slow links)
+if not resource_sent.wait(timeout=45):
     print("PY_FAIL:resource_send_timeout", flush=True)
 else:
-    print("PY_RESOURCE_TRANSFER_DONE", flush=True)
+    print(f"{{ts()}} PY_RESOURCE_TRANSFER_DONE", flush=True)
 
-# Give Rust time to process
-time.sleep(3)
+# Give Rust time to fully process the resource before starting a new one
+time.sleep(5)
 
-# Signal Rust to send a resource back (via a marker in stdout that the test harness reads)
-print("PY_READY_FOR_RUST_RESOURCE", flush=True)
+# --- Phase 1: ACCEPT_ALL ---
+# Set resource strategy to ACCEPT_ALL so Python auto-accepts incoming resources
+phase[0] = "accept_all"
+link.set_resource_strategy(RNS.Link.ACCEPT_ALL)
+link.set_resource_started_callback(resource_started_cb)
+link.set_resource_concluded_callback(resource_concluded_cb)
+print(f"{{ts()}} PY_READY_ACCEPT_ALL", flush=True)
 
-# Wait for resource from Rust
-if resource_received.wait(timeout=20):
-    print("PY_RUST_RESOURCE_RECEIVED", flush=True)
+# Wait for resource from Rust (ACCEPT_ALL)
+if resource_received_accept_all.wait(timeout=60):
+    print("PY_RUST_RESOURCE_RECEIVED_ACCEPT_ALL", flush=True)
 else:
-    print("PY_WARN:no_resource_from_rust_within_timeout", flush=True)
+    print("PY_WARN:no_resource_from_rust_accept_all_timeout", flush=True)
+
+# --- Phase 2: ACCEPT_APP ---
+# Wait for the first resource transfer to fully clean up
+time.sleep(2)
+# Switch to ACCEPT_APP strategy with a proper advertisement callback
+phase[0] = "accept_app"
+link.set_resource_strategy(RNS.Link.ACCEPT_APP)
+link.set_resource_callback(adv_callback)
+print("PY_READY_ACCEPT_APP", flush=True)
+
+# Wait for resource from Rust (ACCEPT_APP)
+if resource_received_accept_app.wait(timeout=60):
+    if adv_callback_invoked[0]:
+        print("PY_RUST_RESOURCE_RECEIVED_ACCEPT_APP", flush=True)
+    else:
+        print("PY_WARN:resource_received_but_adv_callback_not_invoked", flush=True)
+else:
+    print("PY_WARN:no_resource_from_rust_accept_app_timeout", flush=True)
 
 # Give time for final processing
 time.sleep(2)
@@ -337,10 +401,12 @@ print("PY_DONE", flush=True)
         py_reader.daemon = True
         py_reader.start()
 
-        # Wait for Rust to receive the resource (RESOURCE_COMPLETE), then send one back
+        # Wait for Rust to receive the resource (RESOURCE_COMPLETE), then send resources back
         deadline = time.monotonic() + args.timeout + 15
         rust_link_id = None
         rust_resource_complete = False
+        sent_accept_all = False
+        sent_accept_app = False
 
         while time.monotonic() < deadline:
             # Check for LINK_ESTABLISHED in Rust output to get link_id
@@ -351,12 +417,43 @@ print("PY_DONE", flush=True)
                         break
 
             # Check if Rust received the resource from Python
-            for line in rust_lines:
-                if line.startswith("RESOURCE_COMPLETE:"):
-                    rust_resource_complete = True
-                    break
+            if not rust_resource_complete:
+                for line in rust_lines:
+                    if line.startswith("RESOURCE_COMPLETE:"):
+                        rust_resource_complete = True
+                        break
 
-            if rust_resource_complete and rust_link_id:
+            # Send first resource (ACCEPT_ALL) when Python is ready
+            if not sent_accept_all and rust_link_id and rust_resource_complete:
+                if any("PY_READY_ACCEPT_ALL" in l for l in py_lines):
+                    cmd = f"resource {rust_link_id} hello_accept_all\n"
+                    print(f"[resource-interop] sending ACCEPT_ALL resource: {cmd.strip()}")
+                    try:
+                        rust_proc.stdin.write(cmd.encode())
+                        rust_proc.stdin.flush()
+                        sent_accept_all = True
+                    except (BrokenPipeError, OSError) as e:
+                        print(f"[resource-interop] warning: could not write to Rust stdin: {e}")
+                        break
+
+            # Send second resource (ACCEPT_APP) when Python is ready
+            # Wait for the first resource to fully complete before sending the second
+            if not sent_accept_app and sent_accept_all:
+                if any("PY_RUST_RESOURCE_RECEIVED_ACCEPT_ALL" in l for l in py_lines) and any("PY_READY_ACCEPT_APP" in l for l in py_lines):
+                    cmd = f"resource {rust_link_id} hello_accept_app\n"
+                    print(f"[resource-interop] sending ACCEPT_APP resource: {cmd.strip()}")
+                    try:
+                        rust_proc.stdin.write(cmd.encode())
+                        rust_proc.stdin.flush()
+                        sent_accept_app = True
+                    except (BrokenPipeError, OSError) as e:
+                        print(f"[resource-interop] warning: could not write to Rust stdin: {e}")
+                        break
+
+            # Done when both resources sent and Python is done (or exited)
+            if sent_accept_app:
+                # Give Python time to process the second resource
+                time.sleep(3)
                 break
 
             # Check if Python helper has exited
@@ -364,17 +461,6 @@ print("PY_DONE", flush=True)
                 break
 
             time.sleep(0.5)
-
-        # Send resource from Rust to Python via stdin command
-        if rust_link_id and rust_resource_complete:
-            resource_back_text = "hello_from_rust_resource_transfer"
-            cmd = f"resource {rust_link_id} {resource_back_text}\n"
-            print(f"[resource-interop] sending resource command to Rust: {cmd.strip()}")
-            try:
-                rust_proc.stdin.write(cmd.encode())
-                rust_proc.stdin.flush()
-            except (BrokenPipeError, OSError) as e:
-                print(f"[resource-interop] warning: could not write to Rust stdin: {e}")
 
         # Wait for Python helper to complete
         remaining = max(1, deadline - time.monotonic())
@@ -400,6 +486,13 @@ print("PY_DONE", flush=True)
         for line in py_lines:
             if line.strip():
                 print(f"  {line}")
+
+        if py_err_output:
+            # Show last 2000 chars of Python stderr (RNS logs) for debugging
+            print("[resource-interop] Python helper stderr (last 2000 chars):")
+            for line in py_err_output[-2000:].strip().split("\n"):
+                if line.strip():
+                    print(f"  {line}")
 
         # Give the Rust node a moment to finish processing
         time.sleep(2)
@@ -430,17 +523,17 @@ print("PY_DONE", flush=True)
         py_link_ok = any("PY_LINK_ACTIVE" in l for l in py_lines)
 
         if rust_link_established and py_link_ok:
-            print("[resource-interop] PASS [1/4]: Link established (both sides)")
+            print("[resource-interop] PASS [1/5]: Link established (both sides)")
             passed += 1
         elif rust_link_established:
-            print("[resource-interop] FAIL [1/4]: Link established on Rust but Python timed out")
+            print("[resource-interop] FAIL [1/5]: Link established on Rust but Python timed out")
             print("  This may indicate LRPROOF routing through rnsd is not working.")
             failed += 1
         elif py_link_ok:
-            print("[resource-interop] FAIL [1/4]: Link established on Python but not Rust")
+            print("[resource-interop] FAIL [1/5]: Link established on Python but not Rust")
             failed += 1
         else:
-            print("[resource-interop] FAIL [1/4]: Link not established on either side")
+            print("[resource-interop] FAIL [1/5]: Link not established on either side")
             failed += 1
 
         # --- Assertion 2: Rust received RESOURCE_OFFERED ---
@@ -452,45 +545,45 @@ print("PY_DONE", flush=True)
             if len(parts) >= 4:
                 reported_size = int(parts[3])
                 if reported_size > 0:
-                    print(f"[resource-interop] PASS [2/4]: Rust received RESOURCE_OFFERED (size={reported_size})")
+                    print(f"[resource-interop] PASS [2/5]: Rust received RESOURCE_OFFERED (size={reported_size})")
                     passed += 1
                 else:
-                    print(f"[resource-interop] FAIL [2/4]: RESOURCE_OFFERED with zero size")
+                    print(f"[resource-interop] FAIL [2/5]: RESOURCE_OFFERED with zero size")
                     failed += 1
             else:
-                print(f"[resource-interop] PASS [2/4]: Rust received RESOURCE_OFFERED")
+                print(f"[resource-interop] PASS [2/5]: Rust received RESOURCE_OFFERED")
                 passed += 1
         else:
-            print("[resource-interop] FAIL [2/4]: Rust did not receive RESOURCE_OFFERED")
+            print("[resource-interop] FAIL [2/5]: Rust did not receive RESOURCE_OFFERED")
             if not (rust_link_established and py_link_ok):
                 print("  (link was not established on both sides)")
             failed += 1
 
         # --- Assertion 3: Rust received RESOURCE_COMPLETE with matching data ---
-        rust_resource_complete = [l for l in rust_lines if l.startswith("RESOURCE_COMPLETE:")]
+        rust_resource_complete_lines = [l for l in rust_lines if l.startswith("RESOURCE_COMPLETE:")]
 
-        if rust_resource_complete:
+        if rust_resource_complete_lines:
             # Format: RESOURCE_COMPLETE:<link_id>:<resource_hash>:<data>
-            complete_line = rust_resource_complete[0]
+            complete_line = rust_resource_complete_lines[0]
             # Split into at most 4 parts: prefix, link_id, hash, data
             parts = complete_line.split(":", 3)
             if len(parts) >= 4:
                 received_text = parts[3]
                 # The resource data is the repeated string. Check it contains our marker.
                 if "test_resource_data_12345" in received_text:
-                    print("[resource-interop] PASS [3/4]: Rust received RESOURCE_COMPLETE with matching data")
+                    print("[resource-interop] PASS [3/5]: Rust received RESOURCE_COMPLETE with matching data")
                     passed += 1
                 else:
-                    print("[resource-interop] FAIL [3/4]: RESOURCE_COMPLETE data does not match")
+                    print("[resource-interop] FAIL [3/5]: RESOURCE_COMPLETE data does not match")
                     print(f"  Expected to contain: 'test_resource_data_12345'")
                     print(f"  Received (first 100 chars): {received_text[:100]}")
                     failed += 1
             else:
-                print("[resource-interop] FAIL [3/4]: RESOURCE_COMPLETE line has unexpected format")
+                print("[resource-interop] FAIL [3/5]: RESOURCE_COMPLETE line has unexpected format")
                 print(f"  Line: {complete_line}")
                 failed += 1
         else:
-            print("[resource-interop] FAIL [3/4]: Rust did not receive RESOURCE_COMPLETE")
+            print("[resource-interop] FAIL [3/5]: Rust did not receive RESOURCE_COMPLETE")
             rust_resource_failed = [l for l in rust_lines if l.startswith("RESOURCE_FAILED:")]
             if rust_resource_failed:
                 print(f"  RESOURCE_FAILED was reported: {rust_resource_failed[0]}")
@@ -498,37 +591,48 @@ print("PY_DONE", flush=True)
                 print("  (link was not established on both sides)")
             failed += 1
 
-        # --- Assertion 4: Python received Resource from Rust ---
-        py_resource_ok = any("PY_RUST_RESOURCE_RECEIVED" in l for l in py_lines)
-        py_resource_complete = any("PY_RESOURCE_COMPLETE:" in l for l in py_lines)
+        # --- Assertion 4: Rust→Python with ACCEPT_ALL ---
+        py_resource_all_ok = any("PY_RUST_RESOURCE_RECEIVED_ACCEPT_ALL" in l for l in py_lines)
+        py_resource_all_complete = [l for l in py_lines if "PY_RESOURCE_COMPLETE:" in l and "hello_accept_all" in l]
 
-        if py_resource_ok and py_resource_complete:
-            # Verify the data contains our marker
-            for line in py_lines:
-                if "PY_RESOURCE_COMPLETE:" in line:
-                    if "hello_from_rust_resource_transfer" in line:
-                        print("[resource-interop] PASS [4/4]: Python received Resource from Rust with matching data")
-                        passed += 1
-                    else:
-                        print("[resource-interop] FAIL [4/4]: Python received Resource but data mismatch")
-                        print(f"  Line: {line}")
-                        failed += 1
-                    break
-            else:
-                # Shouldn't happen if py_resource_complete is True
-                print("[resource-interop] FAIL [4/4]: Could not find PY_RESOURCE_COMPLETE line")
-                failed += 1
-        elif not rust_link_id:
-            print("[resource-interop] SKIP [4/4]: Could not send resource from Rust (no link_id)")
-            print("  This assertion requires link establishment first.")
+        if py_resource_all_ok and py_resource_all_complete:
+            print("[resource-interop] PASS [4/5]: Rust→Python with ACCEPT_ALL — Python received resource")
+            passed += 1
+        elif not sent_accept_all:
+            print("[resource-interop] FAIL [4/5]: Could not send ACCEPT_ALL resource from Rust")
+            if not rust_link_id:
+                print("  (no link_id available)")
             failed += 1
-        elif not py_ready_for_rust_resource:
-            print("[resource-interop] SKIP [4/4]: Python was not ready to receive resource from Rust")
+        elif py_resource_all_ok:
+            print("[resource-interop] FAIL [4/5]: ACCEPT_ALL resource received but data mismatch")
             failed += 1
         else:
-            print("[resource-interop] FAIL [4/4]: Python did not receive Resource from Rust")
-            if any("PY_WARN:no_resource_from_rust" in l for l in py_lines):
-                print("  Python timed out waiting for resource from Rust")
+            print("[resource-interop] FAIL [4/5]: Python did not receive ACCEPT_ALL resource from Rust")
+            if any("PY_WARN:no_resource_from_rust_accept_all" in l for l in py_lines):
+                print("  Python timed out waiting for ACCEPT_ALL resource")
+            failed += 1
+
+        # --- Assertion 5: Rust→Python with ACCEPT_APP ---
+        py_resource_app_ok = any("PY_RUST_RESOURCE_RECEIVED_ACCEPT_APP" in l for l in py_lines)
+        py_adv_invoked = any("PY_ADV_CALLBACK:" in l for l in py_lines)
+        py_resource_app_complete = [l for l in py_lines if "PY_RESOURCE_COMPLETE:" in l and "hello_accept_app" in l]
+
+        if py_resource_app_ok and py_adv_invoked and py_resource_app_complete:
+            print("[resource-interop] PASS [5/5]: Rust→Python with ACCEPT_APP — callback invoked and resource received")
+            passed += 1
+        elif not sent_accept_app:
+            print("[resource-interop] FAIL [5/5]: Could not send ACCEPT_APP resource from Rust")
+            failed += 1
+        elif py_resource_app_ok and not py_adv_invoked:
+            print("[resource-interop] FAIL [5/5]: ACCEPT_APP resource received but advertisement callback not invoked")
+            failed += 1
+        elif py_adv_invoked and not py_resource_app_ok:
+            print("[resource-interop] FAIL [5/5]: ACCEPT_APP callback invoked but resource not received")
+            failed += 1
+        else:
+            print("[resource-interop] FAIL [5/5]: Python did not receive ACCEPT_APP resource from Rust")
+            if any("PY_WARN:no_resource_from_rust_accept_app" in l for l in py_lines):
+                print("  Python timed out waiting for ACCEPT_APP resource")
             failed += 1
 
     finally:

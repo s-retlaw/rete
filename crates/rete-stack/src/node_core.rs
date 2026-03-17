@@ -90,6 +90,8 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     pub transport: Transport<P, A, D, L>,
     /// Primary destination (addressing metadata, proof strategy, app data).
     primary_dest: Destination,
+    /// Additional registered destinations (e.g. LXMF delivery).
+    additional_dests: Vec<Destination>,
     /// Optional auto-reply message sent after receiving an announce.
     auto_reply: Option<Vec<u8>>,
     /// When true, echo received DATA back to sender with "echo:" prefix.
@@ -98,21 +100,31 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     last_peer: Option<[u8; TRUNCATED_HASH_LEN]>,
 }
 
+/// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
+fn compute_dest_hashes(
+    identity: &Identity,
+    app_name: &str,
+    aspects: &[&str],
+) -> ([u8; TRUNCATED_HASH_LEN], [u8; rete_core::NAME_HASH_LEN]) {
+    use sha2::{Digest, Sha256};
+
+    let mut name_buf = [0u8; 128];
+    let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
+        .expect("app_name + aspects must fit in 128 bytes");
+    let id_hash = identity.hash();
+    let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
+
+    let name_hash_full = Sha256::digest(expanded.as_bytes());
+    let mut name_hash = [0u8; rete_core::NAME_HASH_LEN];
+    name_hash.copy_from_slice(&name_hash_full[..rete_core::NAME_HASH_LEN]);
+
+    (dest_hash, name_hash)
+}
+
 impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
     /// Create a new NodeCore with the given identity and destination.
     pub fn new(identity: Identity, app_name: &str, aspects: &[&str]) -> Self {
-        use sha2::{Digest, Sha256};
-
-        let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-            .expect("app_name + aspects must fit in 128 bytes");
-        let id_hash = identity.hash();
-        let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
-
-        // Compute name_hash = SHA-256(expanded)[0:10]
-        let name_hash_full = Sha256::digest(expanded.as_bytes());
-        let mut name_hash = [0u8; rete_core::NAME_HASH_LEN];
-        name_hash.copy_from_slice(&name_hash_full[..rete_core::NAME_HASH_LEN]);
+        let (dest_hash, name_hash) = compute_dest_hashes(&identity, app_name, aspects);
 
         let primary_dest = Destination::from_hashes(
             DestinationType::Single,
@@ -130,6 +142,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             identity,
             transport,
             primary_dest,
+            additional_dests: Vec::new(),
             auto_reply: None,
             echo_data: false,
             last_peer: None,
@@ -174,6 +187,58 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     /// Set default application data included in announces.
     pub fn set_default_app_data(&mut self, data: Option<Vec<u8>>) {
         self.primary_dest.set_default_app_data(data);
+    }
+
+    /// Register an additional destination on this node.
+    ///
+    /// Computes the destination hash from the node's identity + given app_name/aspects,
+    /// registers it with transport as a local destination, and stores the Destination
+    /// metadata for decryption and proof generation.
+    ///
+    /// Returns the 16-byte destination hash.
+    pub fn register_destination(
+        &mut self,
+        app_name: &str,
+        aspects: &[&str],
+    ) -> [u8; TRUNCATED_HASH_LEN] {
+        let (dest_hash, name_hash) = compute_dest_hashes(&self.identity, app_name, aspects);
+
+        let dest = Destination::from_hashes(
+            DestinationType::Single,
+            Direction::In,
+            app_name,
+            aspects,
+            dest_hash,
+            name_hash,
+        );
+
+        self.transport.add_local_destination(dest_hash);
+        self.additional_dests.push(dest);
+
+        dest_hash
+    }
+
+    /// Look up a destination by hash (checks primary first, then additional).
+    pub fn get_destination(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&Destination> {
+        if *self.primary_dest.hash() == *dest_hash {
+            return Some(&self.primary_dest);
+        }
+        self.additional_dests
+            .iter()
+            .find(|d| d.dest_hash == *dest_hash)
+    }
+
+    /// Look up a destination mutably by hash.
+    pub fn get_destination_mut(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<&mut Destination> {
+        if *self.primary_dest.hash() == *dest_hash {
+            return Some(&mut self.primary_dest);
+        }
+        self.additional_dests
+            .iter_mut()
+            .find(|d| d.dest_hash == *dest_hash)
     }
 
     /// Pre-register a peer's identity for sending DATA without waiting for an announce.
@@ -238,7 +303,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         rng: &mut R,
         now: u64,
     ) -> Vec<u8> {
-        let aspects_refs: Vec<&str> = self.primary_dest.aspects.iter().map(|s| s.as_str()).collect();
+        let aspects_refs: Vec<&str> = self
+            .primary_dest
+            .aspects
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         let mut buf = [0u8; MTU];
         let n = Transport::<P, A, D, L>::create_announce(
             &self.identity,
@@ -264,13 +334,42 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         rng: &mut R,
         now: u64,
     ) -> bool {
-        // Build directly into a stack buffer, then copy into heapless::Vec
-        // to avoid an intermediate heap allocation via build_announce().
-        let aspects_refs: Vec<&str> = self.primary_dest.aspects.iter().map(|s| s.as_str()).collect();
+        let dest_hash = *self.primary_dest.hash();
+        self.queue_announce_for(&dest_hash, app_data, rng, now)
+    }
+
+    /// Queue an announce for a specific registered destination.
+    ///
+    /// Looks up the destination by hash, builds an announce using the node's
+    /// identity with that destination's app_name/aspects, and queues it.
+    pub fn queue_announce_for<R: RngCore + CryptoRng>(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        app_data: Option<&[u8]>,
+        rng: &mut R,
+        now: u64,
+    ) -> bool {
+        // Find the destination's app_name and aspects
+        let (app_name, aspects) = if *self.primary_dest.hash() == *dest_hash {
+            (
+                self.primary_dest.app_name.clone(),
+                self.primary_dest.aspects.clone(),
+            )
+        } else if let Some(dest) = self
+            .additional_dests
+            .iter()
+            .find(|d| d.dest_hash == *dest_hash)
+        {
+            (dest.app_name.clone(), dest.aspects.clone())
+        } else {
+            return false;
+        };
+
+        let aspects_refs: Vec<&str> = aspects.iter().map(|s| s.as_str()).collect();
         let mut buf = [0u8; MTU];
         let n = match Transport::<P, A, D, L>::create_announce(
             &self.identity,
-            &self.primary_dest.app_name,
+            &app_name,
             &aspects_refs,
             app_data,
             rng,
@@ -285,7 +384,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             return false;
         }
         self.transport.queue_announce(PendingAnnounce {
-            dest_hash: *self.primary_dest.hash(),
+            dest_hash: *dest_hash,
             raw,
             tx_count: 0,
             last_tx_at: 0,
@@ -452,20 +551,22 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 payload,
                 packet_hash,
             } => {
-                let decrypted = if dest_hash == *self.primary_dest.hash() {
-                    let mut dec_buf = [0u8; MTU];
-                    match self.identity.decrypt(payload, &mut dec_buf) {
-                        Ok(n) => dec_buf[..n].to_vec(),
-                        Err(_) => payload.to_vec(),
-                    }
-                } else {
-                    payload.to_vec()
+                // Transport already verified this is one of our local destinations.
+                // Single lookup to get the proof strategy.
+                let proof_strategy = self
+                    .get_destination(&dest_hash)
+                    .map(|d| d.proof_strategy)
+                    .unwrap_or(ProofStrategy::ProveNone);
+
+                let mut dec_buf = [0u8; MTU];
+                let decrypted = match self.identity.decrypt(payload, &mut dec_buf) {
+                    Ok(n) => dec_buf[..n].to_vec(),
+                    Err(_) => payload.to_vec(),
                 };
 
                 let mut packets = Vec::new();
 
-                // Generate proof if strategy requires it
-                if self.primary_dest.proof_strategy == ProofStrategy::ProveAll {
+                if proof_strategy == ProofStrategy::ProveAll {
                     packets.extend(self.proof_outbound(&packet_hash));
                 }
 
@@ -530,14 +631,23 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 link_id,
                 data,
                 context,
-            } => IngestOutcome {
-                event: Some(NodeEvent::LinkData {
-                    link_id,
-                    data,
-                    context,
-                }),
-                packets: Vec::new(),
-            },
+            } => {
+                let mut packets = Vec::new();
+                // If this is a keepalive request, send the response back
+                if context == rete_core::CONTEXT_KEEPALIVE {
+                    if let Some(pkt) = self.transport.build_keepalive_packet(&link_id, false, rng) {
+                        packets.push(OutboundPacket::broadcast(pkt));
+                    }
+                }
+                IngestOutcome {
+                    event: Some(NodeEvent::LinkData {
+                        link_id,
+                        data,
+                        context,
+                    }),
+                    packets,
+                }
+            }
             IngestResult::ChannelMessages {
                 link_id,
                 messages,
@@ -573,9 +683,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             } => {
                 // Auto-accept: send first request
                 let mut packets = Vec::new();
-                if let Some(pkt) =
-                    self.transport
-                        .accept_resource(&link_id, &resource_hash, rng)
+                if let Some(pkt) = self
+                    .transport
+                    .accept_resource(&link_id, &resource_hash, rng)
                 {
                     packets.push(OutboundPacket::broadcast(pkt));
                 }
@@ -603,8 +713,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 if current == total && total > 0 {
                     // Step 1: assemble data and build proof (borrows transport mutably)
                     let assembly_result = {
-                        if let Some(res) =
-                            self.transport.get_resource_mut(&link_id, &resource_hash)
+                        if let Some(res) = self.transport.get_resource_mut(&link_id, &resource_hash)
                         {
                             match res.assemble() {
                                 Ok(data) => {
@@ -654,15 +763,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                                 .payload(&proof)
                                 .build()
                             {
-                                packets.push(OutboundPacket::broadcast(
-                                    pkt_buf[..pkt_len].to_vec(),
-                                ));
+                                packets
+                                    .push(OutboundPacket::broadcast(pkt_buf[..pkt_len].to_vec()));
                             }
                         }
                         // Drain any resource outbound packets
                         for pkt in self.transport.drain_resource_outbound() {
                             packets.push(OutboundPacket::broadcast(pkt));
                         }
+                        // Clean up completed receiver resource so it doesn't
+                        // interfere with subsequent resource operations on this link
+                        self.transport.cleanup_resources();
                         return IngestOutcome {
                             event: Some(NodeEvent::ResourceComplete {
                                 link_id,
@@ -675,6 +786,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         for pkt in self.transport.drain_resource_outbound() {
                             packets.push(OutboundPacket::broadcast(pkt));
                         }
+                        self.transport.cleanup_resources();
                         return IngestOutcome {
                             event: Some(NodeEvent::ResourceFailed {
                                 link_id,
@@ -757,6 +869,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     pub fn handle_tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> IngestOutcome {
         let result = self.transport.tick(now);
         let mut packets = self.flush_announces(now);
+
+        // Drain any resource outbound packets queued during ingest
+        for pkt in self.transport.drain_resource_outbound() {
+            packets.push(OutboundPacket::broadcast(pkt));
+        }
 
         // Send keepalives for idle links
         for ka in self.transport.build_pending_keepalives(now, rng) {
@@ -1638,6 +1755,178 @@ mod tests {
         let unknown_dest = [0xFFu8; TRUNCATED_HASH_LEN];
         let result = core.build_data_packet(&unknown_dest, b"hello", &mut rng, 100);
         assert!(result.is_none(), "should return None when no cached key");
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-destination tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_register_destination_adds_to_transport() {
+        let mut core = make_core(b"register-dest-test");
+        let hash = core.register_destination("lxmf", &["delivery"]);
+        // Should be a valid 16-byte hash, different from primary
+        assert_ne!(hash, *core.dest_hash());
+        // Transport should have it as local
+        assert!(core.get_destination(&hash).is_some());
+    }
+
+    #[test]
+    fn test_register_destination_returns_correct_dest_hash() {
+        let core_seed = b"dest-hash-verify";
+        let mut core = make_core(core_seed);
+        let hash = core.register_destination("lxmf", &["delivery"]);
+
+        // Compute expected hash independently
+        let identity = Identity::from_seed(core_seed).unwrap();
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
+        let expected = rete_core::destination_hash(expanded, Some(&identity.hash()));
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_register_destination_multiple() {
+        let mut core = make_core(b"multi-dest-test");
+        let h1 = core.register_destination("lxmf", &["delivery"]);
+        let h2 = core.register_destination("myapp", &["service"]);
+        assert_ne!(h1, h2);
+        assert!(core.get_destination(&h1).is_some());
+        assert!(core.get_destination(&h2).is_some());
+    }
+
+    #[test]
+    fn test_primary_dest_still_accessible_after_register() {
+        let mut core = make_core(b"primary-access-test");
+        let primary = *core.dest_hash();
+        core.register_destination("lxmf", &["delivery"]);
+        assert!(core.get_destination(&primary).is_some());
+        assert_eq!(core.get_destination(&primary).unwrap().app_name, "testapp");
+    }
+
+    #[test]
+    fn test_get_destination_mut() {
+        let mut core = make_core(b"dest-mut-test");
+        let hash = core.register_destination("lxmf", &["delivery"]);
+        let dest = core.get_destination_mut(&hash).unwrap();
+        dest.set_proof_strategy(ProofStrategy::ProveAll);
+        assert_eq!(
+            core.get_destination(&hash).unwrap().proof_strategy,
+            ProofStrategy::ProveAll
+        );
+    }
+
+    #[test]
+    fn test_ingest_data_for_secondary_dest_decrypts() {
+        let mut core = make_core(b"secondary-decrypt-test");
+        let lxmf_hash = core.register_destination("lxmf", &["delivery"]);
+        let mut rng = rand::thread_rng();
+
+        // Build encrypted DATA addressed to the LXMF destination
+        let node_id = Identity::from_seed(b"secondary-decrypt-test").unwrap();
+        let recipient = Identity::from_public_key(&node_id.public_key()).unwrap();
+        let plaintext = b"lxmf message";
+        let mut ct_buf = [0u8; MTU];
+        let ct_len = recipient.encrypt(plaintext, &mut rng, &mut ct_buf).unwrap();
+
+        let mut pkt_buf = [0u8; MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(&lxmf_hash)
+            .context(0x00)
+            .payload(&ct_buf[..ct_len])
+            .build()
+            .unwrap();
+
+        let outcome = core.handle_ingest(&pkt_buf[..pkt_len], 1000, 0, &mut rng);
+        match outcome.event {
+            Some(NodeEvent::DataReceived { dest_hash, payload }) => {
+                assert_eq!(dest_hash, lxmf_hash);
+                assert_eq!(payload, plaintext);
+            }
+            other => panic!("expected DataReceived, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ingest_data_for_secondary_dest_proves() {
+        let mut core = make_core(b"secondary-prove-test");
+        let lxmf_hash = core.register_destination("lxmf", &["delivery"]);
+        // Set ProveAll on the secondary dest
+        core.get_destination_mut(&lxmf_hash)
+            .unwrap()
+            .set_proof_strategy(ProofStrategy::ProveAll);
+        let mut rng = rand::thread_rng();
+
+        // Build encrypted DATA addressed to the LXMF destination
+        let node_id = Identity::from_seed(b"secondary-prove-test").unwrap();
+        let recipient = Identity::from_public_key(&node_id.public_key()).unwrap();
+        let mut ct_buf = [0u8; MTU];
+        let ct_len = recipient
+            .encrypt(b"prove me", &mut rng, &mut ct_buf)
+            .unwrap();
+
+        let mut pkt_buf = [0u8; MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(&lxmf_hash)
+            .context(0x00)
+            .payload(&ct_buf[..ct_len])
+            .build()
+            .unwrap();
+
+        let outcome = core.handle_ingest(&pkt_buf[..pkt_len], 1000, 0, &mut rng);
+        let proof_packets: Vec<_> = outcome
+            .packets
+            .iter()
+            .filter(|p| {
+                Packet::parse(&p.data)
+                    .map(|pkt| pkt.packet_type == PacketType::Proof)
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(
+            proof_packets.len(),
+            1,
+            "secondary dest should generate proof"
+        );
+    }
+
+    #[test]
+    fn test_queue_announce_for_secondary_dest() {
+        let mut core = make_core(b"announce-secondary-test");
+        let lxmf_hash = core.register_destination("lxmf", &["delivery"]);
+        let mut rng = rand::thread_rng();
+
+        assert!(core.queue_announce_for(&lxmf_hash, None, &mut rng, 1000));
+        let pending = core.transport.pending_outbound(1000);
+        assert_eq!(pending.len(), 1);
+
+        let pkt = Packet::parse(&pending[0]).unwrap();
+        assert_eq!(pkt.packet_type, PacketType::Announce);
+        assert_eq!(pkt.destination_hash, &lxmf_hash);
+    }
+
+    #[test]
+    fn test_queue_announce_for_with_app_data() {
+        let mut core = make_core(b"announce-appdata-test");
+        let lxmf_hash = core.register_destination("lxmf", &["delivery"]);
+        let mut rng = rand::thread_rng();
+
+        let app_data = b"some app data";
+        assert!(core.queue_announce_for(&lxmf_hash, Some(app_data), &mut rng, 1000));
+        let pending = core.transport.pending_outbound(1000);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn test_queue_announce_for_unknown_dest_fails() {
+        let mut core = make_core(b"announce-unknown-test");
+        let mut rng = rand::thread_rng();
+        let unknown = [0xFF; TRUNCATED_HASH_LEN];
+        assert!(!core.queue_announce_for(&unknown, None, &mut rng, 1000));
     }
 
     #[test]

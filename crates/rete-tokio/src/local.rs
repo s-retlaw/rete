@@ -213,9 +213,9 @@ async fn client_read_task(
 
     loop {
         let n = match reader.read(&mut read_buf).await {
-            Ok(0) => break,       // EOF
+            Ok(0) => break, // EOF
             Ok(n) => n,
-            Err(_) => break,      // Error
+            Err(_) => break, // Error
         };
 
         for &byte in &read_buf[..n] {
@@ -489,14 +489,12 @@ mod tests {
                     broadcaster.broadcast(test_data, None).await;
 
                     // Both clients should receive it
-                    let frame1 =
-                        timeout(Duration::from_secs(2), hdlc_read(&mut client1))
-                            .await
-                            .expect("timeout on client1");
-                    let frame2 =
-                        timeout(Duration::from_secs(2), hdlc_read(&mut client2))
-                            .await
-                            .expect("timeout on client2");
+                    let frame1 = timeout(Duration::from_secs(2), hdlc_read(&mut client1))
+                        .await
+                        .expect("timeout on client1");
+                    let frame2 = timeout(Duration::from_secs(2), hdlc_read(&mut client2))
+                        .await
+                        .expect("timeout on client2");
 
                     assert_eq!(frame1, test_data);
                     assert_eq!(frame2, test_data);

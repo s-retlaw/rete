@@ -212,8 +212,7 @@ impl EmbassyNode {
                 Either3::Second(()) => {
                     next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
                     let now = Instant::now().as_secs();
-                    self.core
-                        .queue_announce(None, rng, self.announce_time());
+                    self.core.queue_announce(None, rng, self.announce_time());
                     for pkt in &self.core.flush_announces(now) {
                         let _ = iface.send(&pkt.data).await;
                     }

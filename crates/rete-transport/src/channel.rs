@@ -422,7 +422,11 @@ mod tests {
             ch.receive(&env.pack());
         }
 
-        assert_eq!(ch.ready_count(), 0, "no messages should be ready (missing seq 0)");
+        assert_eq!(
+            ch.ready_count(),
+            0,
+            "no messages should be ready (missing seq 0)"
+        );
 
         // Try to add one more — should be dropped (buffer full)
         let overflow = ChannelEnvelope {

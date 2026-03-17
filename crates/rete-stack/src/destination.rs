@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rete_core::{Identity, Token, TRUNCATED_HASH_LEN, NAME_HASH_LEN};
+use rete_core::{Identity, Token, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
 
 use crate::ProofStrategy;
@@ -191,11 +191,17 @@ impl Destination {
     ) -> Result<usize, rete_core::Error> {
         match self.dest_type {
             DestinationType::Single => {
-                let id = self.identity.as_ref().ok_or(rete_core::Error::CryptoError)?;
+                let id = self
+                    .identity
+                    .as_ref()
+                    .ok_or(rete_core::Error::CryptoError)?;
                 id.encrypt(plaintext, rng, out)
             }
             DestinationType::Group => {
-                let token = self.group_token.as_ref().ok_or(rete_core::Error::CryptoError)?;
+                let token = self
+                    .group_token
+                    .as_ref()
+                    .ok_or(rete_core::Error::CryptoError)?;
                 token.encrypt(plaintext, rng, out)
             }
             DestinationType::Plain => {
@@ -218,11 +224,17 @@ impl Destination {
     pub fn decrypt(&self, ciphertext: &[u8], out: &mut [u8]) -> Result<usize, rete_core::Error> {
         match self.dest_type {
             DestinationType::Single => {
-                let id = self.identity.as_ref().ok_or(rete_core::Error::CryptoError)?;
+                let id = self
+                    .identity
+                    .as_ref()
+                    .ok_or(rete_core::Error::CryptoError)?;
                 id.decrypt(ciphertext, out)
             }
             DestinationType::Group => {
-                let token = self.group_token.as_ref().ok_or(rete_core::Error::CryptoError)?;
+                let token = self
+                    .group_token
+                    .as_ref()
+                    .ok_or(rete_core::Error::CryptoError)?;
                 token.decrypt(ciphertext, out)
             }
             DestinationType::Plain => {

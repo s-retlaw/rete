@@ -173,9 +173,7 @@ impl DedupRing {
 
         // Check if hash exists and is within TTL
         for entry in &self.entries {
-            if entry.hash == hash
-                && now.duration_since(entry.time).as_secs_f64() < DEDUP_TTL_SECS
-            {
+            if entry.hash == hash && now.duration_since(entry.time).as_secs_f64() < DEDUP_TTL_SECS {
                 return true;
             }
         }
@@ -562,11 +560,7 @@ impl ReteInterface for AutoInterface {
             };
 
             // Ignore packets from ourselves
-            if self
-                .interfaces
-                .iter()
-                .any(|i| i.link_local == src_addr)
-            {
+            if self.interfaces.iter().any(|i| i.link_local == src_addr) {
                 continue;
             }
 
@@ -680,10 +674,7 @@ async fn handle_discovery_packet(
     let expected = compute_discovery_token(group_id, &src_str);
 
     if data.len() < 32 || data[..32] != expected {
-        log::debug!(
-            "AutoInterface: invalid discovery token from {}",
-            src_ip
-        );
+        log::debug!("AutoInterface: invalid discovery token from {}", src_ip);
         return;
     }
 
@@ -767,8 +758,7 @@ async fn peer_jobs_loop(
             if let Some((iface, token, _)) = iface_tokens.iter().find(|(i, _, _)| i.name == *ifname)
             {
                 if let Ok(sock) = make_announce_socket(iface.index).await {
-                    let dest =
-                        SocketAddrV6::new(*peer_addr, discovery_port + 1, 0, iface.index);
+                    let dest = SocketAddrV6::new(*peer_addr, discovery_port + 1, 0, iface.index);
                     if let Err(e) = sock.send_to(token, dest).await {
                         log::debug!(
                             "AutoInterface: reverse announce to {} failed: {e}",
@@ -786,10 +776,7 @@ async fn peer_jobs_loop(
 // ---------------------------------------------------------------------------
 
 /// Bind a UDP IPv6 socket with SO_REUSEADDR (and SO_REUSEPORT on supported platforms).
-fn bind_udp6_reuse(
-    port: u16,
-    scope_id: Option<u32>,
-) -> std::io::Result<std::net::UdpSocket> {
+fn bind_udp6_reuse(port: u16, scope_id: Option<u32>) -> std::io::Result<std::net::UdpSocket> {
     let socket = socket2::Socket::new(
         socket2::Domain::IPV6,
         socket2::Type::DGRAM,
@@ -879,10 +866,7 @@ mod tests {
         assert_eq!(segs[7], 0x31e1);
 
         // Single zero segment is rendered as ":0:", not "::"
-        assert_eq!(
-            addr.to_string(),
-            "ff12:0:d70b:fb1c:16e4:5e39:485e:31e1"
-        );
+        assert_eq!(addr.to_string(), "ff12:0:d70b:fb1c:16e4:5e39:485e:31e1");
     }
 
     #[test]

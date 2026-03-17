@@ -132,12 +132,7 @@ fn read_msgpack_map_len(data: &[u8], pos: &mut usize) -> Result<usize, &'static 
         if *pos + 4 > data.len() {
             return Err("truncated map32 length");
         }
-        let n = u32::from_be_bytes([
-            data[*pos],
-            data[*pos + 1],
-            data[*pos + 2],
-            data[*pos + 3],
-        ]);
+        let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
         *pos += 4;
         Ok(n as usize)
     } else {
@@ -176,12 +171,8 @@ fn read_msgpack_str<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], &'s
         if *pos + 4 > data.len() {
             return Err("truncated str32 length");
         }
-        let n = u32::from_be_bytes([
-            data[*pos],
-            data[*pos + 1],
-            data[*pos + 2],
-            data[*pos + 3],
-        ]) as usize;
+        let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+            as usize;
         *pos += 4;
         n
     } else {
@@ -218,12 +209,7 @@ fn read_msgpack_array_len(data: &[u8], pos: &mut usize) -> Result<usize, &'stati
         if *pos + 4 > data.len() {
             return Err("truncated array32 length");
         }
-        let n = u32::from_be_bytes([
-            data[*pos],
-            data[*pos + 1],
-            data[*pos + 2],
-            data[*pos + 3],
-        ]);
+        let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
         *pos += 4;
         Ok(n as usize)
     } else {
@@ -262,12 +248,8 @@ fn read_msgpack_bin<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], &'s
             if *pos + 4 > data.len() {
                 return Err("truncated bin32 length");
             }
-            let n = u32::from_be_bytes([
-                data[*pos],
-                data[*pos + 1],
-                data[*pos + 2],
-                data[*pos + 3],
-            ]) as usize;
+            let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+                as usize;
             *pos += 4;
             n
         }
@@ -283,10 +265,7 @@ fn read_msgpack_bin<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], &'s
 
 /// Read a msgpack bin or str value (Python msgpack sometimes encodes bytes as
 /// either bin or str depending on version/settings). Advances `pos`.
-fn read_msgpack_bin_or_str<'a>(
-    data: &'a [u8],
-    pos: &mut usize,
-) -> Result<&'a [u8], &'static str> {
+fn read_msgpack_bin_or_str<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], &'static str> {
     if *pos >= data.len() {
         return Err("unexpected end of msgpack data");
     }
@@ -332,12 +311,8 @@ fn read_msgpack_uint(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> 
             if *pos + 4 > data.len() {
                 return Err("truncated uint32");
             }
-            let v = u32::from_be_bytes([
-                data[*pos],
-                data[*pos + 1],
-                data[*pos + 2],
-                data[*pos + 3],
-            ]) as u64;
+            let v = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+                as u64;
             *pos += 4;
             Ok(v)
         }
@@ -628,7 +603,7 @@ pub struct Resource {
 
     // -- Data storage --
     /// Full data (sender has it upfront, receiver assembles).
-    data: Vec<u8>,
+    pub data: Vec<u8>,
     /// Individual segments.
     parts: Vec<Vec<u8>>,
     /// 4-byte truncated SHA-256 hash of each segment (includes random_hash).
@@ -767,17 +742,17 @@ impl Resource {
         write_msgpack_fixstr1(&mut buf, b'r');
         write_msgpack_bin(&mut buf, &self.random_hash);
 
-        // "o" = original_hash (None for non-split)
+        // "o" = original_hash (same as resource_hash for non-split resources)
         write_msgpack_fixstr1(&mut buf, b'o');
-        write_msgpack_nil(&mut buf);
+        write_msgpack_bin(&mut buf, &self.resource_hash);
 
-        // "i" = segment_index (0 for non-split)
+        // "i" = segment_index (1 for non-split, matching Python RNS convention)
         write_msgpack_fixstr1(&mut buf, b'i');
-        write_msgpack_uint(&mut buf, 0);
+        write_msgpack_uint(&mut buf, 1);
 
-        // "l" = total_segments for split (0 for non-split)
+        // "l" = total_segments for split (1 for non-split, matching Python RNS convention)
         write_msgpack_fixstr1(&mut buf, b'l');
-        write_msgpack_uint(&mut buf, 0);
+        write_msgpack_uint(&mut buf, 1);
 
         // "q" = request_id (None for normal resources)
         write_msgpack_fixstr1(&mut buf, b'q');
@@ -892,6 +867,25 @@ impl Resource {
             self.state = ResourceState::Failed;
             false
         }
+    }
+
+    /// Extract the resource hash from a RESOURCE_REQ payload without modifying state.
+    ///
+    /// Returns `None` if the payload is too short to contain a resource hash.
+    pub fn extract_request_hash(req_payload: &[u8]) -> Option<[u8; 32]> {
+        if req_payload.is_empty() {
+            return None;
+        }
+        let mut offset = 1;
+        if req_payload[0] == HASHMAP_IS_EXHAUSTED {
+            offset += MAPHASH_LEN;
+        }
+        if req_payload.len() < offset + 32 {
+            return None;
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&req_payload[offset..offset + 32]);
+        Some(hash)
     }
 
     /// Handle cancel from the receiver.
@@ -1043,8 +1037,7 @@ impl Resource {
         let total_segments = num_parts.ok_or("missing 'n' (num_parts) in advertisement")?;
         let resource_hash =
             resource_hash_bytes.ok_or("missing 'h' (resource_hash) in advertisement")?;
-        let random_hash =
-            random_hash_bytes.ok_or("missing 'r' (random_hash) in advertisement")?;
+        let random_hash = random_hash_bytes.ok_or("missing 'r' (random_hash) in advertisement")?;
         let hashmap_bytes = hashmap_raw.ok_or("missing 'm' (hashmap) in advertisement")?;
 
         let flags = ResourceFlags::from_byte(flags_byte);
@@ -1143,8 +1136,8 @@ impl Resource {
 
         // Signal exhausted ONLY if we don't have all part hashes yet
         // and couldn't fill the window from known hashes.
-        let exhausted = self.part_hashes.len() < self.total_segments
-            && requested_hashes.len() < self.window;
+        let exhausted =
+            self.part_hashes.len() < self.total_segments && requested_hashes.len() < self.window;
 
         let mut payload = Vec::new();
 
@@ -1328,7 +1321,11 @@ mod tests {
         let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
         let adv = sender.build_advertisement();
         // First byte should be a fixmap header (0x80 | n)
-        assert_eq!(adv[0] & 0xf0, 0x80, "advertisement should start with fixmap header");
+        assert_eq!(
+            adv[0] & 0xf0,
+            0x80,
+            "advertisement should start with fixmap header"
+        );
         let map_len = (adv[0] & 0x0f) as usize;
         assert_eq!(map_len, 11, "advertisement map should have 11 entries");
     }
@@ -1568,7 +1565,10 @@ mod tests {
         // Now "receive" the segment data (bytes 0..143)
         let segment: Vec<u8> = (0u8..144).collect();
         let all_received = receiver.receive_part(&segment);
-        assert!(all_received, "receive_part should match the Python-computed hash");
+        assert!(
+            all_received,
+            "receive_part should match the Python-computed hash"
+        );
 
         // Assemble and verify
         let assembled = receiver.assemble().unwrap();

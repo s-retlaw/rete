@@ -7,6 +7,25 @@ validated against the Python reference.
 
 Do NOT commit or push unless explicitly asked by the user.
 
+## Verification — REQUIRED before finishing any coding task
+
+After making changes, you MUST run the full test suite before reporting completion:
+
+```bash
+# Unit tests
+cargo test --workspace
+
+# E2E interop tests (from tests/interop/)
+cd tests/interop && for test in live_interop link_interop channel_interop resource_interop relay_interop transport_relay_interop path_request_interop proof_routing_interop ifac_interop robustness_interop; do
+  uv run python ${test}.py --rust-binary ../../target/debug/rete-linux --timeout 45
+done
+```
+
+If any E2E test fails, investigate and fix before declaring the task done.
+Timing-sensitive tests may need `--timeout 60`. A test that passes with
+longer timeout but fails with shorter is acceptable — note it but don't
+block on it.
+
 ---
 
 ## Reference material
