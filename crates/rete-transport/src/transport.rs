@@ -63,7 +63,7 @@ pub const PATH_REQUEST_DEST: [u8; TRUNCATED_HASH_LEN] = [
 /// An entry in the reverse table, keyed by truncated packet hash.
 ///
 /// Used to route replies back along the path the original packet traversed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ReverseEntry {
     /// Monotonic timestamp when this entry was created.
     pub timestamp: u64,
@@ -572,31 +572,40 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     if tid_arr == local_id {
                         let mut dest = [0u8; TRUNCATED_HASH_LEN];
                         dest.copy_from_slice(pkt.destination_hash);
+                        let is_link_request = pkt.packet_type == PacketType::LinkRequest;
+
+                        // Drop borrow on raw before mutating
+                        drop(pkt);
 
                         raw[1] = raw[1].saturating_add(1);
 
                         let mut trunc_hash = [0u8; TRUNCATED_HASH_LEN];
                         trunc_hash.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
-                        let _ = self.reverse_table.insert(
-                            trunc_hash,
-                            ReverseEntry {
-                                timestamp: now,
-                                received_on: iface,
-                                forwarded_to: 0,
-                            },
-                        );
+                        let reverse_entry = ReverseEntry {
+                            timestamp: now,
+                            received_on: iface,
+                            forwarded_to: 0,
+                        };
+                        let _ = self.reverse_table.insert(trunc_hash, reverse_entry);
+
+                        // For LINKREQUEST: also store reverse entry keyed by link_id,
+                        // so the LRPROOF (which uses link_id as destination) can be
+                        // routed back through this relay.
+                        if is_link_request {
+                            if let Ok(lid) = compute_link_id(raw) {
+                                let _ = self.reverse_table.insert(lid, reverse_entry);
+                            }
+                        }
 
                         return match self.paths.get(&dest) {
-                            Some(path) if path.hops > 1 => {
-                                if let Some(via) = path.via {
-                                    raw[2..18].copy_from_slice(&via);
-                                }
+                            Some(Path { via: Some(via), .. }) => {
+                                raw[2..18].copy_from_slice(via);
                                 IngestResult::Forward {
                                     raw: &raw[..len],
                                     source_iface: iface,
                                 }
                             }
-                            Some(path) if path.hops <= 1 => {
+                            Some(_path) => {
                                 let new_flags = raw[0] & 0x0F;
                                 raw[0] = new_flags;
                                 raw.copy_within(18..len, 2);
@@ -651,15 +660,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 }
             }
             PacketType::Proof => {
-                // Check for LRPROOF (link proof from responder to initiator)
-                if pkt.context == CONTEXT_LRPROOF && pkt.dest_type == DestType::Link {
-                    let mut dh = [0u8; TRUNCATED_HASH_LEN];
-                    dh.copy_from_slice(pkt.destination_hash);
-                    return self.handle_lrproof(&dh, pkt.payload, now);
-                }
-
                 let mut dh = [0u8; TRUNCATED_HASH_LEN];
                 dh.copy_from_slice(pkt.destination_hash);
+
+                // Check for LRPROOF (link proof from responder to initiator).
+                // Only handle locally if we have a pending link for this link_id;
+                // otherwise fall through to reverse-table forwarding (relay case).
+                if pkt.context == CONTEXT_LRPROOF && pkt.dest_type == DestType::Link {
+                    if self.links.contains_key(&dh) {
+                        return self.handle_lrproof(&dh, pkt.payload, now);
+                    }
+                }
 
                 // Check receipt table for delivery proof (DATA packets)
                 if let Some(packet_hash) = self.receipts.validate_proof(&dh, pkt.payload) {
