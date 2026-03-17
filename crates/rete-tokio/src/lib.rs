@@ -192,14 +192,39 @@ impl TokioNode {
     pub async fn run_with_commands<I, F>(
         &mut self,
         iface: &mut I,
-        mut cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
-        mut on_event: F,
+        cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
+        on_event: F,
     ) where
         I: ReteInterface,
         F: FnMut(NodeEvent),
     {
-        let mut rng = rand::thread_rng();
-
+        self.run_with_app_handler(
+            iface,
+            cmd_rx,
+            on_event,
+            |_, _, _: &mut rand::rngs::ThreadRng| None,
+            rand::thread_rng(),
+        )
+        .await;
+    }
+    /// Run the main event loop with a single interface, command channel, and
+    /// application-level command handler.
+    ///
+    /// The `rng` parameter is used for both the runtime's own operations
+    /// and passed to the app command handler for encryption/signing.
+    pub async fn run_with_app_handler<I, F, C, R>(
+        &mut self,
+        iface: &mut I,
+        mut cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
+        mut on_event: F,
+        mut on_app_cmd: C,
+        mut rng: R,
+    ) where
+        I: ReteInterface,
+        F: FnMut(NodeEvent),
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        C: FnMut(NodeCommand, &mut HostedNodeCore, &mut R) -> Option<Vec<OutboundPacket>>,
+    {
         // Queue initial announce through transport (gets immediate + one retransmit)
         {
             let now = current_time_secs();
@@ -263,9 +288,15 @@ impl TokioNode {
                 }
                 cmd = cmd_rx.recv() => {
                     if let Some(cmd) = cmd {
-                        let (packets, cont) = self.handle_command(cmd, &mut rng);
-                        dispatch_single(iface, &packets).await;
-                        if !cont { break; }
+                        if matches!(&cmd, NodeCommand::AppCommand { .. }) {
+                            if let Some(pkts) = on_app_cmd(cmd, &mut self.core, &mut rng) {
+                                dispatch_single(iface, &pkts).await;
+                            }
+                        } else {
+                            let (packets, cont) = self.handle_command(cmd, &mut rng);
+                            dispatch_single(iface, &packets).await;
+                            if !cont { break; }
+                        }
                     }
                 }
                 _ = announce_timer.tick() => {

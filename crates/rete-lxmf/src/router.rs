@@ -182,7 +182,20 @@ impl LxmfRouter {
                     LxmfEvent::Other(event)
                 }
             }
+            NodeEvent::LinkData { ref data, .. } => {
+                // Direct delivery: small LXMF messages are sent as link data.
+                // The data is the full packed LXMF message (same format as resource).
+                if let Some(msg) = Self::try_parse_lxmf_resource(data) {
+                    LxmfEvent::MessageReceived {
+                        message: msg,
+                        method: DeliveryMethod::Direct,
+                    }
+                } else {
+                    LxmfEvent::Other(event)
+                }
+            }
             NodeEvent::ResourceComplete { ref data, .. } => {
+                // Direct delivery: large LXMF messages are sent as resources.
                 // Note: Python LXMF compresses resource data with bz2. The example
                 // binary decompresses ResourceComplete data before it reaches here.
                 // If you call handle_event() directly, decompress first.

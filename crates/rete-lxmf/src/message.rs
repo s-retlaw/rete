@@ -239,10 +239,11 @@ type DecodedPayload = (f64, Vec<u8>, Vec<u8>, BTreeMap<u8, Vec<u8>>);
 fn decode_msgpack_payload(data: &[u8]) -> Result<DecodedPayload, &'static str> {
     let mut pos = 0;
 
-    // Read array header (should be fixarray of 4)
+    // Read array header: 4 elements [ts, title, content, fields] or
+    // 5 elements [ts, title, content, fields, stamp] (Python LXMF >= 0.9.x)
     let arr_len = read_array_len(data, &mut pos)?;
-    if arr_len != 4 {
-        return Err("expected array of 4 elements");
+    if !(4..=5).contains(&arr_len) {
+        return Err("expected array of 4 or 5 elements");
     }
 
     // Read timestamp (float64)

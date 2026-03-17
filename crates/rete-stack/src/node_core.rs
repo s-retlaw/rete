@@ -159,6 +159,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         self.primary_dest.hash()
     }
 
+    /// Returns a reference to the node's identity (for signing, etc.).
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
     /// Set an auto-reply message sent to any peer that announces.
     pub fn set_auto_reply(&mut self, msg: Option<Vec<u8>>) {
         self.auto_reply = msg;

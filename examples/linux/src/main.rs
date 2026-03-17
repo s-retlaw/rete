@@ -16,7 +16,8 @@ use rete_core::Identity;
 use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
-use rete_lxmf::{LxmfEvent, LxmfRouter};
+use rete_lxmf::{LXMessage, LxmfEvent, LxmfRouter};
+use rete_stack::OutboundPacket;
 use rete_tokio::local::{LocalClient, LocalServer};
 use rete_tokio::{interface_task, InboundMsg, NodeCommand, NodeEvent, TokioNode};
 
@@ -160,6 +161,12 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
                 payload: parts[3].as_bytes().to_vec(),
             })
         }
+        "lxmf-announce" => Some(NodeCommand::AppCommand {
+            name: "lxmf-announce".to_string(),
+            dest_hash: None,
+            link_id: None,
+            payload: vec![],
+        }),
         "quit" => Some(NodeCommand::Shutdown),
         _ => {
             eprintln!("[rete] unknown command: {line}");
@@ -369,9 +376,33 @@ async fn main() {
         hex::encode(lxmf_router.delivery_dest_hash())
     );
 
-    // Note: LXMF delivery announce is NOT queued at startup to avoid
-    // confusing E2E test scripts that expect a single announce. Use the
-    // "announce" stdin command or --lxmf-announce flag to send it explicitly.
+    // Parse --lxmf-peer-seed <seed> (pre-register LXMF peer identity)
+    let lxmf_peer_seed = args
+        .windows(2)
+        .find(|w| w[0] == "--lxmf-peer-seed")
+        .map(|w| w[1].clone());
+    if let Some(ref ps) = lxmf_peer_seed {
+        let peer = Identity::from_seed(ps.as_bytes()).expect("invalid lxmf peer seed");
+        let now = rete_tokio::current_time_secs();
+        node.core.register_peer(&peer, "lxmf", &["delivery"], now);
+        // Log the computed dest hash (register_peer stores it internally)
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
+        let peer_dest = rete_core::destination_hash(expanded, Some(&peer.hash()));
+        eprintln!(
+            "[rete] pre-registered LXMF peer: {}",
+            hex::encode(peer_dest)
+        );
+    }
+
+    // --lxmf-announce: queue LXMF delivery announce at startup
+    let lxmf_announce = args.iter().any(|a| a == "--lxmf-announce");
+    if lxmf_announce {
+        let mut rng = rand::thread_rng();
+        let now = rete_tokio::current_time_secs();
+        lxmf_router.queue_delivery_announce(&mut node.core, &mut rng, now);
+        eprintln!("[rete] LXMF delivery announce queued");
+    }
 
     // Create command channel + stdin reader
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<NodeCommand>(64);
@@ -407,8 +438,14 @@ async fn main() {
             );
         }
         eprintln!("[rete] AutoInterface ready, discovering peers ...");
-        node.run_with_commands(&mut iface, cmd_rx, |e| on_event(e, &lxmf_router))
-            .await;
+        node.run_with_app_handler(
+            &mut iface,
+            cmd_rx,
+            |e| on_event(e, &lxmf_router),
+            |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
+            rand::thread_rng(),
+        )
+        .await;
     } else if let Some(ref client_name) = local_client_name {
         // Local client mode: connect to a shared instance server via Unix socket.
         // Uses single-interface mode (ReteInterface trait).
@@ -421,8 +458,14 @@ async fn main() {
             }
         };
         eprintln!("[rete] connected to local instance '{}'", client_name);
-        node.run_with_commands(&mut iface, cmd_rx, |e| on_event(e, &lxmf_router))
-            .await;
+        node.run_with_app_handler(
+            &mut iface,
+            cmd_rx,
+            |e| on_event(e, &lxmf_router),
+            |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
+            rand::thread_rng(),
+        )
+        .await;
     } else if let Some(path) = serial_path {
         eprintln!("[rete] opening serial port {} at {} baud ...", path, baud);
         let mut iface = match SerialInterface::open(path, baud) {
@@ -433,8 +476,14 @@ async fn main() {
             }
         };
         eprintln!("[rete] serial port open");
-        node.run_with_commands(&mut iface, cmd_rx, |e| on_event(e, &lxmf_router))
-            .await;
+        node.run_with_app_handler(
+            &mut iface,
+            cmd_rx,
+            |e| on_event(e, &lxmf_router),
+            |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
+            rand::thread_rng(),
+        )
+        .await;
     } else if local_server_name.is_some() || addrs.len() > 1 || (auto_enabled && !addrs.is_empty())
     {
         // Multi-interface mode: TCP endpoints + optional local server + optional AutoInterface.
@@ -557,8 +606,14 @@ async fn main() {
             iface.set_ifac(key);
         }
         eprintln!("[rete] connected");
-        node.run_with_commands(&mut iface, cmd_rx, |e| on_event(e, &lxmf_router))
-            .await;
+        node.run_with_app_handler(
+            &mut iface,
+            cmd_rx,
+            |e| on_event(e, &lxmf_router),
+            |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
+            rand::thread_rng(),
+        )
+        .await;
     }
 }
 
@@ -699,6 +754,30 @@ async fn dispatch_with_local(
 }
 
 fn on_event(event: NodeEvent, lxmf_router: &LxmfRouter) {
+    // For ResourceComplete, try bz2 decompression before passing to LXMF router.
+    // Python RNS compresses resource data with bz2, so we need to decompress
+    // before the LXMF router can parse it.
+    let event = match event {
+        NodeEvent::ResourceComplete {
+            link_id,
+            resource_hash,
+            ref data,
+        } if data.starts_with(b"BZh") => {
+            use std::io::Read;
+            let mut decompressor = bzip2::read::BzDecoder::new(&data[..]);
+            let mut decompressed = Vec::new();
+            match decompressor.read_to_end(&mut decompressed) {
+                Ok(_) => NodeEvent::ResourceComplete {
+                    link_id,
+                    resource_hash,
+                    data: decompressed,
+                },
+                Err(_) => event,
+            }
+        }
+        other => other,
+    };
+
     // Try LXMF parsing first
     let lxmf_event = lxmf_router.handle_event(event);
     match lxmf_event {
@@ -873,27 +952,17 @@ fn on_node_event(event: NodeEvent) {
             resource_hash,
             ref data,
         } => {
-            // Try bz2 decompression (Python RNS compresses resource data)
-            let final_data = if data.starts_with(b"BZh") {
-                use std::io::Read;
-                let mut decompressor = bzip2::read::BzDecoder::new(&data[..]);
-                let mut decompressed = Vec::new();
-                match decompressor.read_to_end(&mut decompressed) {
-                    Ok(_) => decompressed,
-                    Err(_) => data.clone(),
-                }
-            } else {
-                data.clone()
-            };
-            let display = match std::str::from_utf8(&final_data) {
+            // bz2 decompression is already handled in on_event() before
+            // this point — the data here is already decompressed.
+            let display = match std::str::from_utf8(data) {
                 Ok(text) => text.to_string(),
-                Err(_) => hex::encode(&final_data),
+                Err(_) => hex::encode(data),
             };
             eprintln!(
                 "[rete] RESOURCE complete on link={} hash={} len={}",
                 hex::encode(link_id),
                 hex::encode(resource_hash),
-                final_data.len()
+                data.len()
             );
             println!(
                 "RESOURCE_COMPLETE:{}:{}:{}",
@@ -921,6 +990,75 @@ fn on_node_event(event: NodeEvent) {
             if expired_paths > 0 {
                 eprintln!("[rete] tick: expired {expired_paths} paths");
             }
+        }
+    }
+}
+
+fn handle_lxmf_command(
+    cmd: NodeCommand,
+    core: &mut rete_stack::HostedNodeCore,
+    lxmf_router: &LxmfRouter,
+    rng: &mut (impl rand::RngCore + rand::CryptoRng),
+) -> Option<Vec<OutboundPacket>> {
+    let NodeCommand::AppCommand {
+        name,
+        dest_hash,
+        link_id: _,
+        payload,
+    } = cmd
+    else {
+        return None;
+    };
+
+    match name.as_str() {
+        "lxmf-send" => {
+            let Some(dest_hash) = dest_hash else {
+                eprintln!("[rete] lxmf-send: missing dest_hash");
+                return None;
+            };
+            let now_secs = rete_tokio::current_time_secs();
+            let source_hash = *lxmf_router.delivery_dest_hash();
+            let msg = match LXMessage::new(
+                dest_hash,
+                source_hash,
+                core.identity(),
+                b"",
+                &payload,
+                std::collections::BTreeMap::new(),
+                now_secs as f64,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("[rete] lxmf-send: failed to create message: {e}");
+                    return None;
+                }
+            };
+
+            match lxmf_router.send_opportunistic(core, &msg, rng, now_secs) {
+                Some(pkt) => {
+                    eprintln!("[rete] LXMF sent to {}", hex::encode(dest_hash));
+                    println!("LXMF_SENT:{}", hex::encode(dest_hash));
+                    Some(vec![pkt])
+                }
+                None => {
+                    eprintln!(
+                        "[rete] lxmf-send: failed to send (unknown dest {})",
+                        hex::encode(dest_hash)
+                    );
+                    None
+                }
+            }
+        }
+        "lxmf-announce" => {
+            let now = rete_tokio::current_time_secs();
+            lxmf_router.queue_delivery_announce(core, rng, now);
+            let announces = core.flush_announces(now);
+            eprintln!("[rete] LXMF delivery announce sent");
+            Some(announces)
+        }
+        _ => {
+            eprintln!("[rete] unknown app command: {name}");
+            None
         }
     }
 }
