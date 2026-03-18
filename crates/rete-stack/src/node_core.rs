@@ -11,10 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
-use rete_core::{
-    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU,
-    TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
-};
+use rete_core::{DestType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN};
 use rete_transport::{IngestResult, PendingAnnounce, Transport, RECEIPT_TIMEOUT};
 
 use crate::destination::{Destination, DestinationType, Direction};
@@ -468,9 +465,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         data: &[u8],
         rng: &mut R,
     ) -> Option<OutboundPacket> {
-        let pkt = self
-            .transport
-            .build_link_data_packet(link_id, data, rete_core::CONTEXT_NONE, rng)?;
+        let pkt =
+            self.transport
+                .build_link_data_packet(link_id, data, rete_core::CONTEXT_NONE, rng)?;
         Some(OutboundPacket::broadcast(pkt))
     }
 
@@ -931,7 +928,7 @@ pub type EmbeddedNodeCore = NodeCore<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rete_core::{Packet, PacketType};
+    use rete_core::{HeaderType, Packet, PacketType, TRANSPORT_TYPE_TRANSPORT};
 
     type TestNodeCore = NodeCore<64, 16, 128, 4>;
 
