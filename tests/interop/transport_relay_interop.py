@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Multi-interface transport relay E2E test:
-  Python_A <-TCP:4244-> rnsd_1 <-TCP-> Rust_Transport <-TCP-> rnsd_2 <-TCP:4245-> Python_B
+  Python_A <-TCP:4260-> rnsd_1 <-TCP-> Rust_Transport <-TCP-> rnsd_2 <-TCP:4261-> Python_B
 
 The Rust node connects to TWO separate rnsd instances (--connect x2, --transport)
 and acts as the transport relay between them.
@@ -13,44 +13,26 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python transport_relay_interop.py
-
-Or build first:
-  cargo build -p rete-example-linux
-  cd tests/interop && uv run python transport_relay_interop.py
+  uv run python transport_relay_interop.py --rust-binary ../../target/debug/rete-linux
 """
 
-import argparse
-import os
-import shutil
-import signal
 import subprocess
-import sys
-import tempfile
 import time
 
-from interop_helpers import write_rnsd_config, wait_for_port
+from interop_helpers import InteropTest
 
 
-def write_py_node_script(
+def _py_node_script(
     tmpdir: str,
-    script_name: str,
     port: int,
     node_label: str,
-    peer_label: str,
     send_msg: str,
     timeout: float,
-    exclude_dest_hex: str = "",
+    exclude_dest_hex: str,
 ) -> str:
-    """Write a Python RNS node script that announces, discovers peers,
-    sends DATA, and waits for DATA. Returns the script path.
-
-    exclude_dest_hex: hex dest hash to skip when discovering peers
-    (used to filter out the Rust transport node).
-    """
-    script_path = os.path.join(tmpdir, script_name)
-    with open(script_path, "w") as f:
-        f.write(f"""\
+    """Return the Python RNS node script text for a node that announces,
+    discovers a peer, sends DATA, and waits for DATA."""
+    return f"""\
 import RNS
 import time
 import sys
@@ -159,65 +141,22 @@ else:
 
 time.sleep(2)
 print(f"{node_label.upper()}_DONE", flush=True)
-""")
-    return script_path
+"""
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="rete multi-interface transport relay E2E test"
-    )
-    parser.add_argument(
-        "--rust-binary",
-        default="../../target/debug/rete-linux",
-        help="Path to the rete-linux binary",
-    )
-    parser.add_argument(
-        "--port1", type=int, default=4244, help="TCP port for rnsd_1"
-    )
-    parser.add_argument(
-        "--port2", type=int, default=4245, help="TCP port for rnsd_2"
-    )
-    parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Test timeout in seconds"
-    )
-    args = parser.parse_args()
+    with InteropTest("transport-relay", default_port=4260) as t:
+        port1 = t.port
+        port2 = t.port + 1
 
-    rust_binary = os.path.abspath(args.rust_binary)
-    if not os.path.exists(rust_binary):
-        print(f"[transport-relay] FAIL: Rust binary not found at {rust_binary}")
-        print("  Build it with: cargo build -p rete-example-linux")
-        sys.exit(1)
+        # --- Start two rnsd instances ---
+        t.start_rnsd(port=port1)
+        t.start_rnsd(port=port2)
 
-    tmpdir = tempfile.mkdtemp(prefix="rete_transport_relay_")
-    procs = []
-    passed = 0
-    failed = 0
-
-    try:
-        # --- Start rnsd_1 and rnsd_2 ---
-        for label, port in [("rnsd_1", args.port1), ("rnsd_2", args.port2)]:
-            config_dir = os.path.join(tmpdir, f"{label}_config")
-            write_rnsd_config(config_dir, port)
-            print(f"[transport-relay] starting {label} on port {port}...")
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "RNS.Utilities.rnsd", "--config", config_dir],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            procs.append(proc)
-
-        for label, port in [("rnsd_1", args.port1), ("rnsd_2", args.port2)]:
-            if not wait_for_port("127.0.0.1", port, timeout=15.0):
-                print(f"[transport-relay] FAIL: {label} did not start on port {port}")
-                sys.exit(1)
-            print(f"[transport-relay] {label} is listening on port {port}")
-
-        # --- Start Rust transport node (connects to BOTH rnsd instances) ---
-        # Get the Rust node's dest hash so Python nodes can filter it out
+        # --- Get the Rust transport node's dest hash so Python nodes can filter it ---
         rust_seed = "transport-relay-e2e-seed"
         result = subprocess.run(
-            [rust_binary, "--identity-seed", rust_seed, "--connect", "127.0.0.99:1"],
+            [t.rust_binary, "--identity-seed", rust_seed, "--connect", "127.0.0.99:1"],
             capture_output=True, text=True, timeout=5,
         )
         rust_dest_hex = ""
@@ -227,156 +166,70 @@ def main():
                 break
         print(f"[transport-relay] Rust transport dest hash: {rust_dest_hex}")
 
-        print("[transport-relay] starting Rust transport node...")
-        rust_proc = subprocess.Popen(
-            [
-                rust_binary,
-                "--connect", f"127.0.0.1:{args.port1}",
-                "--connect", f"127.0.0.1:{args.port2}",
+        # --- Start Rust transport node (connects to BOTH rnsd instances) ---
+        rust = t.start_rust(
+            seed=rust_seed,
+            port=port1,
+            extra_args=[
+                "--connect", f"127.0.0.1:{port2}",
                 "--transport",
-                "--identity-seed", rust_seed,
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
         )
-        procs.append(rust_proc)
-        time.sleep(3)  # Give Rust node time to connect and announce on both
 
-        # --- Start Python node A (connects to rnsd_1) ---
-        py_a_script = write_py_node_script(
-            tmpdir, "py_node_a.py", args.port1,
-            "node_a", "node_b",
-            "hello from A to B", args.timeout,
-            exclude_dest_hex=rust_dest_hex,
-        )
-        print("[transport-relay] starting Python node A (on rnsd_1)...")
-        py_a_proc = subprocess.Popen(
-            [sys.executable, py_a_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        procs.append(py_a_proc)
+        # Give Rust node time to connect and announce on both interfaces
+        time.sleep(3)
 
-        # --- Start Python node B (connects to rnsd_2) ---
-        py_b_script = write_py_node_script(
-            tmpdir, "py_node_b.py", args.port2,
-            "node_b", "node_a",
-            "hello from B to A", args.timeout,
-            exclude_dest_hex=rust_dest_hex,
-        )
-        print("[transport-relay] starting Python node B (on rnsd_2)...")
-        py_b_proc = subprocess.Popen(
-            [sys.executable, py_b_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        procs.append(py_b_proc)
-
-        # --- Collect results ---
-        print(f"[transport-relay] waiting up to {args.timeout}s for results...")
-
-        for label, proc in [("node_a", py_a_proc), ("node_b", py_b_proc)]:
-            try:
-                proc.wait(timeout=args.timeout + 15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-
-        py_a_stdout = py_a_proc.stdout.read().decode(errors="replace")
-        py_a_stderr = py_a_proc.stderr.read().decode(errors="replace")
-        py_b_stdout = py_b_proc.stdout.read().decode(errors="replace")
-        py_b_stderr = py_b_proc.stderr.read().decode(errors="replace")
-
-        print("[transport-relay] Node A output:")
-        for line in py_a_stdout.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        print("[transport-relay] Node B output:")
-        for line in py_b_stdout.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        # Terminate Rust node and collect output
+        # --- Start Python nodes (connects to rnsd_1 and rnsd_2) ---
+        # Start both simultaneously; they each announce and wait for the
+        # other's announce to be relayed through Rust.
+        py_a = t.start_py_helper(_py_node_script(
+            t.tmpdir, port1, "node_a", "hello from A to B",
+            t.timeout, rust_dest_hex,
+        ))
+        # Small stagger avoids rnsd race when two clients connect simultaneously
         time.sleep(1)
-        rust_proc.send_signal(signal.SIGTERM)
-        try:
-            rust_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            rust_proc.kill()
-            rust_proc.wait()
+        py_b = t.start_py_helper(_py_node_script(
+            t.tmpdir, port2, "node_b", "hello from B to A",
+            t.timeout, rust_dest_hex,
+        ))
 
-        rust_stdout = rust_proc.stdout.read().decode(errors="replace")
-        rust_stderr = rust_proc.stderr.read().decode(errors="replace")
+        # Wait for both Python nodes to finish
+        t.wait_for_line(py_a, "NODE_A_DONE", timeout=t.timeout + 15)
+        t.wait_for_line(py_b, "NODE_B_DONE", timeout=t.timeout + 15)
+        time.sleep(1)
 
-        print("[transport-relay] Rust transport node stdout:")
-        for line in rust_stdout.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-        print("[transport-relay] Rust transport node stderr (last 800 chars):")
-        for line in rust_stderr[-800:].strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
+        # Collect output
+        rust_stderr = t.collect_rust_stderr()
+        t.dump_output("Node A output", py_a)
+        t.dump_output("Node B output", py_b)
+        t.dump_output("Rust transport stdout", rust)
+        t.dump_output("Rust transport stderr (last 800)", rust_stderr.strip().split("\n"))
 
         # --- Assertions ---
 
         # 1. Node B discovers Node A's announce (relayed through Rust)
-        if "NODE_B_PEER_FOUND" in py_b_stdout:
-            print("[transport-relay] PASS [1/4]: Node B discovered Node A via Rust relay")
-            passed += 1
-        else:
-            print("[transport-relay] FAIL [1/4]: Node B did not discover Node A")
-            if py_b_stderr:
-                print(f"  Node B stderr (last 300 chars): {py_b_stderr[-300:]}")
-            failed += 1
+        t.check(
+            t.has_line(py_b, "NODE_B_PEER_FOUND"),
+            "Node B discovered Node A via Rust relay",
+        )
 
         # 2. Node A discovers Node B's announce (relayed through Rust)
-        if "NODE_A_PEER_FOUND" in py_a_stdout:
-            print("[transport-relay] PASS [2/4]: Node A discovered Node B via Rust relay")
-            passed += 1
-        else:
-            print("[transport-relay] FAIL [2/4]: Node A did not discover Node B")
-            if py_a_stderr:
-                print(f"  Node A stderr (last 300 chars): {py_a_stderr[-300:]}")
-            failed += 1
+        t.check(
+            t.has_line(py_a, "NODE_A_PEER_FOUND"),
+            "Node A discovered Node B via Rust relay",
+        )
 
         # 3. Node A sends DATA to Node B -> received
-        if "NODE_B_DATA_RECEIVED:hello from A to B" in py_b_stdout:
-            print("[transport-relay] PASS [3/4]: Node A -> Node B DATA relayed through Rust")
-            passed += 1
-        else:
-            print("[transport-relay] FAIL [3/4]: Node B did not receive DATA from Node A")
-            failed += 1
+        t.check(
+            t.has_line(py_b, "NODE_B_DATA_RECEIVED:", contains="hello from A to B"),
+            "Node A -> Node B DATA relayed through Rust",
+        )
 
         # 4. Node B sends DATA to Node A -> received
-        if "NODE_A_DATA_RECEIVED:hello from B to A" in py_a_stdout:
-            print("[transport-relay] PASS [4/4]: Node B -> Node A DATA relayed through Rust")
-            passed += 1
-        else:
-            print("[transport-relay] FAIL [4/4]: Node A did not receive DATA from Node B")
-            failed += 1
-
-    finally:
-        print("[transport-relay] cleaning up...")
-        for p in procs:
-            try:
-                p.kill()
-                p.wait(timeout=5)
-            except Exception:
-                pass
-        try:
-            shutil.rmtree(tmpdir)
-        except Exception:
-            pass
-
-    # Summary
-    total = passed + failed
-    print(f"\n[transport-relay] Results: {passed}/{total} passed, {failed}/{total} failed")
-
-    if failed > 0:
-        sys.exit(1)
-    else:
-        print("[transport-relay] ALL TESTS PASSED")
-        sys.exit(0)
+        t.check(
+            t.has_line(py_a, "NODE_A_DATA_RECEIVED:", contains="hello from B to A"),
+            "Node B -> Node A DATA relayed through Rust",
+        )
 
 
 if __name__ == "__main__":

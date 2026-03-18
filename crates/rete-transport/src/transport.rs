@@ -190,6 +190,8 @@ pub enum IngestResult<'a> {
     Buffered {
         /// The packet hash of the DATA packet (receiver should prove it).
         packet_hash: [u8; 32],
+        /// The link_id (used to build a link-destination proof).
+        link_id: [u8; TRUNCATED_HASH_LEN],
     },
     /// Packet was malformed or invalid.
     Invalid,
@@ -692,13 +694,18 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 }
 
                 // Check channel receipts for delivery proof (channel messages).
-                // build_proof_packet creates explicit proofs: packet_hash[32] || sig[64].
+                // Proof payload format: packet_hash[32] || sig[64].
+                // Link proofs use dest_type=Link with dest_hash=link_id, so we
+                // extract the truncated packet hash from the payload for lookup.
                 if pkt.payload.len() >= 96 {
-                    if let Some(cr) = self.channel_receipts.get(&dh) {
+                    let mut full_hash = [0u8; 32];
+                    full_hash.copy_from_slice(&pkt.payload[..32]);
+                    let mut receipt_key = [0u8; TRUNCATED_HASH_LEN];
+                    receipt_key.copy_from_slice(&full_hash[..TRUNCATED_HASH_LEN]);
+
+                    if let Some(cr) = self.channel_receipts.get(&receipt_key) {
                         let link_id = cr.link_id;
                         let sequence = cr.sequence;
-                        let mut full_hash = [0u8; 32];
-                        full_hash.copy_from_slice(&pkt.payload[..32]);
                         let sig = &pkt.payload[32..96];
                         // Verify using the link peer's node identity (not ephemeral keys).
                         // The proof is signed by the peer's Ed25519 identity key.
@@ -712,8 +719,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             false
                         };
                         if verified {
-                            self.channel_receipts.remove(&dh);
+                            self.channel_receipts.remove(&receipt_key);
                             if let Some(link) = self.links.get_mut(&link_id) {
+                                link.touch_inbound(now);
                                 if let Some(channel) = link.channel.as_mut() {
                                     channel.mark_delivered(sequence);
                                 }
@@ -957,6 +965,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 if messages.is_empty() {
                     IngestResult::Buffered {
                         packet_hash: pkt_hash,
+                        link_id: *link_id,
                     }
                 } else {
                     IngestResult::ChannelMessages {
@@ -1413,28 +1422,54 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     // Proof packet construction
     // -----------------------------------------------------------------------
 
-    /// Build a PROOF packet for a received data packet.
-    pub fn build_proof_packet(
+    /// Build a PROOF packet with the given dest_type and destination_hash.
+    ///
+    /// Payload: `packet_hash[32] || Ed25519_signature[64]`.
+    fn build_proof_inner(
         identity: &Identity,
         packet_hash: &[u8; 32],
+        dest_type: DestType,
+        destination_hash: &[u8; TRUNCATED_HASH_LEN],
     ) -> Option<alloc::vec::Vec<u8>> {
         let signature = identity.sign(packet_hash).ok()?;
         let mut payload = [0u8; 96];
         payload[..32].copy_from_slice(packet_hash);
         payload[32..96].copy_from_slice(&signature);
 
-        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().ok()?;
-
         let mut buf = [0u8; rete_core::MTU];
         let n = PacketBuilder::new(&mut buf)
             .packet_type(PacketType::Proof)
-            .dest_type(DestType::Single)
-            .destination_hash(&trunc)
+            .dest_type(dest_type)
+            .destination_hash(destination_hash)
             .context(0x00)
             .payload(&payload)
             .build()
             .ok()?;
         Some(buf[..n].to_vec())
+    }
+
+    /// Build a PROOF packet for a received data packet (non-link proofs).
+    ///
+    /// Uses `dest_type=Single` and `destination_hash=packet_hash[0:16]`.
+    /// For link-related proofs (channel, link data), use [`build_link_proof_packet`] instead.
+    pub fn build_proof_packet(
+        identity: &Identity,
+        packet_hash: &[u8; 32],
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let trunc: [u8; TRUNCATED_HASH_LEN] = packet_hash[..TRUNCATED_HASH_LEN].try_into().ok()?;
+        Self::build_proof_inner(identity, packet_hash, DestType::Single, &trunc)
+    }
+
+    /// Build a PROOF packet for a link-related packet (channel messages, link data).
+    ///
+    /// Uses `dest_type=Link` and `destination_hash=link_id` so that transport
+    /// relays (rnsd) can route the proof back through their link table.
+    pub fn build_link_proof_packet(
+        identity: &Identity,
+        packet_hash: &[u8; 32],
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<alloc::vec::Vec<u8>> {
+        Self::build_proof_inner(identity, packet_hash, DestType::Link, link_id)
     }
 
     // -----------------------------------------------------------------------
@@ -1858,5 +1893,69 @@ mod tests {
         let result = transport.tick(1000);
         assert_eq!(result.expired_paths, 0);
         assert_eq!(result.closed_links, 0);
+    }
+
+    #[test]
+    fn test_build_link_proof_packet_format() {
+        // Verify build_link_proof_packet produces dest_type=Link and dest_hash=link_id
+        let identity = Identity::from_seed(b"link-proof-test").unwrap();
+        let packet_hash = [0xAA; 32];
+        let link_id = [0xBB; TRUNCATED_HASH_LEN];
+
+        let raw = TestTransport::build_link_proof_packet(&identity, &packet_hash, &link_id)
+            .expect("should build link proof packet");
+
+        let pkt = rete_core::Packet::parse(&raw).expect("should parse");
+        assert_eq!(pkt.packet_type, PacketType::Proof);
+        assert_eq!(pkt.dest_type, DestType::Link);
+        assert_eq!(pkt.destination_hash, &link_id);
+        assert_eq!(pkt.payload.len(), 96);
+        assert_eq!(&pkt.payload[..32], &packet_hash);
+        // Verify signature is valid
+        let sig = &pkt.payload[32..96];
+        assert!(identity.verify(&packet_hash, sig).is_ok());
+    }
+
+    #[test]
+    fn test_build_proof_packet_still_uses_single() {
+        // Verify build_proof_packet still produces dest_type=Single (non-link proofs)
+        let identity = Identity::from_seed(b"single-proof-test").unwrap();
+        let packet_hash = [0xCC; 32];
+
+        let raw = TestTransport::build_proof_packet(&identity, &packet_hash)
+            .expect("should build proof packet");
+
+        let pkt = rete_core::Packet::parse(&raw).expect("should parse");
+        assert_eq!(pkt.packet_type, PacketType::Proof);
+        assert_eq!(pkt.dest_type, DestType::Single);
+        assert_eq!(pkt.destination_hash, &packet_hash[..TRUNCATED_HASH_LEN]);
+        assert_eq!(pkt.payload.len(), 96);
+    }
+
+    #[test]
+    fn test_link_proof_vs_single_proof_differ() {
+        // Link proof and single proof for the same packet_hash should differ
+        // in dest_type and destination_hash
+        let identity = Identity::from_seed(b"diff-proof-test").unwrap();
+        let packet_hash = [0xDD; 32];
+        let link_id = [0xEE; TRUNCATED_HASH_LEN];
+
+        let link_raw = TestTransport::build_link_proof_packet(&identity, &packet_hash, &link_id)
+            .expect("link proof");
+        let single_raw =
+            TestTransport::build_proof_packet(&identity, &packet_hash).expect("single proof");
+
+        let link_pkt = rete_core::Packet::parse(&link_raw).unwrap();
+        let single_pkt = rete_core::Packet::parse(&single_raw).unwrap();
+
+        assert_eq!(link_pkt.dest_type, DestType::Link);
+        assert_eq!(single_pkt.dest_type, DestType::Single);
+        assert_eq!(link_pkt.destination_hash, &link_id);
+        assert_eq!(
+            single_pkt.destination_hash,
+            &packet_hash[..TRUNCATED_HASH_LEN]
+        );
+        // Payloads should be the same (packet_hash + signature)
+        assert_eq!(link_pkt.payload, single_pkt.payload);
     }
 }

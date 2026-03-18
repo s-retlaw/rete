@@ -21,94 +21,34 @@ Usage:
   uv run python path_request_interop.py
 """
 
-import argparse
-import os
-import shutil
-import signal
 import subprocess
 import sys
-import tempfile
 import time
 
-from interop_helpers import write_rnsd_config, wait_for_port
+from interop_helpers import InteropTest
 
 
 def main():
-    parser = argparse.ArgumentParser(description="rete path request E2E test")
-    parser.add_argument(
-        "--rust-binary",
-        default="../../target/debug/rete-linux",
-        help="Path to the rete-linux binary",
-    )
-    parser.add_argument("--port", type=int, default=4246)
-    parser.add_argument("--timeout", type=float, default=30.0)
-    args = parser.parse_args()
-
-    rust_binary = os.path.abspath(args.rust_binary)
-    if not os.path.exists(rust_binary):
-        print(f"[path-request] FAIL: Rust binary not found at {rust_binary}")
-        sys.exit(1)
-
-    tmpdir = tempfile.mkdtemp(prefix="rete_path_request_")
-    procs = []
-    passed = 0
-    failed = 0
-
-    try:
-        # --- Start rnsd ---
-        config_dir = os.path.join(tmpdir, "rnsd_config")
-        write_rnsd_config(config_dir, args.port)
-        print(f"[path-request] starting rnsd on port {args.port}...")
-        rnsd_proc = subprocess.Popen(
-            [sys.executable, "-m", "RNS.Utilities.rnsd", "--config", config_dir],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    with InteropTest("path-request", default_port=4246) as t:
+        t.start_rnsd()
+        rust = t.start_rust(
+            seed="path-request-e2e-seed",
+            extra_args=["--transport"],
         )
-        procs.append(rnsd_proc)
-        if not wait_for_port("127.0.0.1", args.port):
-            print("[path-request] FAIL: rnsd did not start")
-            sys.exit(1)
-        print("[path-request] rnsd is listening")
 
-        # --- Start Rust transport node ---
-        print("[path-request] starting Rust transport node...")
-        rust_proc = subprocess.Popen(
-            [
-                rust_binary,
-                "--connect", f"127.0.0.1:{args.port}",
-                "--transport",
-                "--identity-seed", "path-request-e2e-seed",
-            ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        procs.append(rust_proc)
+        # Give Rust time to connect
         time.sleep(2)
 
-        # --- Python_A: connect, announce, capture dest hash, disconnect ---
-        py_a_script = os.path.join(tmpdir, "py_a.py")
-        with open(py_a_script, "w") as f:
-            f.write(f"""\
+        # --- Python_A: connect, announce, capture dest hash, stay alive briefly ---
+        py_a = t.start_py_helper(f"""\
 import RNS
 import time
 import os
 
-config_dir = os.path.join("{tmpdir}", "py_a_config")
+config_dir = os.path.join("{t.tmpdir}", "py_a_config")
 os.makedirs(config_dir, exist_ok=True)
 with open(os.path.join(config_dir, "config"), "w") as cf:
-    cf.write(\"\"\"
-[reticulum]
-  enable_transport = no
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-  [[TCP Client Interface]]
-    type = TCPClientInterface
-    enabled = yes
-    target_host = 127.0.0.1
-    target_port = {args.port}
-\"\"\")
+    cf.write(\"\"\"{t.py_rns_config(transport=False)}\"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)
 identity = RNS.Identity()
@@ -123,83 +63,51 @@ time.sleep(5)
 print("PY_A_DONE", flush=True)
 """)
 
-        print("[path-request] starting Python_A (announcer)...")
-        py_a_proc = subprocess.Popen(
-            [sys.executable, py_a_script],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        procs.append(py_a_proc)
-
-        # Wait for Python_A to finish
-        try:
-            py_a_stdout, _ = py_a_proc.communicate(timeout=15)
-        except subprocess.TimeoutExpired:
-            py_a_proc.kill()
-            py_a_stdout, _ = py_a_proc.communicate()
-
-        py_a_output = py_a_stdout.decode(errors="replace")
-        print("[path-request] Python_A output:")
-        for line in py_a_output.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        # Extract Python_A's dest hash
-        a_dest_hex = ""
-        for line in py_a_output.split("\n"):
-            if line.startswith("PY_A_DEST_HASH:"):
-                a_dest_hex = line.split(":")[1].strip()
-                break
+        # Wait for Python_A to report its dest hash and finish
+        a_dest_hex = t.wait_for_line(py_a, "PY_A_DEST_HASH:", timeout=15)
+        t.wait_for_line(py_a, "PY_A_DONE", timeout=15)
 
         if not a_dest_hex:
-            print("[path-request] FAIL: Could not get Python_A dest hash")
-            sys.exit(1)
+            t.check(False, "Could not get Python_A dest hash")
+            return
+
+        t.dump_output("Python_A output", py_a)
         print(f"[path-request] Python_A dest hash: {a_dest_hex}")
 
-        # Check Rust received the announce
+        # Give Rust time to cache the announce
         time.sleep(2)
 
-        # Get Rust transport dest hash for filtering
+        # Check Rust received the announce before proceeding
+        rust_saw_announce = t.has_line(rust, f"ANNOUNCE:{a_dest_hex}")
+
+        # Get Rust transport dest hash for filtering (run binary briefly)
         rust_dest_hex = ""
-        result = subprocess.run(
-            [rust_binary, "--identity-seed", "path-request-e2e-seed",
-             "--connect", "127.0.0.99:1"],
-            capture_output=True, text=True, timeout=5,
-        )
-        for line in result.stderr.split("\n"):
-            if "destination hash:" in line:
-                rust_dest_hex = line.strip().split("destination hash: ")[-1]
-                break
+        try:
+            result = subprocess.run(
+                [t.rust_binary, "--identity-seed", "path-request-e2e-seed",
+                 "--connect", "127.0.0.99:1"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stderr.split("\n"):
+                if "destination hash:" in line:
+                    rust_dest_hex = line.strip().split("destination hash: ")[-1]
+                    break
+        except subprocess.TimeoutExpired:
+            pass
 
         # --- Python_C: connect, request path, check discovery ---
-        py_c_script = os.path.join(tmpdir, "py_c.py")
-        with open(py_c_script, "w") as f:
-            f.write(f"""\
+        py_c = t.start_py_helper(f"""\
 import RNS
 import time
 import os
 
-config_dir = os.path.join("{tmpdir}", "py_c_config")
+config_dir = os.path.join("{t.tmpdir}", "py_c_config")
 os.makedirs(config_dir, exist_ok=True)
 with open(os.path.join(config_dir, "config"), "w") as cf:
-    cf.write(\"\"\"
-[reticulum]
-  enable_transport = no
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-  [[TCP Client Interface]]
-    type = TCPClientInterface
-    enabled = yes
-    target_host = 127.0.0.1
-    target_port = {args.port}
-\"\"\")
+    cf.write(\"\"\"{t.py_rns_config(transport=False)}\"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)
 
-# The dest hash we want to find
 target_hex = "{a_dest_hex}"
 target_hash = bytes.fromhex(target_hex)
 exclude_hex = "{rust_dest_hex}"
@@ -230,86 +138,29 @@ time.sleep(1)
 print("PY_C_DONE", flush=True)
 """)
 
-        print("[path-request] starting Python_C (path requester)...")
-        py_c_proc = subprocess.Popen(
-            [sys.executable, py_c_script],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        procs.append(py_c_proc)
+        # Wait for Python_C to finish
+        t.wait_for_line(py_c, "PY_C_DONE", timeout=t.timeout)
 
-        try:
-            py_c_stdout, py_c_stderr = py_c_proc.communicate(timeout=args.timeout)
-        except subprocess.TimeoutExpired:
-            py_c_proc.kill()
-            py_c_stdout, py_c_stderr = py_c_proc.communicate()
-
-        py_c_output = py_c_stdout.decode(errors="replace")
-        print("[path-request] Python_C output:")
-        for line in py_c_output.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        # Terminate Rust and collect output
+        # Collect output
         time.sleep(1)
-        rust_proc.send_signal(signal.SIGTERM)
-        try:
-            rust_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            rust_proc.kill()
-            rust_proc.wait()
-
-        rust_stdout = rust_proc.stdout.read().decode(errors="replace")
-        rust_stderr = rust_proc.stderr.read().decode(errors="replace")
-
-        print("[path-request] Rust node stdout:")
-        for line in rust_stdout.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-        print("[path-request] Rust node stderr (last 500 chars):")
-        for line in rust_stderr[-500:].strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
+        rust_stderr = t.collect_rust_stderr()
+        t.dump_output("Python_C output", py_c)
+        t.dump_output("Rust node stdout", rust)
+        t.dump_output("Rust node stderr (last 500)", rust_stderr.strip().split("\n"))
 
         # --- Assertions ---
 
         # 1. Rust received Python_A's announce
-        if f"ANNOUNCE:{a_dest_hex}" in rust_stdout:
-            print(f"[path-request] PASS [1/2]: Rust received Python_A's announce")
-            passed += 1
-        else:
-            print(f"[path-request] FAIL [1/2]: Rust did not receive Python_A's announce")
-            failed += 1
+        t.check(
+            t.has_line(rust, f"ANNOUNCE:{a_dest_hex}"),
+            "Rust received Python_A's announce",
+        )
 
         # 2. Python_C discovered Python_A via path request
-        if "PY_C_PATH_FOUND" in py_c_output:
-            print("[path-request] PASS [2/2]: Python_C discovered Python_A via path request through Rust")
-            passed += 1
-        else:
-            print("[path-request] FAIL [2/2]: Python_C did not discover Python_A via path request")
-            if py_c_stderr:
-                print(f"  Python_C stderr (last 300 chars): {py_c_stderr.decode(errors='replace')[-300:]}")
-            failed += 1
-
-    finally:
-        print("[path-request] cleaning up...")
-        for p in procs:
-            try:
-                p.kill()
-                p.wait(timeout=5)
-            except Exception:
-                pass
-        try:
-            shutil.rmtree(tmpdir)
-        except Exception:
-            pass
-
-    total = passed + failed
-    print(f"\n[path-request] Results: {passed}/{total} passed, {failed}/{total} failed")
-    if failed > 0:
-        sys.exit(1)
-    else:
-        print("[path-request] ALL TESTS PASSED")
-        sys.exit(0)
+        t.check(
+            t.has_line(py_c, "PY_C_PATH_FOUND"),
+            "Python_C discovered Python_A via path request through Rust",
+        )
 
 
 if __name__ == "__main__":

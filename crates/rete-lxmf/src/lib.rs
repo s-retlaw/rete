@@ -9,12 +9,18 @@
 pub mod message;
 
 #[cfg(feature = "router")]
+pub mod propagation;
+
+#[cfg(feature = "router")]
 pub mod router;
 
 pub use message::{
     DeliveryMethod, LXMessage, LXMessageState, FIELD_AUDIO, FIELD_COMMANDS, FIELD_EMBEDDED_LXMS,
     FIELD_FILE_ATTACHMENTS, FIELD_IMAGE, FIELD_TELEMETRY, FIELD_THREAD,
 };
+
+#[cfg(feature = "router")]
+pub use propagation::{InMemoryMessageStore, MessageStore, PropagationNode, StoredMessage};
 
 #[cfg(feature = "router")]
 pub use router::{LxmfEvent, LxmfRouter};

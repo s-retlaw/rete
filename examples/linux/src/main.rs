@@ -11,6 +11,7 @@
 //!   cargo run -p rete-example-linux -- --local-client default
 //!   cargo run -p rete-example-linux -- --auto
 //!   cargo run -p rete-example-linux -- --auto --auto-group mynetwork
+//!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242 --propagation
 
 use rete_core::Identity;
 use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
@@ -21,6 +22,7 @@ use rete_stack::OutboundPacket;
 use rete_tokio::local::{LocalClient, LocalServer};
 use rete_tokio::{interface_task, InboundMsg, NodeCommand, NodeEvent, TokioNode};
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,6 +30,8 @@ const DEFAULT_ADDR: &str = "127.0.0.1:4242";
 const DEFAULT_BAUD: u32 = 115200;
 const APP_NAME: &str = "rete";
 const ASPECTS: &[&str] = &["example", "v1"];
+/// Default propagation message TTL: 30 days in seconds.
+const PROPAGATION_TTL_SECS: u64 = 2_592_000;
 
 // ---------------------------------------------------------------------------
 // Identity persistence
@@ -174,10 +178,16 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             link_id: None,
             payload: vec![],
         }),
+        "lxmf-prop-announce" => Some(NodeCommand::AppCommand {
+            name: "lxmf-prop-announce".to_string(),
+            dest_hash: None,
+            link_id: None,
+            payload: vec![],
+        }),
         "quit" => Some(NodeCommand::Shutdown),
         _ => {
             eprintln!("[rete] unknown command: {line}");
-            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | quit");
+            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | lxmf-prop-announce | quit");
             None
         }
     }
@@ -410,6 +420,26 @@ async fn main() {
         lxmf_router.queue_delivery_announce(&mut node.core, &mut rng, now);
         eprintln!("[rete] LXMF delivery announce queued");
     }
+
+    // --propagation: enable LXMF propagation node (store-and-forward)
+    let propagation_enabled = args.iter().any(|a| a == "--propagation");
+    if propagation_enabled {
+        lxmf_router.register_propagation(&mut node.core);
+        eprintln!(
+            "[rete] LXMF propagation hash: {}",
+            hex::encode(lxmf_router.propagation_dest_hash().unwrap())
+        );
+
+        // Queue propagation announce at startup
+        let mut rng = rand::thread_rng();
+        let now = rete_tokio::current_time_secs();
+        lxmf_router.queue_propagation_announce(&mut node.core, &mut rng, now);
+        eprintln!("[rete] LXMF propagation announce queued");
+    }
+
+    // Wrap lxmf_router in RefCell for interior mutability (needed for
+    // propagation deposit in event handler + command handler access).
+    let lxmf_router = RefCell::new(lxmf_router);
 
     // Create command channel + stdin reader
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<NodeCommand>(64);
@@ -760,7 +790,7 @@ async fn dispatch_with_local(
     }
 }
 
-fn on_event(event: NodeEvent, lxmf_router: &LxmfRouter) {
+fn on_event(event: NodeEvent, lxmf_router: &RefCell<LxmfRouter>) {
     // For ResourceComplete, try bz2 decompression before passing to LXMF router.
     // Python RNS compresses resource data with bz2, so we need to decompress
     // before the LXMF router can parse it.
@@ -785,8 +815,21 @@ fn on_event(event: NodeEvent, lxmf_router: &LxmfRouter) {
         other => other,
     };
 
-    // Try LXMF parsing first
-    let lxmf_event = lxmf_router.handle_event(event);
+    // Handle propagation pruning on tick events
+    if let NodeEvent::Tick { .. } = &event {
+        let now = rete_tokio::current_time_secs();
+        let pruned = lxmf_router
+            .borrow_mut()
+            .prune_propagation(now, PROPAGATION_TTL_SECS);
+        if pruned > 0 {
+            eprintln!("[rete] propagation: pruned {pruned} expired messages");
+        }
+    }
+
+    // Use mutable handler — handles propagation deposit when enabled,
+    // falls through to immutable handler otherwise.
+    let now = rete_tokio::current_time_secs();
+    let lxmf_event = lxmf_router.borrow_mut().handle_event_mut(event, now);
     match lxmf_event {
         LxmfEvent::MessageReceived { message, method } => {
             let source = hex::encode(message.source_hash);
@@ -812,6 +855,29 @@ fn on_event(event: NodeEvent, lxmf_router: &LxmfRouter) {
                 name,
             );
             println!("LXMF_PEER:{}:{}", hex::encode(dest_hash), name);
+        }
+        LxmfEvent::PropagationDeposit {
+            dest_hash,
+            message_hash,
+        } => {
+            eprintln!(
+                "[rete] PROP_DEPOSIT dest={} msg={}",
+                hex::encode(dest_hash),
+                hex::encode(message_hash),
+            );
+            println!(
+                "PROP_DEPOSIT:{}:{}",
+                hex::encode(dest_hash),
+                hex::encode(message_hash),
+            );
+        }
+        LxmfEvent::PropagationForward { dest_hash, count } => {
+            eprintln!(
+                "[rete] PROP_FORWARD dest={} count={}",
+                hex::encode(dest_hash),
+                count,
+            );
+            println!("PROP_FORWARD:{}:{}", hex::encode(dest_hash), count,);
         }
         LxmfEvent::Other(event) => {
             // Fall through to normal event handling
@@ -1004,7 +1070,7 @@ fn on_node_event(event: NodeEvent) {
 fn handle_lxmf_command(
     cmd: NodeCommand,
     core: &mut rete_stack::HostedNodeCore,
-    lxmf_router: &LxmfRouter,
+    lxmf_router: &RefCell<LxmfRouter>,
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
 ) -> Option<Vec<OutboundPacket>> {
     let NodeCommand::AppCommand {
@@ -1024,7 +1090,8 @@ fn handle_lxmf_command(
                 return None;
             };
             let now_secs = rete_tokio::current_time_secs();
-            let source_hash = *lxmf_router.delivery_dest_hash();
+            let router = lxmf_router.borrow();
+            let source_hash = *router.delivery_dest_hash();
             let msg = match LXMessage::new(
                 dest_hash,
                 source_hash,
@@ -1041,7 +1108,7 @@ fn handle_lxmf_command(
                 }
             };
 
-            match lxmf_router.send_opportunistic(core, &msg, rng, now_secs) {
+            match router.send_opportunistic(core, &msg, rng, now_secs) {
                 Some(pkt) => {
                     eprintln!("[rete] LXMF sent to {}", hex::encode(dest_hash));
                     println!("LXMF_SENT:{}", hex::encode(dest_hash));
@@ -1058,10 +1125,24 @@ fn handle_lxmf_command(
         }
         "lxmf-announce" => {
             let now = rete_tokio::current_time_secs();
-            lxmf_router.queue_delivery_announce(core, rng, now);
+            let router = lxmf_router.borrow();
+            router.queue_delivery_announce(core, rng, now);
+            router.queue_propagation_announce(core, rng, now);
             let announces = core.flush_announces(now);
             eprintln!("[rete] LXMF delivery announce sent");
             Some(announces)
+        }
+        "lxmf-prop-announce" => {
+            let now = rete_tokio::current_time_secs();
+            let router = lxmf_router.borrow();
+            if router.queue_propagation_announce(core, rng, now) {
+                let announces = core.flush_announces(now);
+                eprintln!("[rete] LXMF propagation announce sent");
+                Some(announces)
+            } else {
+                eprintln!("[rete] propagation not enabled");
+                None
+            }
         }
         _ => {
             eprintln!("[rete] unknown app command: {name}");

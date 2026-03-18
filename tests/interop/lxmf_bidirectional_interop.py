@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """LXMF bidirectional interop test: Python <-> Rust LXMF messaging.
 
-Tests:
+Topology:
+  rnsd (transport=yes, TCP server on localhost:4254)
+  Python LXMF node connects FIRST (so rnsd learns the path)
+  Rust node connects as TCP client, announces LXMF delivery
+  Rust uses --lxmf-peer-seed to pre-register Python's identity
+
+Assertions:
   1. Python -> Rust opportunistic LXMF delivery
   2. Rust -> Python opportunistic LXMF delivery (via stdin command)
-
-The bidirectional test uses a deterministic Python identity (--lxmf-peer-seed)
-so Rust can encrypt to Python without needing an announce. Python connects to
-rnsd FIRST so rnsd learns the path for forwarding Rust->Python packets.
 
 Usage:
   cd tests/interop
@@ -17,294 +19,193 @@ Requires:
   pip install rns lxmf
 """
 
-import argparse
-import os
-import shutil
-import signal
-import subprocess
-import sys
-import tempfile
 import time
-import threading
 
-from interop_helpers import write_rnsd_config, wait_for_port
+from interop_helpers import InteropTest
 
 PYTHON_LXMF_SEED = "lxmf-bidir-python"
 
 
-def identity_from_seed(seed_str: str):
-    """Create an RNS Identity matching Rust's Identity::from_seed.
-
-    Derivation: prv[0:32] = SHA-256(seed), prv[32:64] = SHA-256(prv[0:32])
-    """
-    import hashlib
-    import RNS
-    h1 = hashlib.sha256(seed_str.encode()).digest()
-    h2 = hashlib.sha256(h1).digest()
-    prv = h1 + h2
-    identity = RNS.Identity(create_keys=False)
-    identity.load_private_key(prv)
-    return identity
-
-
-def collect_stdout(proc, lines, label=""):
-    for raw in proc.stdout:
-        line = raw.decode("utf-8", errors="replace").strip()
-        if line:
-            lines.append(line)
-            print(f"  [{label}] {line}", flush=True)
-
-
 def main():
-    parser = argparse.ArgumentParser(description="LXMF bidirectional interop test")
-    parser.add_argument(
-        "--rust-binary",
-        default="../../target/debug/rete-linux",
-        help="Path to the rete-linux binary",
-    )
-    parser.add_argument("--port", type=int, default=4254, help="TCP port for rnsd")
-    parser.add_argument("--timeout", type=float, default=45.0, help="Test timeout")
-    args = parser.parse_args()
+    with InteropTest("lxmf-bidir", default_port=4254) as t:
+        t.start_rnsd()
 
-    rust_binary = os.path.abspath(args.rust_binary)
-    if not os.path.exists(rust_binary):
-        print(f"FAIL: Rust binary not found at {rust_binary}")
-        sys.exit(1)
+        # Python helper connects FIRST so rnsd learns the path.
+        # It uses a deterministic identity so Rust can --lxmf-peer-seed it.
+        # It computes the Rust LXMF delivery hash from the seed to avoid
+        # needing stderr access.
+        py = t.start_py_helper(f"""\
+import hashlib
+import RNS
+import LXMF
+import time
+import sys
+import os
+import threading
 
+config_dir = os.path.join("{t.tmpdir}", "py_lxmf_config")
+os.makedirs(config_dir, exist_ok=True)
+with open(os.path.join(config_dir, "config"), "w") as cf:
+    cf.write(\"\"\"{t.py_rns_config()}\"\"\")
+
+reticulum = RNS.Reticulum(configdir=config_dir)
+time.sleep(2)
+
+# Deterministic identity matching Rust's Identity::from_seed
+seed_str = "{PYTHON_LXMF_SEED}"
+h1 = hashlib.sha256(seed_str.encode()).digest()
+h2 = hashlib.sha256(h1).digest()
+prv = h1 + h2
+py_identity = RNS.Identity(create_keys=False)
+py_identity.load_private_key(prv)
+
+py_router = LXMF.LXMRouter(
+    identity=py_identity,
+    storagepath=os.path.join("{t.tmpdir}", "lxmf_storage"),
+)
+py_lxmf_dest = py_router.register_delivery_identity(
+    py_identity, display_name="PythonBidir"
+)
+
+# Track received LXMF on Python side
+py_received = []
+py_msg_event = threading.Event()
+
+def py_delivery_callback(message):
     try:
-        import RNS
-        import LXMF
-    except ImportError:
-        print("SKIP: LXMF/RNS Python packages not installed")
-        sys.exit(0)
+        src = message.source_hash.hex()
+        title = message.title.decode("utf-8", errors="replace") if isinstance(message.title, bytes) else str(message.title)
+        content = message.content.decode("utf-8", errors="replace") if isinstance(message.content, bytes) else str(message.content)
+    except Exception:
+        src, title, content = "?", "?", "?"
+    print(f"PY_LXMF_RECEIVED:{{src[:16]}}:{{title}}:{{content}}", flush=True)
+    py_received.append(content)
+    py_msg_event.set()
 
-    tmpdir = tempfile.mkdtemp(prefix="rete_lxmf_bidir_")
-    rnsd_config_dir = os.path.join(tmpdir, "rnsd_config")
-    procs = []
-    passed = 0
-    failed = 0
+py_router.register_delivery_callback(py_delivery_callback)
 
-    try:
-        # --- Start rnsd ---
-        write_rnsd_config(rnsd_config_dir, args.port)
-        rnsd_proc = subprocess.Popen(
-            [sys.executable, "-m", "RNS.Utilities.rnsd", "--config", rnsd_config_dir],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        procs.append(rnsd_proc)
-        if not wait_for_port("127.0.0.1", args.port):
-            print("FAIL: rnsd did not start")
-            sys.exit(1)
-        print("[bidir] rnsd ready")
-        time.sleep(1)
+# Announce Python's LXMF delivery
+py_router.announce(py_lxmf_dest.hash)
+py_lxmf_hash = RNS.hexrep(py_lxmf_dest.hash, delimit=False)
+print(f"PY_LXMF_HASH:{{py_lxmf_hash}}", flush=True)
+time.sleep(3)
 
-        # --- Set up Python LXMF FIRST (so rnsd learns the path) ---
-        print("[bidir] setting up Python LXMF...")
-        py_config_dir = os.path.join(tmpdir, "py_config")
-        os.makedirs(py_config_dir, exist_ok=True)
-        with open(os.path.join(py_config_dir, "config"), "w") as f:
-            f.write(f"""\
-[reticulum]
-  enable_transport = no
-  share_instance = no
+# Compute Rust's LXMF delivery hash from its seed
+# (compute hash manually to avoid RNS.Destination side effects)
+rust_seed = "lxmf-bidir-rust"
+rh1 = hashlib.sha256(rust_seed.encode()).digest()
+rh2 = hashlib.sha256(rh1).digest()
+rprv = rh1 + rh2
+rust_id_tmp = RNS.Identity(create_keys=False)
+rust_id_tmp.load_private_key(rprv)
+rust_id_hash = rust_id_tmp.hash
+name_hash = hashlib.sha256("lxmf.delivery".encode("utf-8")).digest()[:10]
+rust_lxmf_hash = hashlib.sha256(name_hash + rust_id_hash).digest()[:16]
+print(f"PY_RUST_LXMF_HASH:{{rust_lxmf_hash.hex()}}", flush=True)
 
-[interfaces]
+# Wait for Rust LXMF announce
+timeout = {t.timeout}
+deadline = time.time() + timeout
+while time.time() < deadline:
+    if RNS.Transport.has_path(rust_lxmf_hash):
+        break
+    time.sleep(0.5)
 
-  [[TCP Client Interface]]
-    type = TCPClientInterface
-    enabled = yes
-    target_host = 127.0.0.1
-    target_port = {args.port}
+if not RNS.Transport.has_path(rust_lxmf_hash):
+    print("PY_FAIL:timeout_waiting_for_rust_announce", flush=True)
+    sys.exit(1)
+
+print("PY_RUST_ANNOUNCED", flush=True)
+
+# Send Python -> Rust opportunistic LXMF
+rust_recalled = RNS.Identity.recall(rust_lxmf_hash)
+if not rust_recalled:
+    print("PY_FAIL:identity_not_recalled", flush=True)
+    sys.exit(1)
+
+lxmf_out_dest = RNS.Destination(
+    rust_recalled, RNS.Destination.OUT, RNS.Destination.SINGLE,
+    "lxmf", "delivery"
+)
+p2r_msg = LXMF.LXMessage(
+    lxmf_out_dest, py_lxmf_dest,
+    "Python to Rust bidirectional",
+    title="Bidir P2R",
+    desired_method=LXMF.LXMessage.OPPORTUNISTIC,
+)
+p2r_msg.try_propagation_on_fail = False
+py_router.handle_outbound(p2r_msg)
+print("PY_P2R_SENT", flush=True)
+
+# Re-announce so rnsd has the path for Rust->Python
+time.sleep(2)
+py_router.announce(py_lxmf_dest.hash)
+
+# Wait for Rust->Python LXMF
+print("PY_WAITING_R2P", flush=True)
+if py_msg_event.wait(timeout=timeout):
+    r2p_ok = any("Rust to Python" in m for m in py_received)
+    if r2p_ok:
+        print("PY_R2P_RECEIVED", flush=True)
+    else:
+        print("PY_R2P_WRONG_CONTENT", flush=True)
+else:
+    print("PY_R2P_TIMEOUT", flush=True)
+
+time.sleep(2)
+print("PY_DONE", flush=True)
 """)
 
-        reticulum = RNS.Reticulum(py_config_dir)
+        # Get Python's LXMF hash so we can send Rust -> Python
+        py_lxmf_hash = t.wait_for_line(py, "PY_LXMF_HASH:")
+        if not py_lxmf_hash:
+            t.check(False, "Python reported LXMF hash")
+            return
+
+        # Give Python time to connect, then start Rust
         time.sleep(2)
 
-        py_identity = identity_from_seed(PYTHON_LXMF_SEED)
-        py_router = LXMF.LXMRouter(
-            identity=py_identity,
-            storagepath=os.path.join(tmpdir, "lxmf_storage"),
-        )
-        py_lxmf_dest = py_router.register_delivery_identity(
-            py_identity, display_name="PythonBidir"
-        )
-
-        # Track received LXMF on Python side
-        py_received_messages = []
-        py_msg_received = threading.Event()
-
-        def py_delivery_callback(message):
-            try:
-                src = message.source_hash.hex()
-                title = message.title.decode("utf-8", errors="replace") if isinstance(message.title, bytes) else str(message.title)
-                content = message.content.decode("utf-8", errors="replace") if isinstance(message.content, bytes) else str(message.content)
-            except Exception:
-                src = "?"
-                title = "?"
-                content = "?"
-            print(f"  [python] LXMF received: from={src[:16]}... title=\"{title}\" content=\"{content}\"", flush=True)
-            py_received_messages.append({
-                "source": src,
-                "title": title,
-                "content": content,
-            })
-            py_msg_received.set()
-
-        py_router.register_delivery_callback(py_delivery_callback)
-
-        # Announce Python's LXMF delivery — rnsd will store the path
-        py_router.announce(py_lxmf_dest.hash)
-        py_lxmf_hash = RNS.hexrep(py_lxmf_dest.hash, delimit=False)
-        print(f"[bidir] Python LXMF delivery hash: {py_lxmf_hash}")
-        # Give rnsd time to process the announce
-        time.sleep(3)
-
-        # --- NOW start Rust node ---
-        print("[bidir] starting Rust node...")
-        rust_lines = []
-        rust_stderr_lines = []
-        rust_proc = subprocess.Popen(
-            [
-                rust_binary,
-                "--connect", f"127.0.0.1:{args.port}",
-                "--identity-seed", "lxmf-bidir-rust",
-                "--lxmf-announce",
-                "--lxmf-name", "BidirRust",
+        rust = t.start_rust(
+            seed="lxmf-bidir-rust",
+            extra_args=[
+                "--lxmf-announce", "--lxmf-name", "BidirRust",
                 "--lxmf-peer-seed", PYTHON_LXMF_SEED,
             ],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        procs.append(rust_proc)
-        threading.Thread(
-            target=collect_stdout, args=(rust_proc, rust_lines, "rust"), daemon=True
-        ).start()
 
-        def read_stderr():
-            for raw in rust_proc.stderr:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if line:
-                    rust_stderr_lines.append(line)
-                    print(f"  [rust-err] {line}", flush=True)
-        threading.Thread(target=read_stderr, daemon=True).start()
-        time.sleep(3)
+        # Wait for Rust to receive Python's LXMF message
+        rust_got_p2r = t.wait_for_line(rust, "LXMF_RECEIVED:", timeout=30)
 
-        # Get Rust LXMF delivery hash
-        rust_lxmf_hash = None
-        for line in rust_stderr_lines:
-            if "LXMF delivery hash:" in line:
-                rust_lxmf_hash = line.split(":")[-1].strip()
-                break
-        if not rust_lxmf_hash:
-            print("FAIL: Could not find Rust LXMF delivery hash")
-            sys.exit(1)
-        print(f"[bidir] Rust LXMF delivery hash: {rust_lxmf_hash}")
+        # Now send Rust -> Python via stdin
+        time.sleep(2)
+        t.send_rust(f"lxmf {py_lxmf_hash} Rust to Python bidirectional")
 
-        # --- Wait for Rust LXMF announce at Python ---
-        rust_dest_bytes = bytes.fromhex(rust_lxmf_hash)
-        print("[bidir] waiting for Rust LXMF announce...")
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline:
-            if RNS.Transport.has_path(rust_dest_bytes):
-                break
-            time.sleep(0.5)
-        if not RNS.Transport.has_path(rust_dest_bytes):
-            print("FAIL: Rust LXMF announce not received")
-            sys.exit(1)
-        print("[bidir] Rust LXMF announce received")
-
-        # --- TEST 1: Python -> Rust (opportunistic) ---
-        print("[bidir] TEST 1: Python -> Rust (opportunistic)...")
-        rust_id = RNS.Identity.recall(rust_dest_bytes)
-        if not rust_id:
-            print("FAIL: TEST 1: Could not recall Rust identity")
-            failed += 1
-        else:
-            lxmf_dest = RNS.Destination(
-                rust_id, RNS.Destination.OUT, RNS.Destination.SINGLE,
-                "lxmf", "delivery"
-            )
-            py2rust_msg = LXMF.LXMessage(
-                lxmf_dest, py_lxmf_dest,
-                "Python to Rust bidirectional",
-                title="Bidir P2R",
-                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-            )
-            py2rust_msg.try_propagation_on_fail = False
-            py_router.handle_outbound(py2rust_msg)
-
-            deadline = time.monotonic() + 15.0
-            rust_got_p2r = False
-            while time.monotonic() < deadline:
-                if any("LXMF_RECEIVED:" in l and "Bidir P2R" in l for l in rust_lines):
-                    rust_got_p2r = True
-                    break
-                time.sleep(0.5)
-
-            if rust_got_p2r:
-                print("[bidir] TEST 1 PASS: Python -> Rust delivered!")
-                passed += 1
-            else:
-                print("FAIL: TEST 1: Rust did not receive LXMF")
-                failed += 1
-
-        # --- TEST 2: Rust -> Python (opportunistic via stdin) ---
-        print("[bidir] TEST 2: Rust -> Python (via stdin command)...")
-
-        # Re-announce so rnsd definitely has the path
-        py_router.announce(py_lxmf_dest.hash)
+        # Wait for Python to finish
+        t.wait_for_line(py, "PY_DONE", timeout=t.timeout + 15)
         time.sleep(2)
 
-        cmd = f"lxmf {py_lxmf_hash} Rust to Python bidirectional\n"
-        print(f"  [test] stdin: {cmd.strip()}")
-        rust_proc.stdin.write(cmd.encode())
-        rust_proc.stdin.flush()
+        # Collect output
+        rust_stderr = t.collect_rust_stderr()
+        t.dump_output("Python helper output", py)
+        t.dump_output("Rust node stdout", rust)
+        t.dump_output("Rust node stderr (last 1000)", rust_stderr.strip().split("\n"))
 
-        deadline = time.monotonic() + 15.0
-        py_got_r2p = False
-        while time.monotonic() < deadline:
-            for msg in py_received_messages:
-                if "Rust to Python" in msg["content"]:
-                    py_got_r2p = True
-                    break
-            if py_got_r2p:
-                break
-            time.sleep(0.5)
+        # Assertion 1: Python -> Rust delivered
+        t.check(
+            t.has_line(rust, "LXMF_RECEIVED:", contains="Bidir P2R"),
+            "Python -> Rust LXMF delivered",
+        )
 
-        if py_got_r2p:
-            print("[bidir] TEST 2 PASS: Rust -> Python delivered!")
-            passed += 1
+        # Assertion 2: Rust -> Python delivered
+        r2p_received = t.has_line(py, "PY_R2P_RECEIVED")
+        rust_sent = t.has_line(rust, "LXMF_SENT:")
+        if r2p_received:
+            t.check(True, "Rust -> Python LXMF delivered")
+        elif rust_sent:
+            # Rust sent but rnsd single-interface didn't forward
+            t.check(True, "Rust sent LXMF (rnsd single-interface did not forward, acceptable)")
         else:
-            rust_sent = any("LXMF_SENT:" in l for l in rust_lines)
-            if rust_sent:
-                # Rust sent it but Python didn't receive — rnsd forwarding issue.
-                # This is a known limitation: rnsd on a single TCP interface
-                # doesn't always forward DATA packets between clients.
-                print("[bidir] TEST 2 SKIP: Rust sent but rnsd did not forward to Python (single-interface limitation)")
-                passed += 1  # Conditional pass — LXMF send code works
-            else:
-                print("FAIL: TEST 2: Rust could not send LXMF")
-                for l in rust_stderr_lines:
-                    if "lxmf" in l.lower():
-                        print(f"  {l}")
-                failed += 1
-
-    finally:
-        for proc in procs:
-            try:
-                proc.send_signal(signal.SIGTERM)
-                proc.wait(timeout=5)
-            except Exception:
-                proc.kill()
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    total = passed + failed
-    print(f"\n[bidir] Results: {passed}/{total} passed")
-    if failed > 0:
-        print("FAIL")
-        sys.exit(1)
-    else:
-        print("PASS")
-        sys.exit(0)
+            t.check(False, "Rust -> Python LXMF delivery")
 
 
 if __name__ == "__main__":

@@ -71,5 +71,5 @@ pub type HostedTransport =
 /// Default announce interval in seconds.
 pub const ANNOUNCE_INTERVAL_SECS: u64 = 300;
 
-/// Tick interval in seconds (path expiry, announce retransmission).
-pub const TICK_INTERVAL_SECS: u64 = 60;
+/// Tick interval in seconds (path expiry, announce retransmission, channel retransmit).
+pub const TICK_INTERVAL_SECS: u64 = 5;

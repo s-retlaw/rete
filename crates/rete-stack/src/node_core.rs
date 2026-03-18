@@ -491,6 +491,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     }
 
     /// Build a proof OutboundPacket for a received packet hash, if possible.
+    ///
+    /// Uses `dest_type=Single` — for non-link (DATA) proofs only.
     fn proof_outbound(&self, packet_hash: &[u8; 32]) -> Option<OutboundPacket> {
         Transport::<P, A, D, L>::build_proof_packet(&self.identity, packet_hash).map(|data| {
             OutboundPacket {
@@ -498,6 +500,23 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 routing: PacketRouting::SourceInterface,
             }
         })
+    }
+
+    /// Build a link-destination proof OutboundPacket for a link-related packet.
+    ///
+    /// Uses `dest_type=Link` and `destination_hash=link_id` so transport relays
+    /// (rnsd) can route the proof back through their link table.
+    fn link_proof_outbound(
+        &self,
+        packet_hash: &[u8; 32],
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<OutboundPacket> {
+        Transport::<P, A, D, L>::build_link_proof_packet(&self.identity, packet_hash, link_id).map(
+            |data| OutboundPacket {
+                data,
+                routing: PacketRouting::SourceInterface,
+            },
+        )
     }
 
     /// Process an inbound raw packet and return the outcome.
@@ -670,8 +689,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         .map(|e| (e.message_type, e.payload))
                         .collect(),
                 }),
-                // Auto-prove received channel packets (transport-layer delivery proof)
-                packets: self.proof_outbound(&packet_hash).into_iter().collect(),
+                // Auto-prove received channel packets (link-destination proof for relay routing)
+                packets: self
+                    .link_proof_outbound(&packet_hash, &link_id)
+                    .into_iter()
+                    .collect(),
             },
             IngestResult::LinkClosed { link_id } => IngestOutcome {
                 event: Some(NodeEvent::LinkClosed { link_id }),
@@ -681,10 +703,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 event: Some(NodeEvent::ProofReceived { packet_hash }),
                 packets: Vec::new(),
             },
-            IngestResult::Buffered { packet_hash } => IngestOutcome {
+            IngestResult::Buffered {
+                packet_hash,
+                link_id,
+            } => IngestOutcome {
                 event: None,
-                // Auto-prove buffered channel packets too (transport ACK ≠ application delivery)
-                packets: self.proof_outbound(&packet_hash).into_iter().collect(),
+                // Auto-prove buffered channel packets too (link-destination proof for relay routing)
+                packets: self
+                    .link_proof_outbound(&packet_hash, &link_id)
+                    .into_iter()
+                    .collect(),
             },
             IngestResult::ResourceOffered {
                 link_id,

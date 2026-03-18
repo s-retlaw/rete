@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
-"""Python reference ↔ ESP32 interop test over serial.
+"""Python reference <-> ESP32 interop test over serial.
 
 Proves that data encrypted/signed by the Python RNS reference implementation
 can be correctly decrypted and processed by the Rust rete implementation on
 the ESP32-C6, and vice versa.
 
 Flow:
-  1. Python sends ANNOUNCE → ESP32 validates signature + learns identity
-  2. Python sends encrypted DATA "ping:<timestamp>" → ESP32
+  1. Python sends ANNOUNCE -> ESP32 validates signature + learns identity
+  2. Python sends encrypted DATA "ping:<timestamp>" -> ESP32
   3. ESP32 decrypts, reads, echoes back "echo:ping:<timestamp>" (encrypted)
-  4. Python receives + decrypts echo → verifies round-trip
+  4. Python receives + decrypts echo -> verifies round-trip
 
 Usage:
   cd tests/interop
-  uv run python serial_interop.py [--port /dev/ttyUSB0] [--baud 115200]
+  uv run python serial_interop.py --rust-binary ../../target/debug/rete-linux \\
+      --port /dev/ttyUSB0 --baud 115200
 """
 
 import argparse
 import hashlib
 import os
+import shutil
 import struct
 import sys
 import tempfile
-import shutil
 import time
 
 import serial as pyserial
 import RNS
 
+from interop_helpers import InteropTest
+
+
 # ---------------------------------------------------------------------------
-# Bootstrap — throwaway Reticulum instance (needed for crypto internals)
+# Bootstrap -- throwaway Reticulum instance (needed for crypto internals)
 # ---------------------------------------------------------------------------
-_tmpdir = tempfile.mkdtemp(prefix="rete_serial_interop_")
+_tmpdir = tempfile.mkdtemp(prefix="rete_serial_bootstrap_")
 _r = RNS.Reticulum(configdir=_tmpdir, loglevel=RNS.LOG_CRITICAL)
 
 # ---------------------------------------------------------------------------
@@ -162,97 +166,98 @@ def build_data_packet(plaintext: bytes, recipient: RNS.Identity) -> bytes:
 # Main test
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Python ↔ ESP32 serial interop")
-    parser.add_argument("--port", default="/dev/ttyUSB0", help="Serial port")
-    parser.add_argument("--baud", type=int, default=115200, help="Baud rate")
-    parser.add_argument("--timeout", type=int, default=10, help="Receive timeout (s)")
-    args = parser.parse_args()
+    # Parse serial-specific args before InteropTest consumes its own
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--port", default="/dev/ttyUSB0", dest="serial_port",
+                            help="Serial port")
+    pre_parser.add_argument("--baud", type=int, default=115200, help="Baud rate")
+    serial_args, remaining = pre_parser.parse_known_args()
 
-    # --- Create identities ---
-    # ESP32 identity (same seed as firmware)
-    esp32 = identity_from_seed("rete-esp32c6-serial")
-    esp32_pub = esp32.get_public_key()
-    esp32_id_hash = RNS.Identity.truncated_hash(esp32_pub)
-    esp32_dest = compute_dest_hash(APP_NAME, ASPECTS, esp32_id_hash)
+    # Patch sys.argv so InteropTest's argparse sees the remaining args
+    sys.argv = [sys.argv[0]] + remaining
 
-    # Our identity (Python side)
-    us = identity_from_seed("python-serial-interop")
-    our_pub = us.get_public_key()
-    our_id_hash = RNS.Identity.truncated_hash(our_pub)
-    our_dest = compute_dest_hash(APP_NAME, ASPECTS, our_id_hash)
+    with InteropTest("serial", default_port=0, default_timeout=10.0) as t:
+        # --- Create identities ---
+        # ESP32 identity (same seed as firmware)
+        esp32 = identity_from_seed("rete-esp32c6-serial")
+        esp32_pub = esp32.get_public_key()
+        esp32_id_hash = RNS.Identity.truncated_hash(esp32_pub)
+        esp32_dest = compute_dest_hash(APP_NAME, ASPECTS, esp32_id_hash)
 
-    print(f"[python] ESP32 dest:  {esp32_dest.hex()}")
-    print(f"[python] Our dest:    {our_dest.hex()}")
+        # Our identity (Python side)
+        us = identity_from_seed("python-serial-interop")
+        our_pub = us.get_public_key()
+        our_id_hash = RNS.Identity.truncated_hash(our_pub)
+        our_dest = compute_dest_hash(APP_NAME, ASPECTS, our_id_hash)
 
-    # --- Open serial port ---
-    ser = pyserial.Serial(args.port, args.baud, timeout=0.1)
-    decoder = HdlcDecoder()
+        print(f"[serial] ESP32 dest:  {esp32_dest.hex()}")
+        print(f"[serial] Our dest:    {our_dest.hex()}")
 
-    try:
-        # Step 1: Send our announce (so ESP32 learns our identity)
-        announce_raw = build_announce(us)
-        ser.write(hdlc_encode(announce_raw))
-        ser.flush()
-        print("[python] sent ANNOUNCE")
+        # --- Open serial port ---
+        ser = pyserial.Serial(serial_args.serial_port, serial_args.baud, timeout=0.1)
+        decoder = HdlcDecoder()
 
-        # Brief delay for ESP32 to process the announce
-        time.sleep(0.3)
+        try:
+            # Step 1: Send our announce (so ESP32 learns our identity)
+            announce_raw = build_announce(us)
+            ser.write(hdlc_encode(announce_raw))
+            ser.flush()
+            print("[serial] sent ANNOUNCE")
 
-        # Step 2: Send encrypted DATA with a unique ping
-        ts = int(time.time())
-        ping_msg = f"ping:{ts}".encode()
-        data_raw = build_data_packet(ping_msg, esp32)
-        ser.write(hdlc_encode(data_raw))
-        ser.flush()
-        print(f"[python] sent DATA: ping:{ts}")
+            # Brief delay for ESP32 to process the announce
+            time.sleep(0.3)
 
-        # Step 3: Wait for echo
-        deadline = time.time() + args.timeout
-        echo_text = None
+            # Step 2: Send encrypted DATA with a unique ping
+            ts = int(time.time())
+            ping_msg = f"ping:{ts}".encode()
+            data_raw = build_data_packet(ping_msg, esp32)
+            ser.write(hdlc_encode(data_raw))
+            ser.flush()
+            print(f"[serial] sent DATA: ping:{ts}")
 
-        while time.time() < deadline:
-            chunk = ser.read(512)
-            if not chunk:
-                continue
+            # Step 3: Wait for echo
+            deadline = time.time() + t.timeout
+            echo_text = None
 
-            frames = decoder.feed(chunk)
-            for frame in frames:
-                if len(frame) < 19:
-                    continue
-                flags = frame[0]
-                pkt_type = flags & 0x03
-                if pkt_type != 0:  # not DATA
+            while time.time() < deadline:
+                chunk = ser.read(512)
+                if not chunk:
                     continue
 
-                dest = frame[2:18]
-                if dest != our_dest:
-                    continue
+                frames = decoder.feed(chunk)
+                for frame in frames:
+                    if len(frame) < 19:
+                        continue
+                    flags = frame[0]
+                    pkt_type = flags & 0x03
+                    if pkt_type != 0:  # not DATA
+                        continue
 
-                ciphertext = frame[19:]
-                try:
-                    plaintext = us.decrypt(ciphertext)
-                    echo_text = plaintext.decode("utf-8", errors="replace")
-                    print(f"[python] received DATA: {echo_text}")
-                except Exception as e:
-                    print(f"[python] decrypt failed: {e}")
+                    dest = frame[2:18]
+                    if dest != our_dest:
+                        continue
 
-            if echo_text is not None:
-                break
+                    ciphertext = frame[19:]
+                    try:
+                        plaintext = us.decrypt(ciphertext)
+                        echo_text = plaintext.decode("utf-8", errors="replace")
+                        print(f"[serial] received DATA: {echo_text}")
+                    except Exception as e:
+                        print(f"[serial] decrypt failed: {e}")
 
-        # Step 4: Verify
-        expected = f"echo:ping:{ts}"
-        if echo_text == expected:
-            print(f"PASS: echo matches '{expected}'")
-        elif echo_text is not None:
-            print(f"FAIL: expected '{expected}', got '{echo_text}'")
-            sys.exit(1)
-        else:
-            print(f"FAIL: no echo received within {args.timeout}s")
-            sys.exit(1)
+                if echo_text is not None:
+                    break
 
-    finally:
-        ser.close()
-        shutil.rmtree(_tmpdir, ignore_errors=True)
+            # Step 4: Verify
+            expected = f"echo:ping:{ts}"
+            t.check(echo_text is not None, "Received echo response from ESP32",
+                    detail=f"expected={expected}, got={echo_text}")
+            t.check(echo_text == expected, "Echo matches expected payload",
+                    detail=f"expected='{expected}', got='{echo_text}'")
+
+        finally:
+            ser.close()
+            shutil.rmtree(_tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

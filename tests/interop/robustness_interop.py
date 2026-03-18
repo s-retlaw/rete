@@ -29,19 +29,15 @@ Or build first:
   cd tests/interop && uv run python robustness_interop.py
 """
 
-import argparse
 import os
-import random
-import shutil
-import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 
-from interop_helpers import write_rnsd_config, wait_for_port
+from interop_helpers import InteropTest, read_stdout_lines
 
+import threading
 
 # ---------------------------------------------------------------------------
 # HDLC framing
@@ -70,12 +66,12 @@ def hdlc_encode(data: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 
 def build_truncated_packet() -> bytes:
-    """10-byte packet — below the 19-byte HEADER_1 minimum."""
+    """10-byte packet -- below the 19-byte HEADER_1 minimum."""
     return os.urandom(10)
 
 
 def build_oversized_packet() -> bytes:
-    """600-byte packet — exceeds the 500-byte MTU."""
+    """600-byte packet -- exceeds the 500-byte MTU."""
     # Valid-looking flags byte (HEADER_1, BROADCAST, PLAIN, DATA = 0x08)
     flags = 0x08
     hops = 0
@@ -136,11 +132,6 @@ def build_escape_heavy_packet() -> bytes:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def rust_is_alive(proc: subprocess.Popen) -> bool:
-    """Check if the Rust process is still running."""
-    return proc.poll() is None
-
-
 def send_raw(sock: socket.socket, data: bytes):
     """Send raw bytes to a socket, ignoring broken pipe."""
     try:
@@ -154,104 +145,31 @@ def send_raw(sock: socket.socket, data: bytes):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="rete robustness / negative E2E test")
-    parser.add_argument(
-        "--rust-binary",
-        default="../../target/debug/rete-linux",
-        help="Path to the rete-linux binary",
-    )
-    parser.add_argument(
-        "--port", type=int, default=4249, help="TCP port for rnsd (default 4249)"
-    )
-    parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Test timeout in seconds"
-    )
-    args = parser.parse_args()
-
-    rust_binary = os.path.abspath(args.rust_binary)
-    if not os.path.exists(rust_binary):
-        print(f"[robustness] FAIL: Rust binary not found at {rust_binary}")
-        print("  Build it with: cargo build -p rete-example-linux")
-        sys.exit(1)
-
-    tmpdir = tempfile.mkdtemp(prefix="rete_robustness_")
-    rnsd_config_dir = os.path.join(tmpdir, "rnsd_config")
-    procs = []
-    raw_sock = None
-    passed = 0
-    failed = 0
-    total_tests = 8
-
-    try:
-        # ---- Step 1: Start rnsd ----
-        print(f"[robustness] setting up rnsd config in {rnsd_config_dir}")
-        write_rnsd_config(rnsd_config_dir, args.port)
-
-        print(f"[robustness] starting rnsd on port {args.port}...")
-        rnsd_proc = subprocess.Popen(
-            [sys.executable, "-m", "RNS.Utilities.rnsd", "--config", rnsd_config_dir],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        procs.append(rnsd_proc)
-
-        if not wait_for_port("127.0.0.1", args.port, timeout=15.0):
-            print("[robustness] FAIL: rnsd did not start listening within 15s")
-            if rnsd_proc.poll() is not None:
-                stderr = rnsd_proc.stderr.read().decode(errors="replace")
-                print(f"  rnsd stderr:\n{stderr}")
-            sys.exit(1)
-        print("[robustness] rnsd is listening")
-
-        # ---- Step 2: Start Rust node ----
-        print("[robustness] starting Rust node...")
-        rust_proc = subprocess.Popen(
-            [
-                rust_binary,
-                "--connect", f"127.0.0.1:{args.port}",
-                "--identity-seed", "robustness-test-seed-77",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        procs.append(rust_proc)
+    with InteropTest("robustness", default_port=4249) as t:
+        t.start_rnsd()
+        rust = t.start_rust(seed="robustness-test-seed-77")
         time.sleep(2)
 
-        if not rust_is_alive(rust_proc):
-            print("[robustness] FAIL: Rust node exited prematurely")
-            sys.exit(1)
-        print("[robustness] Rust node is running")
+        # Verify Rust node started
+        t.check(t._rust_proc and t._rust_proc.poll() is None,
+                "Rust node started and is running")
 
-        # ---- Step 3: Start Python valid client (for recovery probes) ----
-        # This client periodically announces so we can verify the Rust node
-        # is still processing valid traffic after each malformed injection.
-        py_valid_script = os.path.join(tmpdir, "py_valid_client.py")
+        # Start Python valid client (needs stdin for triggering announces).
+        # We manage this subprocess manually but register it with the harness
+        # for cleanup.
+        py_valid_script = os.path.join(t.tmpdir, "py_valid_client.py")
         with open(py_valid_script, "w") as f:
             f.write(f"""\
 import RNS
 import time
 import os
 import sys
+import threading
 
-config_dir = os.path.join("{tmpdir}", "py_valid_config")
+config_dir = os.path.join("{t.tmpdir}", "py_valid_config")
 os.makedirs(config_dir, exist_ok=True)
 with open(os.path.join(config_dir, "config"), "w") as cf:
-    cf.write(\"\"\"
-[reticulum]
-  enable_transport = no
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-
-  [[TCP Client Interface]]
-    type = TCPClientInterface
-    enabled = yes
-    target_host = 127.0.0.1
-    target_port = {args.port}
-\"\"\")
+    cf.write(\"\"\"{t.py_rns_config()}\"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)
 
@@ -268,17 +186,12 @@ dest = RNS.Destination(
 print(f"PY_VALID_DEST:{{dest.hexhash}}", flush=True)
 print(f"PY_VALID_IDENTITY:{{identity.hexhash}}", flush=True)
 
-# Announce every time stdin receives a line (triggered by parent process)
-# Also do an initial announce.
-import threading
-
 def announce_on_signal():
-    \"\"\"Read lines from stdin; each line triggers a fresh announce.\"\"\"
     for line in sys.stdin:
         line = line.strip()
         if line == "ANNOUNCE":
             dest.announce()
-            print(f"PY_VALID_ANNOUNCED", flush=True)
+            print("PY_VALID_ANNOUNCED", flush=True)
         elif line == "QUIT":
             break
 
@@ -290,133 +203,82 @@ dest.announce()
 print("PY_VALID_ANNOUNCED", flush=True)
 
 # Stay alive until told to quit or timeout
-deadline = time.time() + {args.timeout + 30}
+deadline = time.time() + {t.timeout + 30}
 while time.time() < deadline:
     time.sleep(0.5)
 
 print("PY_VALID_DONE", flush=True)
 """)
 
-        print("[robustness] starting Python valid client...")
         py_valid_proc = subprocess.Popen(
             [sys.executable, py_valid_script],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        procs.append(py_valid_proc)
-        time.sleep(3)  # Let the valid client connect and send initial announce
+        t._procs.append(py_valid_proc)
 
-        # Verify Rust saw the initial announce
-        # (We check at the end, but let's confirm the valid client started)
-        if not rust_is_alive(rust_proc):
-            print("[robustness] FAIL: Rust node died before tests started")
-            sys.exit(1)
+        py_valid_lines = []
+        py_reader = threading.Thread(
+            target=read_stdout_lines,
+            args=(py_valid_proc, py_valid_lines, t._stop),
+            daemon=True,
+        )
+        py_reader.start()
 
-        # ---- Step 4: Connect raw TCP socket (malicious peer) ----
-        print("[robustness] connecting raw TCP socket to rnsd...")
-        raw_sock = socket.create_connection(("127.0.0.1", args.port), timeout=5.0)
+        time.sleep(3)  # Let valid client connect and send initial announce
+
+        # Connect raw TCP socket (malicious peer)
+        raw_sock = socket.create_connection(("127.0.0.1", t.port), timeout=5.0)
         raw_sock.settimeout(2.0)
-        time.sleep(1)  # Let rnsd register the connection
+        time.sleep(1)
 
-        # ================================================================
         # Helper: trigger a valid announce and verify Rust is still alive
-        # ================================================================
-        announce_count = 0
-
-        def verify_rust_alive(test_name: str) -> bool:
-            """Send 'ANNOUNCE' to the valid Python client to trigger a fresh
-            announce, then check the Rust process is still running."""
-            nonlocal announce_count
-            announce_count += 1
+        def verify_rust_alive(test_name):
             try:
                 py_valid_proc.stdin.write(b"ANNOUNCE\n")
                 py_valid_proc.stdin.flush()
             except (BrokenPipeError, OSError):
                 pass
-            time.sleep(1.5)  # Allow time for announce to propagate
-            alive = rust_is_alive(rust_proc)
-            if not alive:
-                print(f"[robustness] FAIL [{test_name}]: Rust node CRASHED!")
-            return alive
+            time.sleep(1.5)
+            return t._rust_proc and t._rust_proc.poll() is None
 
-        # ================================================================
-        # TEST 1: Truncated packet (< 19 bytes)
-        # ================================================================
-        test_name = "1/8: truncated packet"
-        print(f"[robustness] running test {test_name}...")
+        # ---- TEST 1: Truncated packet (< 19 bytes) ----
         pkt = build_truncated_packet()
         send_raw(raw_sock, hdlc_encode(pkt))
         time.sleep(0.5)
-        if verify_rust_alive(test_name):
-            print(f"[robustness] PASS [{test_name}]: Rust survived")
-            passed += 1
-        else:
-            failed += 1
+        t.check(verify_rust_alive("truncated"),
+                "Rust survived truncated packet (< 19 bytes)")
 
-        # ================================================================
-        # TEST 2: Oversized packet (> 500-byte MTU)
-        # ================================================================
-        test_name = "2/8: oversized packet"
-        print(f"[robustness] running test {test_name}...")
+        # ---- TEST 2: Oversized packet (> 500-byte MTU) ----
         pkt = build_oversized_packet()
         send_raw(raw_sock, hdlc_encode(pkt))
         time.sleep(0.5)
-        if verify_rust_alive(test_name):
-            print(f"[robustness] PASS [{test_name}]: Rust survived")
-            passed += 1
-        else:
-            failed += 1
+        t.check(verify_rust_alive("oversized"),
+                "Rust survived oversized packet (> 500-byte MTU)")
 
-        # ================================================================
-        # TEST 3: Announce with corrupted signature
-        # ================================================================
-        test_name = "3/8: corrupt announce signature"
-        print(f"[robustness] running test {test_name}...")
+        # ---- TEST 3: Announce with corrupted signature ----
         pkt = build_corrupt_announce()
         send_raw(raw_sock, hdlc_encode(pkt))
         time.sleep(0.5)
-        if verify_rust_alive(test_name):
-            print(f"[robustness] PASS [{test_name}]: Rust survived")
-            passed += 1
-        else:
-            failed += 1
+        t.check(verify_rust_alive("corrupt-announce"),
+                "Rust survived announce with corrupted signature")
 
-        # ================================================================
-        # TEST 4: PROOF with non-existent destination hash
-        # ================================================================
-        test_name = "4/8: proof non-existent dest"
-        print(f"[robustness] running test {test_name}...")
+        # ---- TEST 4: PROOF with non-existent destination hash ----
         pkt = build_proof_nonexistent_dest()
         send_raw(raw_sock, hdlc_encode(pkt))
         time.sleep(0.5)
-        if verify_rust_alive(test_name):
-            print(f"[robustness] PASS [{test_name}]: Rust survived")
-            passed += 1
-        else:
-            failed += 1
+        t.check(verify_rust_alive("proof-nonexistent"),
+                "Rust survived PROOF with non-existent destination hash")
 
-        # ================================================================
-        # TEST 5: Random garbage bytes (not HDLC-framed)
-        # ================================================================
-        test_name = "5/8: raw garbage (no HDLC)"
-        print(f"[robustness] running test {test_name}...")
+        # ---- TEST 5: Random garbage bytes (not HDLC-framed) ----
         garbage = os.urandom(200)
         send_raw(raw_sock, garbage)
         time.sleep(0.5)
-        if verify_rust_alive(test_name):
-            print(f"[robustness] PASS [{test_name}]: Rust survived")
-            passed += 1
-        else:
-            failed += 1
+        t.check(verify_rust_alive("raw-garbage"),
+                "Rust survived raw garbage (no HDLC framing)")
 
-        # ================================================================
-        # TEST 6: Valid -> garbage -> valid (recovery test)
-        # ================================================================
-        test_name = "6/8: valid-garbage-valid recovery"
-        print(f"[robustness] running test {test_name}...")
-
-        # Send a valid announce through the Python client
+        # ---- TEST 6: Valid -> garbage -> valid (recovery test) ----
         try:
             py_valid_proc.stdin.write(b"ANNOUNCE\n")
             py_valid_proc.stdin.flush()
@@ -424,11 +286,9 @@ print("PY_VALID_DONE", flush=True)
             pass
         time.sleep(1)
 
-        # Send garbage through raw socket
         send_raw(raw_sock, os.urandom(150))
         time.sleep(0.5)
 
-        # Send another valid announce
         try:
             py_valid_proc.stdin.write(b"ANNOUNCE\n")
             py_valid_proc.stdin.flush()
@@ -436,48 +296,25 @@ print("PY_VALID_DONE", flush=True)
             pass
         time.sleep(1.5)
 
-        if verify_rust_alive(test_name):
-            print(f"[robustness] PASS [{test_name}]: Rust survived and recovered")
-            passed += 1
-        else:
-            failed += 1
+        t.check(verify_rust_alive("valid-garbage-valid"),
+                "Rust survived valid-garbage-valid recovery sequence")
 
-        # ================================================================
-        # TEST 7: Empty HDLC frame (FLAG FLAG — no data)
-        # ================================================================
-        test_name = "7/8: empty HDLC frame"
-        print(f"[robustness] running test {test_name}...")
+        # ---- TEST 7: Empty HDLC frame (FLAG FLAG -- no data) ----
         send_raw(raw_sock, bytes([FLAG, FLAG]))
         time.sleep(0.5)
-        if verify_rust_alive(test_name):
-            print(f"[robustness] PASS [{test_name}]: Rust survived")
-            passed += 1
-        else:
-            failed += 1
+        t.check(verify_rust_alive("empty-hdlc"),
+                "Rust survived empty HDLC frame")
 
-        # ================================================================
-        # TEST 8: Escape-heavy HDLC frame (stress decoder)
-        # ================================================================
-        test_name = "8/8: escape-heavy HDLC frame"
-        print(f"[robustness] running test {test_name}...")
+        # ---- TEST 8: Escape-heavy HDLC frame (stress decoder) ----
         pkt = build_escape_heavy_packet()
         encoded = hdlc_encode(pkt)
-        # Verify escaping actually expanded the frame significantly
         assert len(encoded) > len(pkt) + 50, "escape-heavy packet was not expanded enough"
         send_raw(raw_sock, encoded)
         time.sleep(0.5)
-        if verify_rust_alive(test_name):
-            print(f"[robustness] PASS [{test_name}]: Rust survived")
-            passed += 1
-        else:
-            failed += 1
+        t.check(verify_rust_alive("escape-heavy"),
+                "Rust survived escape-heavy HDLC frame")
 
-        # ================================================================
-        # Final check: Rust node received at least one valid announce
-        # ================================================================
-        print("[robustness] final verification: checking Rust node output...")
-
-        # Give a last announce a moment to propagate
+        # Final: check Rust received at least one valid announce
         try:
             py_valid_proc.stdin.write(b"ANNOUNCE\n")
             py_valid_proc.stdin.flush()
@@ -485,7 +322,13 @@ print("PY_VALID_DONE", flush=True)
             pass
         time.sleep(2)
 
-        # Terminate the valid Python client
+        # Close raw socket
+        try:
+            raw_sock.close()
+        except Exception:
+            pass
+
+        # Terminate valid Python client
         try:
             py_valid_proc.stdin.write(b"QUIT\n")
             py_valid_proc.stdin.flush()
@@ -493,68 +336,19 @@ print("PY_VALID_DONE", flush=True)
             pass
         time.sleep(1)
 
-        # Terminate Rust node
-        if rust_is_alive(rust_proc):
-            rust_proc.send_signal(signal.SIGTERM)
-        try:
-            rust_stdout, rust_stderr = rust_proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            rust_proc.kill()
-            rust_stdout, rust_stderr = rust_proc.communicate()
+        # Collect output
+        rust_stderr = t.collect_rust_stderr()
+        t.dump_output("Rust node stdout", rust)
+        t.dump_output("Rust node stderr (last 1000)", rust_stderr.strip().split("\n"))
+        t.dump_output("Python valid client stdout", py_valid_lines)
 
-        rust_output = rust_stdout.decode(errors="replace")
-        rust_err_output = rust_stderr.decode(errors="replace")
-
-        print("[robustness] Rust node stdout:")
-        for line in rust_output.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        print("[robustness] Rust node stderr (last 800 chars):")
-        for line in rust_err_output[-800:].strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        # Verify at least one ANNOUNCE was received (the valid Python client)
-        announce_lines = [l for l in rust_output.strip().split("\n")
-                          if l.startswith("ANNOUNCE:")]
+        announce_lines = [l for l in rust if l.startswith("ANNOUNCE:")]
         if announce_lines:
             print(f"[robustness] INFO: Rust received {len(announce_lines)} valid announce(s) "
-                  f"throughout the test — node was processing traffic correctly")
+                  "throughout the test -- node was processing traffic correctly")
         else:
-            print("[robustness] WARNING: Rust received 0 announces — "
+            print("[robustness] WARNING: Rust received 0 announces -- "
                   "the valid Python client may not have connected properly")
-
-    finally:
-        # Cleanup
-        print("[robustness] cleaning up...")
-        if raw_sock:
-            try:
-                raw_sock.close()
-            except Exception:
-                pass
-
-        for p in procs:
-            try:
-                p.kill()
-                p.wait(timeout=5)
-            except Exception:
-                pass
-
-        try:
-            shutil.rmtree(tmpdir)
-        except Exception:
-            pass
-
-    # Summary
-    total = passed + failed
-    print(f"\n[robustness] Results: {passed}/{total} passed, {failed}/{total} failed")
-
-    if failed > 0:
-        sys.exit(1)
-    else:
-        print("[robustness] ALL TESTS PASSED")
-        sys.exit(0)
 
 
 if __name__ == "__main__":

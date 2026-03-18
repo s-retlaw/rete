@@ -23,111 +23,60 @@ Usage:
   uv run python proof_routing_interop.py
 """
 
-import argparse
-import os
-import shutil
-import signal
 import subprocess
 import sys
-import tempfile
 import time
 
-from interop_helpers import write_rnsd_config, wait_for_port
+from interop_helpers import InteropTest
 
 
 def main():
-    parser = argparse.ArgumentParser(description="rete proof routing E2E test")
-    parser.add_argument(
-        "--rust-binary",
-        default="../../target/debug/rete-linux",
-    )
-    parser.add_argument("--port1", type=int, default=4247)
-    parser.add_argument("--port2", type=int, default=4248)
-    parser.add_argument("--timeout", type=float, default=30.0)
-    args = parser.parse_args()
+    with InteropTest("proof-routing", default_port=4247) as t:
+        port1 = t.port
+        port2 = t.port + 1  # 4248
 
-    rust_binary = os.path.abspath(args.rust_binary)
-    if not os.path.exists(rust_binary):
-        print(f"[proof-routing] FAIL: Rust binary not found at {rust_binary}")
-        sys.exit(1)
+        # Start both rnsd instances
+        t.start_rnsd(port=port1)
+        t.start_rnsd(port=port2)
 
-    tmpdir = tempfile.mkdtemp(prefix="rete_proof_routing_")
-    procs = []
-    passed = 0
-    failed = 0
-
-    try:
-        # --- Start rnsd_1 and rnsd_2 ---
-        for label, port in [("rnsd_1", args.port1), ("rnsd_2", args.port2)]:
-            config_dir = os.path.join(tmpdir, f"{label}_config")
-            write_rnsd_config(config_dir, port)
-            print(f"[proof-routing] starting {label} on port {port}...")
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "RNS.Utilities.rnsd", "--config", config_dir],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            procs.append(proc)
-
-        for label, port in [("rnsd_1", args.port1), ("rnsd_2", args.port2)]:
-            if not wait_for_port("127.0.0.1", port):
-                print(f"[proof-routing] FAIL: {label} did not start")
-                sys.exit(1)
-            print(f"[proof-routing] {label} is listening")
-
-        # --- Get Rust transport dest hash for filtering ---
+        # Get Rust transport dest hash for filtering
         rust_seed = "proof-routing-e2e-seed"
-        result = subprocess.run(
-            [rust_binary, "--identity-seed", rust_seed, "--connect", "127.0.0.99:1"],
-            capture_output=True, text=True, timeout=5,
-        )
         rust_dest_hex = ""
-        for line in result.stderr.split("\n"):
-            if "destination hash:" in line:
-                rust_dest_hex = line.strip().split("destination hash: ")[-1]
-                break
+        try:
+            result = subprocess.run(
+                [t.rust_binary, "--identity-seed", rust_seed,
+                 "--connect", "127.0.0.99:1"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stderr.split("\n"):
+                if "destination hash:" in line:
+                    rust_dest_hex = line.strip().split("destination hash: ")[-1]
+                    break
+        except subprocess.TimeoutExpired:
+            pass
 
-        # --- Start Rust transport node ---
-        print("[proof-routing] starting Rust transport node...")
-        rust_proc = subprocess.Popen(
-            [
-                rust_binary,
-                "--connect", f"127.0.0.1:{args.port1}",
-                "--connect", f"127.0.0.1:{args.port2}",
+        # Start Rust transport node connecting to both rnsd instances
+        rust = t.start_rust(
+            seed=rust_seed,
+            port=port1,
+            extra_args=[
+                "--connect", f"127.0.0.1:{port2}",
                 "--transport",
-                "--identity-seed", rust_seed,
             ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        procs.append(rust_proc)
         time.sleep(3)
 
-        # --- Python_B: receiver with PROVE_ALL ---
-        py_b_script = os.path.join(tmpdir, "py_b.py")
-        with open(py_b_script, "w") as f:
-            f.write(f"""\
+        # --- Python_B: receiver with PROVE_ALL (connects to rnsd_2) ---
+        py_b = t.start_py_helper(f"""\
 import RNS
 import time
 import os
 import threading
 
-config_dir = os.path.join("{tmpdir}", "py_b_config")
+config_dir = os.path.join("{t.tmpdir}", "py_b_config")
 os.makedirs(config_dir, exist_ok=True)
 with open(os.path.join(config_dir, "config"), "w") as cf:
-    cf.write(\"\"\"
-[reticulum]
-  enable_transport = no
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-  [[TCP Client Interface]]
-    type = TCPClientInterface
-    enabled = yes
-    target_host = 127.0.0.1
-    target_port = {args.port2}
-\"\"\")
+    cf.write(\"\"\"{t.py_rns_config(port=port2, transport=False)}\"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)
 
@@ -143,7 +92,6 @@ dest = RNS.Destination(
     identity, RNS.Destination.IN, RNS.Destination.SINGLE,
     "rete", "example", "v1",
 )
-# Enable automatic proof generation for ALL received packets
 dest.set_proof_strategy(RNS.Destination.PROVE_ALL)
 dest.set_packet_callback(packet_callback)
 dest.announce()
@@ -151,8 +99,7 @@ dest.announce()
 print(f"PY_B_DEST_HASH:{{dest.hexhash}}", flush=True)
 print("PY_B_PROVE_ALL_SET", flush=True)
 
-# Wait for data
-if data_received.wait(timeout={args.timeout}):
+if data_received.wait(timeout={t.timeout}):
     print("PY_B_DATA_OK", flush=True)
 else:
     print("PY_B_DATA_TIMEOUT", flush=True)
@@ -162,38 +109,20 @@ time.sleep(5)
 print("PY_B_DONE", flush=True)
 """)
 
-        # --- Python_A: sender that expects a proof back ---
-        # (Script is written first, both nodes start simultaneously below)
-        py_a_script = os.path.join(tmpdir, "py_a.py")
-        with open(py_a_script, "w") as f:
-            f.write(f"""\
+        # --- Python_A: sender that expects a proof back (connects to rnsd_1) ---
+        py_a = t.start_py_helper(f"""\
 import RNS
 import time
 import os
 import threading
 
-config_dir = os.path.join("{tmpdir}", "py_a_config")
+config_dir = os.path.join("{t.tmpdir}", "py_a_config")
 os.makedirs(config_dir, exist_ok=True)
 with open(os.path.join(config_dir, "config"), "w") as cf:
-    cf.write(\"\"\"
-[reticulum]
-  enable_transport = no
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-  [[TCP Client Interface]]
-    type = TCPClientInterface
-    enabled = yes
-    target_host = 127.0.0.1
-    target_port = {args.port1}
-\"\"\")
+    cf.write(\"\"\"{t.py_rns_config(port=port1, transport=False)}\"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)
 
-# Dest hashes to filter
 exclude_hex = "{rust_dest_hex}"
 exclude_hash = bytes.fromhex(exclude_hex) if exclude_hex else None
 
@@ -205,7 +134,7 @@ dest = RNS.Destination(
 dest.announce()
 
 # Wait for Python_B's announce (relayed through Rust)
-deadline = time.time() + {args.timeout}
+deadline = time.time() + {t.timeout}
 peer_hash = None
 while time.time() < deadline:
     for h in RNS.Transport.path_table:
@@ -226,7 +155,6 @@ if not peer_hash:
 
 print(f"PY_A_PEER_FOUND:{{peer_hash.hex()}}", flush=True)
 
-# Build outbound destination and send DATA
 peer_identity = RNS.Identity.recall(peer_hash)
 if not peer_identity:
     print("PY_A_IDENTITY_NOT_RECALLED", flush=True)
@@ -256,7 +184,6 @@ receipt.set_timeout(15)
 
 print("PY_A_DATA_SENT", flush=True)
 
-# Wait for proof
 if proof_received.wait(timeout=20):
     print("PY_A_PROOF_OK", flush=True)
 else:
@@ -266,102 +193,32 @@ time.sleep(2)
 print("PY_A_DONE", flush=True)
 """)
 
-        # Start both Python nodes simultaneously so they both see each
-        # other's announces when Rust re-broadcasts them.
-        print("[proof-routing] starting Python_B (receiver, PROVE_ALL)...")
-        py_b_proc = subprocess.Popen(
-            [sys.executable, py_b_script],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        procs.append(py_b_proc)
-
-        print("[proof-routing] starting Python_A (sender, expects proof)...")
-        py_a_proc = subprocess.Popen(
-            [sys.executable, py_a_script],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        procs.append(py_a_proc)
-
-        # --- Collect results ---
-        print(f"[proof-routing] waiting up to {args.timeout}s...")
-
-        for proc in [py_a_proc, py_b_proc]:
-            try:
-                proc.wait(timeout=args.timeout + 15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-
-        py_a_out = py_a_proc.stdout.read().decode(errors="replace")
-        py_b_out = py_b_proc.stdout.read().decode(errors="replace")
+        # Wait for both Python helpers to finish
+        t.wait_for_line(py_b, "PY_B_DONE", timeout=t.timeout + 15)
+        t.wait_for_line(py_a, "PY_A_DONE", timeout=t.timeout + 15)
 
         time.sleep(1)
-        rust_proc.send_signal(signal.SIGTERM)
-        try:
-            rust_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            rust_proc.kill()
-            rust_proc.wait()
+        rust_stderr = t.collect_rust_stderr()
 
-        rust_stdout = rust_proc.stdout.read().decode(errors="replace")
-        rust_stderr = rust_proc.stderr.read().decode(errors="replace")
-
-        print("[proof-routing] Python_A output:")
-        for line in py_a_out.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        print("[proof-routing] Python_B output:")
-        for line in py_b_out.strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        print("[proof-routing] Rust stderr (last 500 chars):")
-        for line in rust_stderr[-500:].strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
+        # Dump output
+        t.dump_output("Python_A output", py_a)
+        t.dump_output("Python_B output", py_b)
+        t.dump_output("Rust stderr (last 500)", rust_stderr.strip().split("\n"))
 
         # --- Assertions ---
 
         # 1. Python_B received DATA
-        if "PY_B_DATA_RECEIVED:prove this" in py_b_out:
-            print("[proof-routing] PASS [1/2]: Python_B received DATA via Rust relay")
-            passed += 1
-        else:
-            print("[proof-routing] FAIL [1/2]: Python_B did not receive DATA")
-            failed += 1
+        t.check(
+            t.has_line(py_b, "PY_B_DATA_RECEIVED:", contains="prove this"),
+            "Python_B received DATA via Rust relay",
+        )
 
         # 2. Python_A received proof (routed back through Rust)
-        if "PY_A_PROOF_RECEIVED" in py_a_out:
-            print("[proof-routing] PASS [2/2]: Python_A received delivery proof via Rust relay")
-            passed += 1
-        else:
-            print("[proof-routing] FAIL [2/2]: Python_A did not receive delivery proof")
-            if "PY_A_PROOF_TIMEOUT" in py_a_out:
-                print("  (proof timed out)")
-            if "PY_A_PROOF_WAIT_TIMEOUT" in py_a_out:
-                print("  (wait timed out)")
-            failed += 1
-
-    finally:
-        print("[proof-routing] cleaning up...")
-        for p in procs:
-            try:
-                p.kill()
-                p.wait(timeout=5)
-            except Exception:
-                pass
-        try:
-            shutil.rmtree(tmpdir)
-        except Exception:
-            pass
-
-    total = passed + failed
-    print(f"\n[proof-routing] Results: {passed}/{total} passed, {failed}/{total} failed")
-    if failed > 0:
-        sys.exit(1)
-    else:
-        print("[proof-routing] ALL TESTS PASSED")
-        sys.exit(0)
+        t.check(
+            t.has_line(py_a, "PY_A_PROOF_RECEIVED"),
+            "Python_A received delivery proof via Rust relay",
+            detail="proof timed out" if t.has_line(py_a, "PY_A_PROOF_TIMEOUT") else None,
+        )
 
 
 if __name__ == "__main__":
