@@ -31,6 +31,11 @@ pub enum NodeCommand {
     },
     /// Request a path to a destination.
     RequestPath { dest_hash: [u8; TRUNCATED_HASH_LEN] },
+    /// Send plain data over an established link.
+    SendLinkData {
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        payload: Vec<u8>,
+    },
     /// Send a resource (large data) over a link.
     SendResource {
         link_id: [u8; TRUNCATED_HASH_LEN],
@@ -146,6 +151,15 @@ impl TokioNode {
             NodeCommand::RequestPath { dest_hash } => {
                 eprintln!("[rete] cmd: requesting path to {}", hex(&dest_hash));
                 (vec![self.core.request_path(&dest_hash)], true)
+            }
+            NodeCommand::SendLinkData { link_id, payload } => {
+                if let Some(outbound) = self.core.send_link_data(&link_id, &payload, rng) {
+                    eprintln!("[rete] cmd: sent link data on {}", hex(&link_id));
+                    (vec![outbound], true)
+                } else {
+                    eprintln!("[rete] cmd: link data send failed (link {})", hex(&link_id));
+                    (vec![], true)
+                }
             }
             NodeCommand::SendResource { link_id, data } => {
                 if let Some(pkt) = self.core.start_resource(&link_id, &data, rng) {

@@ -39,7 +39,7 @@ fn build_link_request(
     let mut buf = [0u8; MTU];
     let n = PacketBuilder::new(&mut buf)
         .packet_type(PacketType::LinkRequest)
-        .dest_type(DestType::Link)
+        .dest_type(DestType::Single)
         .destination_hash(dest_hash)
         .context(0x00)
         .payload(&request_payload)
@@ -480,10 +480,10 @@ fn initiate_link_returns_request() {
         .initiate_link(dest_hash, &identity, &mut rng, 100)
         .unwrap();
 
-    // Should be a parseable LINKREQUEST
+    // Should be a parseable LINKREQUEST with dest_type=Single (matching target dest)
     let parsed = Packet::parse(&pkt).unwrap();
     assert_eq!(parsed.packet_type, PacketType::LinkRequest);
-    assert_eq!(parsed.dest_type, DestType::Link);
+    assert_eq!(parsed.dest_type, DestType::Single);
 
     // Transport should have the link
     assert_eq!(t.link_count(), 1);

@@ -263,14 +263,24 @@ impl Link {
         let signature = &proof_payload[..64];
         let mut responder_x25519_pub = [0u8; 32];
         responder_x25519_pub.copy_from_slice(&proof_payload[64..96]);
+        // Signalling bytes: 0 bytes (no MTU signalling) or 3 bytes (Link.LINK_MTU_SIZE).
+        // Reject anything outside this range to prevent buffer overflow.
+        let signalling = &proof_payload[96..];
+        if signalling.len() > 3 {
+            return Err(rete_core::Error::PacketTooShort);
+        }
 
-        // Verify signature: responder signed (link_id || responder_x25519_pub || responder_ed25519_pub)
-        let mut signed_data = [0u8; 80];
+        // Verify signature: responder signed
+        // (link_id || responder_x25519_pub || responder_ed25519_pub [|| signalling_bytes])
+        // Python includes signalling_bytes in the signed data when present (Link.py:373).
+        let mut signed_data = [0u8; 83]; // max: 16+32+32+3
+        let signed_len = 80 + signalling.len();
         signed_data[..16].copy_from_slice(&self.link_id);
         signed_data[16..48].copy_from_slice(&responder_x25519_pub);
         signed_data[48..80].copy_from_slice(dest_identity.ed25519_pub());
+        signed_data[80..signed_len].copy_from_slice(signalling);
 
-        dest_identity.verify(&signed_data, signature)?;
+        dest_identity.verify(&signed_data[..signed_len], signature)?;
 
         // ECDH with responder's X25519 pub
         let our_secret = x25519_dalek::StaticSecret::from(self.our_x25519_prv);
@@ -460,7 +470,7 @@ mod tests {
         let mut buf = [0u8; MTU];
         let n = PacketBuilder::new(&mut buf)
             .packet_type(PacketType::LinkRequest)
-            .dest_type(DestType::Link)
+            .dest_type(DestType::Single)
             .destination_hash(&dest_hash)
             .context(0x00)
             .payload(&payload)
@@ -597,7 +607,7 @@ mod tests {
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
-            .dest_type(DestType::Link)
+            .dest_type(DestType::Single)
             .destination_hash(&dest_hash)
             .context(0x00)
             .payload(&request_payload)
@@ -647,7 +657,7 @@ mod tests {
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
-            .dest_type(DestType::Link)
+            .dest_type(DestType::Single)
             .destination_hash(&dest_hash)
             .context(0x00)
             .payload(&request_payload)
@@ -810,7 +820,7 @@ mod tests {
         let mut buf = [0u8; MTU];
         let n = PacketBuilder::new(&mut buf)
             .packet_type(PacketType::LinkRequest)
-            .dest_type(DestType::Link)
+            .dest_type(DestType::Single)
             .destination_hash(&dest_hash)
             .context(0x00)
             .payload(&payload)
@@ -825,7 +835,7 @@ mod tests {
         let mut buf2 = [0u8; MTU];
         let n2 = PacketBuilder::new(&mut buf2)
             .packet_type(PacketType::LinkRequest)
-            .dest_type(DestType::Link)
+            .dest_type(DestType::Single)
             .destination_hash(&dest_hash)
             .context(0x00)
             .payload(&payload[..64])
@@ -854,7 +864,7 @@ mod tests {
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
-            .dest_type(DestType::Link)
+            .dest_type(DestType::Single)
             .destination_hash(&dest_hash)
             .context(0x00)
             .payload(&request_payload)

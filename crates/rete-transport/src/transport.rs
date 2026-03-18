@@ -407,17 +407,36 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         let (mut link, request_payload) =
             Link::new_initiator(dest_hash, identity.ed25519_pub(), rng, now);
 
-        // Build LINKREQUEST packet
+        // Build LINKREQUEST packet.
+        // dest_type must be Single (matching the target destination type), not Link.
+        // Python RNS uses `self.destination.type` for LINKREQUEST flags (Packet.py:172),
+        // and the receiving node checks `destination.type == packet.destination_type`.
+        //
+        // If we have a transport path (via relay), build HEADER_2 so the relay
+        // creates a link_table entry and can route the LRPROOF back.
+        let via = self.paths.get(&dest_hash).and_then(|p| p.via);
         let mut pkt_buf = [0u8; rete_core::MTU];
-        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+        let builder = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
-            .dest_type(DestType::Link)
+            .dest_type(DestType::Single)
             .destination_hash(&dest_hash)
             .context(0x00)
-            .payload(&request_payload)
-            .build()
-            .ok()?;
+            .payload(&request_payload);
+        let builder = if let Some(transport_id) = via {
+            builder
+                .header_type(HeaderType::Header2)
+                .transport_type(1)
+                .transport_id(&transport_id)
+        } else {
+            builder
+        };
+        let pkt_len = builder.build().ok()?;
 
+        // Compute link_id from the HEADER_1 form of the packet (strip transport
+        // header if present). Python computes link_id from the hashable part which
+        // masks header_type/transport bits, but uses get_hashable_part() which for
+        // HEADER_2 starts at raw[18:] (skipping transport_id). Our compute_link_id
+        // handles both HEADER_1 and HEADER_2.
         let link_id = compute_link_id(&pkt_buf[..pkt_len]).ok()?;
         link.set_link_id(link_id);
 

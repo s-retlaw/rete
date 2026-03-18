@@ -123,6 +123,18 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             };
             Some(NodeCommand::Announce { app_data })
         }
+        "linkdata" => {
+            let parts: Vec<&str> = line.splitn(3, ' ').collect();
+            if parts.len() < 3 {
+                eprintln!("[rete] usage: linkdata <link_id_hex> <text>");
+                return None;
+            }
+            let link_id = parse_hex_16(parts[1])?;
+            Some(NodeCommand::SendLinkData {
+                link_id,
+                payload: parts[2].as_bytes().to_vec(),
+            })
+        }
         "resource" => {
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
             if parts.len() < 3 {
@@ -170,7 +182,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
         "quit" => Some(NodeCommand::Shutdown),
         _ => {
             eprintln!("[rete] unknown command: {line}");
-            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | quit");
+            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | quit");
             None
         }
     }

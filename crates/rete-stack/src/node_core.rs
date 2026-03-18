@@ -466,6 +466,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         )
     }
 
+    /// Send plain data over an established link.
+    pub fn send_link_data<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+        rng: &mut R,
+    ) -> Option<OutboundPacket> {
+        let pkt = self
+            .transport
+            .build_link_data_packet(link_id, data, rete_core::CONTEXT_NONE, rng)?;
+        Some(OutboundPacket::broadcast(pkt))
+    }
+
     /// Start a resource transfer on a link.
     ///
     /// Returns the outbound advertisement packet.
