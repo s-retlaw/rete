@@ -10,7 +10,8 @@
 //! 4MB stack to avoid overflow.
 
 use rete_core::{
-    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
+    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU,
+    TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
 };
 use rete_tokio::{InboundMsg, TokioNode};
 
@@ -41,7 +42,7 @@ fn build_header2_data(
         .header_type(HeaderType::Header2)
         .packet_type(PacketType::Data)
         .dest_type(DestType::Single)
-        .transport_type(1)
+        .transport_type(TRANSPORT_TYPE_TRANSPORT)
         .transport_id(transport_id)
         .destination_hash(dest_hash)
         .context(0x00)

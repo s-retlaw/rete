@@ -12,7 +12,8 @@ use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, CONTEXT_CHANNEL,
     CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, CONTEXT_RESOURCE,
     CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF,
-    CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ, NAME_HASH_LEN, TRUNCATED_HASH_LEN,
+    CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ, NAME_HASH_LEN, TRANSPORT_TYPE_TRANSPORT,
+    TRUNCATED_HASH_LEN,
 };
 use sha2::{Digest, Sha256};
 
@@ -416,21 +417,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // creates a link_table entry and can route the LRPROOF back.
         let via = self.paths.get(&dest_hash).and_then(|p| p.via);
         let mut pkt_buf = [0u8; rete_core::MTU];
-        let builder = PacketBuilder::new(&mut pkt_buf)
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
             .destination_hash(&dest_hash)
             .context(0x00)
-            .payload(&request_payload);
-        let builder = if let Some(transport_id) = via {
-            builder
-                .header_type(HeaderType::Header2)
-                .transport_type(1)
-                .transport_id(&transport_id)
-        } else {
-            builder
-        };
-        let pkt_len = builder.build().ok()?;
+            .payload(&request_payload)
+            .via(via.as_ref())
+            .build()
+            .ok()?;
 
         // Compute link_id from the HEADER_1 form of the packet (strip transport
         // header if present). Python computes link_id from the hashable part which
@@ -1198,7 +1193,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         let mut rebuild_buf = [0u8; rete_core::MTU];
                         let result = PacketBuilder::new(&mut rebuild_buf)
                             .header_type(HeaderType::Header2)
-                            .transport_type(1)
+                            .transport_type(TRANSPORT_TYPE_TRANSPORT)
                             .packet_type(pkt.packet_type)
                             .dest_type(pkt.dest_type)
                             .hops(pkt.hops)

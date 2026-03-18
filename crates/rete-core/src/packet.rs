@@ -44,6 +44,14 @@ use crate::{Error, HEADER_1_OVERHEAD, HEADER_2_OVERHEAD, MTU, TRUNCATED_HASH_LEN
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
+// Transport type constants (flags byte, bit 4)
+// ---------------------------------------------------------------------------
+
+/// Broadcast — packet is not in transport (HEADER_1 default).
+pub const TRANSPORT_TYPE_BROADCAST: u8 = 0;
+/// Transport — packet is being relayed via a transport node (HEADER_2).
+pub const TRANSPORT_TYPE_TRANSPORT: u8 = 1;
+
 // Context byte constants (from Python RNS)
 // ---------------------------------------------------------------------------
 
@@ -371,6 +379,20 @@ impl<'a> PacketBuilder<'a> {
         self
     }
 
+    /// Conditionally set HEADER_2 transport routing via a relay.
+    ///
+    /// If `transport_id` is `Some`, sets header_type to Header2, transport_type
+    /// to TRANSPORT, and the transport_id. If `None`, leaves the builder unchanged.
+    pub fn via(self, transport_id: Option<&[u8; TRUNCATED_HASH_LEN]>) -> Self {
+        match transport_id {
+            Some(tid) => self
+                .header_type(HeaderType::Header2)
+                .transport_type(TRANSPORT_TYPE_TRANSPORT)
+                .transport_id(tid),
+            None => self,
+        }
+    }
+
     /// Set the destination hash (exactly 16 bytes).
     pub fn destination_hash(mut self, hash: &[u8]) -> Self {
         let mut h = [0u8; TRUNCATED_HASH_LEN];
@@ -613,7 +635,7 @@ mod tests {
             .header_type(HeaderType::Header2)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
-            .transport_type(1)
+            .transport_type(TRANSPORT_TYPE_TRANSPORT)
             .transport_id(&tid)
             .destination_hash(&dest)
             .payload(&payload)

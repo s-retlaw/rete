@@ -88,6 +88,17 @@ fn parse_hex_16(hex_str: &str) -> Option<[u8; 16]> {
     bytes.as_slice().try_into().ok()
 }
 
+/// Parse `<cmd> <link_id_hex> <text>` into (link_id, payload).
+fn parse_link_and_text(line: &str, cmd: &str) -> Option<([u8; 16], Vec<u8>)> {
+    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+    if parts.len() < 3 {
+        eprintln!("[rete] usage: {cmd} <link_id_hex> <text>");
+        return None;
+    }
+    let link_id = parse_hex_16(parts[1])?;
+    Some((link_id, parts[2].as_bytes().to_vec()))
+}
+
 fn parse_command(line: &str) -> Option<NodeCommand> {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     match parts.first().copied()? {
@@ -124,28 +135,12 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             Some(NodeCommand::Announce { app_data })
         }
         "linkdata" => {
-            let parts: Vec<&str> = line.splitn(3, ' ').collect();
-            if parts.len() < 3 {
-                eprintln!("[rete] usage: linkdata <link_id_hex> <text>");
-                return None;
-            }
-            let link_id = parse_hex_16(parts[1])?;
-            Some(NodeCommand::SendLinkData {
-                link_id,
-                payload: parts[2].as_bytes().to_vec(),
-            })
+            let (link_id, payload) = parse_link_and_text(line, "linkdata")?;
+            Some(NodeCommand::SendLinkData { link_id, payload })
         }
         "resource" => {
-            let parts: Vec<&str> = line.splitn(3, ' ').collect();
-            if parts.len() < 3 {
-                eprintln!("[rete] usage: resource <link_id_hex> <text>");
-                return None;
-            }
-            let link_id = parse_hex_16(parts[1])?;
-            Some(NodeCommand::SendResource {
-                link_id,
-                data: parts[2].as_bytes().to_vec(),
-            })
+            let (link_id, data) = parse_link_and_text(line, "resource")?;
+            Some(NodeCommand::SendResource { link_id, data })
         }
         "lxmf" => {
             let parts: Vec<&str> = line.splitn(3, ' ').collect();

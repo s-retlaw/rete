@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
+    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU,
+    TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
 };
 use rete_transport::{IngestResult, PendingAnnounce, Transport, RECEIPT_TIMEOUT};
 
@@ -275,21 +276,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         let ct_len = recipient.encrypt(plaintext, rng, &mut ct_buf).ok()?;
         let via = self.transport.get_path(dest_hash).and_then(|p| p.via);
         let mut pkt_buf = [0u8; MTU];
-        let builder = PacketBuilder::new(&mut pkt_buf)
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
             .destination_hash(dest_hash)
             .context(0x00)
-            .payload(&ct_buf[..ct_len]);
-        let builder = if let Some(transport_id) = via {
-            builder
-                .header_type(HeaderType::Header2)
-                .transport_type(1)
-                .transport_id(&transport_id)
-        } else {
-            builder
-        };
-        let pkt_len = builder.build().ok()?;
+            .payload(&ct_buf[..ct_len])
+            .via(via.as_ref())
+            .build()
+            .ok()?;
 
         // Register receipt for proof tracking
         if let Ok(parsed) = Packet::parse(&pkt_buf[..pkt_len]) {
@@ -1138,7 +1133,7 @@ mod tests {
             .header_type(HeaderType::Header2)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
-            .transport_type(1)
+            .transport_type(TRANSPORT_TYPE_TRANSPORT)
             .transport_id(&local_hash)
             .destination_hash(&dest)
             .context(0x00)

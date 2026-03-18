@@ -63,6 +63,11 @@ pub enum TeardownReason {
     DestinationClosed,
 }
 
+/// Default keepalive interval in seconds (6 minutes, matches Python RNS).
+pub const KEEPALIVE_INTERVAL_SECS: u64 = 360;
+/// Default stale timeout in seconds (2x keepalive, matches Python RNS).
+pub const STALE_TIMEOUT_SECS: u64 = KEEPALIVE_INTERVAL_SECS * 2;
+
 /// An encrypted link session.
 pub struct Link {
     /// Unique 16-byte link identifier.
@@ -163,8 +168,8 @@ impl Link {
             rtt: 0.0,
             last_inbound: now,
             last_outbound: now,
-            keepalive_interval: 360,
-            stale_time: 720,
+            keepalive_interval: KEEPALIVE_INTERVAL_SECS,
+            stale_time: STALE_TIMEOUT_SECS,
             destination_hash: [0u8; TRUNCATED_HASH_LEN],
             channel: None,
         })
@@ -178,6 +183,12 @@ impl Link {
     /// The signed data uses the responder's own keys (not the initiator's peer keys).
     /// This matches the Python reference: `Link.prove()` signs
     /// `self.link_id + self.pub_bytes + self.sig_pub_bytes`.
+    ///
+    /// Note: Python also appends 3-byte MTU signalling to the signed data and
+    /// proof payload. We omit signalling (returning 96 bytes instead of 99).
+    /// Python's `validate_proof` handles both 96-byte and 99-byte proofs
+    /// correctly — it checks the length and uses empty signalling for 96-byte
+    /// proofs (Link.py:399-408).
     pub fn build_proof(&self, owner_identity: &Identity) -> Result<[u8; 96], rete_core::Error> {
         // Build signed data: link_id || our_x25519_pub || owner_ed25519_pub
         let mut signed_data = [0u8; 80]; // 16 + 32 + 32
@@ -228,8 +239,8 @@ impl Link {
             rtt: 0.0,
             last_inbound: now,
             last_outbound: now,
-            keepalive_interval: 360,
-            stale_time: 720,
+            keepalive_interval: KEEPALIVE_INTERVAL_SECS,
+            stale_time: STALE_TIMEOUT_SECS,
             destination_hash: dest_hash,
             channel: None,
         };
