@@ -9,7 +9,6 @@ def write_rnsd_config(
     config_dir: str,
     port: int,
     ifac_netname: str = None,
-    shared_instance_port: int = None,
 ) -> str:
     """Write a minimal rnsd config file. Returns the config dir path.
 
@@ -17,7 +16,6 @@ def write_rnsd_config(
         config_dir: Directory for the config file.
         port: TCP server listen port.
         ifac_netname: Optional IFAC network name.
-        shared_instance_port: Optional shared instance port override.
     """
     os.makedirs(config_dir, exist_ok=True)
     config_path = os.path.join(config_dir, "config")
@@ -26,15 +24,11 @@ def write_rnsd_config(
     if ifac_netname:
         ifac_line = f"\n    networkname = {ifac_netname}"
 
-    shared_line = ""
-    if shared_instance_port is not None:
-        shared_line = f"\n  shared_instance_port = {shared_instance_port}"
-
     with open(config_path, "w") as f:
         f.write(f"""\
 [reticulum]
   enable_transport = yes
-  share_instance = no{shared_line}
+  share_instance = no
 
 [logging]
   loglevel = 5
