@@ -92,6 +92,26 @@ pub enum NodeEvent {
         /// Delivered messages: (message_type, payload).
         messages: alloc::vec::Vec<(u16, alloc::vec::Vec<u8>)>,
     },
+    /// A link.request() was received on a link.
+    RequestReceived {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The request_id (SHA-256(packed_request)[..10]).
+        request_id: [u8; 10],
+        /// The path_hash (SHA-256(path)[..10]).
+        path_hash: [u8; 10],
+        /// The request data payload.
+        data: alloc::vec::Vec<u8>,
+    },
+    /// A link.response() was received on a link.
+    ResponseReceived {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The request_id this response is for.
+        request_id: [u8; 10],
+        /// The response data payload.
+        data: alloc::vec::Vec<u8>,
+    },
     /// A link was closed.
     LinkClosed {
         /// The link_id.

@@ -72,6 +72,12 @@ pub const CONTEXT_LRRTT: u8 = 0xFE;
 /// Link request proof (part of handshake).
 pub const CONTEXT_LRPROOF: u8 = 0xFF;
 
+// Request/response context bytes (link.request() / link.response())
+/// Request context — link.request() RPC call.
+pub const CONTEXT_REQUEST: u8 = 0x09;
+/// Response context — link.response() RPC reply.
+pub const CONTEXT_RESPONSE: u8 = 0x0A;
+
 // Resource transfer context bytes
 /// Part of a resource transfer.
 pub const CONTEXT_RESOURCE: u8 = 0x01;

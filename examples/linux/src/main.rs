@@ -478,7 +478,7 @@ async fn main() {
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,
-            |e| on_event(e, &lxmf_router),
+            |e, core, rng| on_event(e, &lxmf_router, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
             rand::thread_rng(),
         )
@@ -498,7 +498,7 @@ async fn main() {
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,
-            |e| on_event(e, &lxmf_router),
+            |e, core, rng| on_event(e, &lxmf_router, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
             rand::thread_rng(),
         )
@@ -516,7 +516,7 @@ async fn main() {
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,
-            |e| on_event(e, &lxmf_router),
+            |e, core, rng| on_event(e, &lxmf_router, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
             rand::thread_rng(),
         )
@@ -617,13 +617,18 @@ async fn main() {
         // If we have a local server, we need to also broadcast outbound packets
         // to local clients. We wrap the multi-interface loop with a broadcaster.
         if let Some(broadcaster) = local_broadcaster {
-            run_multi_with_local_server(&mut node, senders, inbound_rx, cmd_rx, broadcaster, |e| {
-                on_event(e, &lxmf_router)
-            })
+            run_multi_with_local_server(
+                &mut node,
+                senders,
+                inbound_rx,
+                cmd_rx,
+                broadcaster,
+                |e, core, rng| on_event(e, &lxmf_router, core, rng),
+            )
             .await;
         } else {
-            node.run_multi_with_commands(senders, inbound_rx, cmd_rx, |e| {
-                on_event(e, &lxmf_router)
+            node.run_multi_with_commands(senders, inbound_rx, cmd_rx, |e, core, rng| {
+                on_event(e, &lxmf_router, core, rng)
             })
             .await;
         }
@@ -646,7 +651,7 @@ async fn main() {
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,
-            |e| on_event(e, &lxmf_router),
+            |e, core, rng| on_event(e, &lxmf_router, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
             rand::thread_rng(),
         )
@@ -673,7 +678,11 @@ async fn run_multi_with_local_server<F>(
     broadcaster: rete_tokio::local::LocalBroadcaster,
     mut on_event: F,
 ) where
-    F: FnMut(NodeEvent),
+    F: FnMut(
+        NodeEvent,
+        &mut rete_stack::HostedNodeCore,
+        &mut rand::rngs::ThreadRng,
+    ) -> Vec<OutboundPacket>,
 {
     use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
@@ -703,10 +712,6 @@ async fn run_multi_with_local_server<F>(
                 let Some(msg) = msg else { break };
                 let now = rete_tokio::current_time_secs();
                 let outcome = node.core.handle_ingest(&msg.data, now, msg.iface_idx, &mut rng);
-                // Determine if this came from a local client (track via client_id in data)
-                // For simplicity: packets from the local iface are broadcast to other
-                // local clients by the server's read task. We only need to forward to
-                // TCP interfaces here.
                 dispatch_with_local(
                     &iface_senders,
                     &outcome.packets,
@@ -715,7 +720,8 @@ async fn run_multi_with_local_server<F>(
                     None,
                 ).await;
                 if let Some(event) = outcome.event {
-                    on_event(event);
+                    let extra = on_event(event, &mut node.core, &mut rng);
+                    dispatch_with_local(&iface_senders, &extra, 0, &broadcaster, None).await;
                 }
             }
             cmd = cmd_rx.recv() => {
@@ -736,7 +742,8 @@ async fn run_multi_with_local_server<F>(
                 let outcome = node.core.handle_tick(now, &mut rng);
                 dispatch_with_local(&iface_senders, &outcome.packets, 0, &broadcaster, None).await;
                 if let Some(event) = outcome.event {
-                    on_event(event);
+                    let extra = on_event(event, &mut node.core, &mut rng);
+                    dispatch_with_local(&iface_senders, &extra, 0, &broadcaster, None).await;
                 }
             }
         }
@@ -790,7 +797,12 @@ async fn dispatch_with_local(
     }
 }
 
-fn on_event(event: NodeEvent, lxmf_router: &RefCell<LxmfRouter>) {
+fn on_event(
+    event: NodeEvent,
+    lxmf_router: &RefCell<LxmfRouter>,
+    core: &mut rete_stack::HostedNodeCore,
+    rng: &mut (impl rand::RngCore + rand::CryptoRng),
+) -> Vec<OutboundPacket> {
     // For ResourceComplete, try bz2 decompression before passing to LXMF router.
     // Python RNS compresses resource data with bz2, so we need to decompress
     // before the LXMF router can parse it.
@@ -871,19 +883,140 @@ fn on_event(event: NodeEvent, lxmf_router: &RefCell<LxmfRouter>) {
                 hex::encode(message_hash),
             );
         }
+        LxmfEvent::PropagationRetrievalRequest {
+            link_id,
+            request_id,
+            dest_hash,
+            result,
+        } => {
+            let count = result.messages.len();
+            eprintln!(
+                "[rete] PROP_RETRIEVAL_REQUEST link={} dest={} count={}",
+                hex::encode(link_id),
+                hex::encode(dest_hash),
+                count,
+            );
+            println!(
+                "PROP_RETRIEVAL_REQUEST:{}:{}:{}",
+                hex::encode(link_id),
+                hex::encode(dest_hash),
+                count,
+            );
+
+            let mut packets = Vec::new();
+
+            // Send the response (count of messages)
+            if let Some(resp_pkt) =
+                core.send_response(&link_id, &request_id, &result.response_data, rng)
+            {
+                packets.push(resp_pkt);
+            }
+
+            // Start sending messages as Resources via retrieval job
+            if !result.messages.is_empty() {
+                let msgs = result.messages;
+                let retrieval_pkts = lxmf_router
+                    .borrow_mut()
+                    .start_retrieval_send(&link_id, msgs, core, rng);
+                packets.extend(retrieval_pkts);
+            }
+
+            return packets;
+        }
         LxmfEvent::PropagationForward { dest_hash, count } => {
             eprintln!(
                 "[rete] PROP_FORWARD dest={} count={}",
                 hex::encode(dest_hash),
                 count,
             );
-            println!("PROP_FORWARD:{}:{}", hex::encode(dest_hash), count,);
+            println!("PROP_FORWARD:{}:{}", hex::encode(dest_hash), count);
+
+            // Auto-forward: initiate a link to the destination
+            let mut router = lxmf_router.borrow_mut();
+            if !router.has_forward_job_for(&dest_hash) {
+                let now = rete_tokio::current_time_secs();
+                if let Some((pkt, link_id)) =
+                    router.start_propagation_forward(&dest_hash, core, rng, now)
+                {
+                    eprintln!(
+                        "[rete] PROP_FORWARD_LINK dest={} link={}",
+                        hex::encode(dest_hash),
+                        hex::encode(link_id),
+                    );
+                    println!(
+                        "PROP_FORWARD_LINK:{}:{}",
+                        hex::encode(dest_hash),
+                        hex::encode(link_id),
+                    );
+                    return vec![pkt];
+                } else {
+                    eprintln!(
+                        "[rete] PROP_FORWARD_FAIL dest={} (no path or no messages)",
+                        hex::encode(dest_hash),
+                    );
+                }
+            }
         }
         LxmfEvent::Other(event) => {
+            // Check if this is a link event that advances a forward job
+            match &event {
+                NodeEvent::LinkEstablished { link_id } => {
+                    let pkts = lxmf_router
+                        .borrow_mut()
+                        .advance_forward_on_link_established(link_id, core, rng);
+                    if !pkts.is_empty() {
+                        eprintln!(
+                            "[rete] PROP_FORWARD_SENDING link={} pkts={}",
+                            hex::encode(link_id),
+                            pkts.len(),
+                        );
+                        println!("PROP_FORWARD_SENDING:{}", hex::encode(link_id));
+                        // Also log the base event
+                        on_node_event(event);
+                        return pkts;
+                    }
+                }
+                NodeEvent::ResourceComplete {
+                    link_id,
+                    resource_hash,
+                    ..
+                } => {
+                    // Try advancing forward jobs first
+                    let pkts = lxmf_router
+                        .borrow_mut()
+                        .advance_forward_on_resource_complete(link_id, resource_hash, core, rng);
+                    if !pkts.is_empty() {
+                        on_node_event(event);
+                        return pkts;
+                    }
+
+                    // Then try advancing retrieval jobs
+                    let pkts = lxmf_router
+                        .borrow_mut()
+                        .advance_retrieval_on_resource_complete(link_id, resource_hash, core, rng);
+                    if !pkts.is_empty() {
+                        eprintln!(
+                            "[rete] PROP_RETRIEVAL_SENDING link={} pkts={}",
+                            hex::encode(link_id),
+                            pkts.len(),
+                        );
+                        println!("PROP_RETRIEVAL_SENDING:{}", hex::encode(link_id));
+                        on_node_event(event);
+                        return pkts;
+                    }
+                }
+                NodeEvent::LinkClosed { link_id } => {
+                    lxmf_router
+                        .borrow_mut()
+                        .cleanup_forward_jobs_for_link(link_id);
+                }
+                _ => {}
+            }
             // Fall through to normal event handling
             on_node_event(event);
         }
     }
+    Vec::new()
 }
 
 fn on_node_event(event: NodeEvent) {
@@ -983,6 +1116,45 @@ fn on_node_event(event: NodeEvent) {
                     ),
                 }
             }
+        }
+        NodeEvent::RequestReceived {
+            link_id,
+            request_id,
+            path_hash,
+            data,
+        } => {
+            eprintln!(
+                "[rete] REQUEST on link={} req_id={} path_hash={} data_len={}",
+                hex::encode(link_id),
+                hex::encode(request_id),
+                hex::encode(path_hash),
+                data.len()
+            );
+            println!(
+                "REQUEST_RECEIVED:{}:{}:{}:{}",
+                hex::encode(link_id),
+                hex::encode(request_id),
+                hex::encode(path_hash),
+                data.len()
+            );
+        }
+        NodeEvent::ResponseReceived {
+            link_id,
+            request_id,
+            data,
+        } => {
+            eprintln!(
+                "[rete] RESPONSE on link={} req_id={} data_len={}",
+                hex::encode(link_id),
+                hex::encode(request_id),
+                data.len()
+            );
+            println!(
+                "RESPONSE_RECEIVED:{}:{}:{}",
+                hex::encode(link_id),
+                hex::encode(request_id),
+                data.len()
+            );
         }
         NodeEvent::LinkClosed { link_id } => {
             eprintln!("[rete] LINK closed: {}", hex::encode(link_id));

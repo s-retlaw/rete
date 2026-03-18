@@ -23,4 +23,4 @@ pub use message::{
 pub use propagation::{InMemoryMessageStore, MessageStore, PropagationNode, StoredMessage};
 
 #[cfg(feature = "router")]
-pub use router::{LxmfEvent, LxmfRouter};
+pub use router::{LxmfEvent, LxmfRouter, PropagationRetrievalResult};

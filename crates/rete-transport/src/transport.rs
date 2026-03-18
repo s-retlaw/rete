@@ -10,10 +10,10 @@ use heapless::{FnvIndexMap, FnvIndexSet};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, CONTEXT_CHANNEL,
-    CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, CONTEXT_RESOURCE,
-    CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF,
-    CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ, NAME_HASH_LEN, TRANSPORT_TYPE_TRANSPORT,
-    TRUNCATED_HASH_LEN,
+    CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, CONTEXT_REQUEST,
+    CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL,
+    CONTEXT_RESOURCE_PRF, CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ, CONTEXT_RESPONSE,
+    NAME_HASH_LEN, TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
 };
 use sha2::{Digest, Sha256};
 
@@ -72,6 +72,25 @@ pub struct ReverseEntry {
     pub received_on: u8,
     /// Interface index the packet was forwarded to (0 for broadcast).
     pub forwarded_to: u8,
+}
+
+/// An entry in the link table, keyed by link_id.
+///
+/// Used to bidirectionally route link traffic (DATA, PROOF, etc.)
+/// through a transport relay for the lifetime of the link.
+/// Matches Python RNS `Transport.link_table`.
+#[derive(Debug, Clone, Copy)]
+pub struct LinkTableEntry {
+    /// Monotonic timestamp when this entry was created.
+    pub timestamp: u64,
+    /// Interface the LINKREQUEST was received on (toward initiator).
+    pub received_on: u8,
+    /// Hop count from initiator side when LINKREQUEST arrived.
+    pub inbound_hops: u8,
+    /// Remaining hops toward responder.
+    pub outbound_hops: u8,
+    /// Destination hash of the link target.
+    pub destination_hash: [u8; TRUNCATED_HASH_LEN],
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +203,26 @@ pub enum IngestResult<'a> {
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
+    /// A link.request() was received on a link.
+    RequestReceived {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The request_id (SHA-256(packed_request)[..10]).
+        request_id: [u8; 10],
+        /// The path_hash (SHA-256(path)[..10]).
+        path_hash: [u8; 10],
+        /// The request data payload.
+        data: alloc::vec::Vec<u8>,
+    },
+    /// A link.response() was received on a link.
+    ResponseReceived {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The request_id this response is for.
+        request_id: [u8; 10],
+        /// The response data payload.
+        data: alloc::vec::Vec<u8>,
+    },
     /// Packet was a duplicate and should be dropped.
     Duplicate,
     /// A channel message was accepted and buffered (out-of-order), not yet deliverable.
@@ -250,6 +289,9 @@ pub struct Transport<
     resources: alloc::vec::Vec<Resource>,
     /// Pending outbound resource packets (parts, HMU, etc.) built during ingest.
     resource_outbound: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    /// Link routing table: link_id → entry (for bidirectional relay of link traffic).
+    /// Entries persist for the lifetime of the relayed link.
+    link_table: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], LinkTableEntry, MAX_LINKS>,
 }
 
 impl<const P: usize, const A: usize, const D: usize, const L: usize> Default
@@ -277,6 +319,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             channel_receipts: FnvIndexMap::new(),
             resources: alloc::vec::Vec::new(),
             resource_outbound: alloc::vec::Vec::new(),
+            link_table: FnvIndexMap::new(),
         }
     }
 
@@ -589,6 +632,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         let mut dest = [0u8; TRUNCATED_HASH_LEN];
                         dest.copy_from_slice(pkt.destination_hash);
                         let is_link_request = pkt.packet_type == PacketType::LinkRequest;
+                        let inbound_hops = pkt.hops;
 
                         // End pkt borrow on raw before mutating
                         #[allow(clippy::drop_non_drop)]
@@ -605,12 +649,22 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         };
                         let _ = self.reverse_table.insert(trunc_hash, reverse_entry);
 
-                        // For LINKREQUEST: also store reverse entry keyed by link_id,
-                        // so the LRPROOF (which uses link_id as destination) can be
-                        // routed back through this relay.
+                        // For LINKREQUEST: store a link_table entry keyed by link_id.
+                        // This enables bidirectional routing of all link traffic
+                        // (LRPROOF, LRRTT, DATA, keepalives, etc.) through this relay.
                         if is_link_request {
                             if let Ok(lid) = compute_link_id(raw) {
-                                let _ = self.reverse_table.insert(lid, reverse_entry);
+                                let remaining = self.paths.get(&dest).map(|p| p.hops).unwrap_or(1);
+                                let _ = self.link_table.insert(
+                                    lid,
+                                    LinkTableEntry {
+                                        timestamp: now,
+                                        received_on: iface,
+                                        inbound_hops,
+                                        outbound_hops: remaining,
+                                        destination_hash: dest,
+                                    },
+                                );
                             }
                         }
 
@@ -660,6 +714,31 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 // Link data handling: dest_type == Link
                 if pkt.dest_type == DestType::Link {
+                    // If we own this link locally, handle it.
+                    if self.links.contains_key(&dh) {
+                        return self.handle_link_data(
+                            &dh,
+                            pkt.context,
+                            pkt.payload,
+                            now,
+                            pkt_hash,
+                            rng,
+                        );
+                    }
+                    // Not our link — if we are a transport relay, check
+                    // the link_table (keyed by link_id) to forward
+                    // bidirectionally through this relay.
+                    if self.local_identity_hash.is_some() {
+                        if let Some(lte) = self.link_table.get_mut(&dh) {
+                            lte.timestamp = now; // refresh for expiry
+                            return IngestResult::Forward {
+                                raw,
+                                source_iface: iface,
+                            };
+                        }
+                    }
+                    // Fall through: non-transport node or no link_table entry.
+                    // Try local handling (will return Invalid if link not found).
                     return self.handle_link_data(
                         &dh,
                         pkt.context,
@@ -737,6 +816,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 if self.local_identity_hash.is_some() {
                     if self.reverse_table.remove(&dh).is_some() {
+                        IngestResult::Forward {
+                            raw,
+                            source_iface: iface,
+                        }
+                    } else if let Some(lte) = self.link_table.get_mut(&dh) {
+                        // Link-destined proof (LRPROOF or channel proof):
+                        // route via the persistent link_table entry.
+                        lte.timestamp = now; // refresh for expiry
                         IngestResult::Forward {
                             raw,
                             source_iface: iface,
@@ -975,6 +1062,38 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         messages,
                         packet_hash: pkt_hash,
                     }
+                }
+            }
+            CONTEXT_REQUEST => {
+                if !link.is_active() {
+                    return IngestResult::Invalid;
+                }
+                link.touch_inbound(now);
+                match crate::request::parse_request(&dec_buf[..dec_len]) {
+                    Ok((_ts, rq_path_hash, data)) => {
+                        let req_id = crate::request::request_id(&dec_buf[..dec_len]);
+                        IngestResult::RequestReceived {
+                            link_id: *link_id,
+                            request_id: req_id,
+                            path_hash: rq_path_hash,
+                            data,
+                        }
+                    }
+                    Err(_) => IngestResult::Invalid,
+                }
+            }
+            CONTEXT_RESPONSE => {
+                if !link.is_active() {
+                    return IngestResult::Invalid;
+                }
+                link.touch_inbound(now);
+                match crate::request::parse_response(&dec_buf[..dec_len]) {
+                    Ok((req_id, data)) => IngestResult::ResponseReceived {
+                        link_id: *link_id,
+                        request_id: req_id,
+                        data,
+                    },
+                    Err(_) => IngestResult::Invalid,
                 }
             }
             _ => {
@@ -1756,6 +1875,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             self.reverse_table.remove(hash);
         }
 
+        // Expire old link table entries (stale relayed links)
+        let mut expired_link_table = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
+        for (lid, entry) in self.link_table.iter() {
+            // Link table entries live longer than reverse entries since links
+            // maintain keepalives. Use stale_time (KEEPALIVE * 2 = 12 min).
+            if now.saturating_sub(entry.timestamp) > crate::link::STALE_TIMEOUT_SECS {
+                let _ = expired_link_table.push(*lid);
+            }
+        }
+        for lid in &expired_link_table {
+            self.link_table.remove(lid);
+        }
+
         // Check for stale links
         let mut closed_links_list = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
         for (lid, link) in self.links.iter_mut() {
@@ -1959,5 +2091,286 @@ mod tests {
         );
         // Payloads should be the same (packet_hash + signature)
         assert_eq!(link_pkt.payload, single_pkt.payload);
+    }
+
+    // -----------------------------------------------------------------------
+    // Link relay forwarding via link_table
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a HEADER_2 LINKREQUEST packet targeting a relay.
+    fn build_h2_linkrequest(
+        relay_id: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        payload: &[u8],
+    ) -> ([u8; rete_core::MTU], usize) {
+        let mut buf = [0u8; rete_core::MTU];
+        let n = PacketBuilder::new(&mut buf)
+            .header_type(HeaderType::Header2)
+            .transport_type(TRANSPORT_TYPE_TRANSPORT)
+            .packet_type(PacketType::LinkRequest)
+            .dest_type(DestType::Single)
+            .hops(0)
+            .transport_id(relay_id)
+            .destination_hash(dest_hash)
+            .context(0x00)
+            .payload(payload)
+            .build()
+            .unwrap();
+        (buf, n)
+    }
+
+    /// Helper: set up a transport relay with a learned path for the destination.
+    fn make_relay_transport(
+        relay_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+    ) -> TestTransport {
+        let mut t = TestTransport::new();
+        t.set_local_identity(relay_hash);
+        t.insert_path(dest_hash, Path::direct(0));
+        t
+    }
+
+    #[test]
+    fn test_h2_linkrequest_creates_link_table_entry() {
+        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let mut transport = make_relay_transport(relay_hash, dest_hash);
+        let identity = Identity::from_seed(b"relay-lr-test").unwrap();
+        let mut rng = rand_core::OsRng;
+
+        // Build LINKREQUEST payload (x25519_pub[32] || ed25519_pub[32])
+        let lr_payload = [0xBBu8; 64];
+        let (mut buf, n) = build_h2_linkrequest(&relay_hash, &dest_hash, &lr_payload);
+
+        // Before ingest, link_table should be empty
+        assert_eq!(transport.link_table.len(), 0);
+
+        let result = transport.ingest_on(&mut buf[..n], 100, 0, &mut rng, &identity);
+
+        // Should forward (H2 -> H1 conversion since path is direct)
+        assert!(
+            matches!(result, IngestResult::Forward { .. }),
+            "LINKREQUEST should be forwarded, got {:?}",
+            core::mem::discriminant(&result)
+        );
+
+        // link_table should now have an entry
+        assert_eq!(
+            transport.link_table.len(),
+            1,
+            "link_table should have 1 entry after LINKREQUEST"
+        );
+    }
+
+    #[test]
+    fn test_link_data_forwarded_via_link_table() {
+        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let mut transport = make_relay_transport(relay_hash, dest_hash);
+        let identity = Identity::from_seed(b"relay-data-test").unwrap();
+        let mut rng = rand_core::OsRng;
+
+        // Step 1: Forward a LINKREQUEST to create a link_table entry
+        let lr_payload = [0xBBu8; 64];
+        let (mut buf, n) = build_h2_linkrequest(&relay_hash, &dest_hash, &lr_payload);
+        let link_id = compute_link_id(&buf[..n]).unwrap();
+        transport.ingest_on(&mut buf[..n], 100, 0, &mut rng, &identity);
+
+        assert_eq!(transport.link_table.len(), 1);
+
+        // Step 2: Build a link DATA packet (HEADER_1, dest_type=Link, dest_hash=link_id)
+        // This simulates LRRTT or other link traffic from the initiator side.
+        let mut data_buf = [0u8; rete_core::MTU];
+        let data_len = PacketBuilder::new(&mut data_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Link)
+            .destination_hash(&link_id)
+            .context(0x00)
+            .payload(&[0x42; 16])
+            .build()
+            .unwrap();
+
+        let result = transport.ingest_on(&mut data_buf[..data_len], 101, 0, &mut rng, &identity);
+
+        assert!(
+            matches!(result, IngestResult::Forward { .. }),
+            "Link DATA should be forwarded via link_table, got {:?}",
+            core::mem::discriminant(&result)
+        );
+    }
+
+    #[test]
+    fn test_link_proof_forwarded_via_link_table() {
+        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let mut transport = make_relay_transport(relay_hash, dest_hash);
+        let identity = Identity::from_seed(b"relay-proof-test").unwrap();
+        let mut rng = rand_core::OsRng;
+
+        // Step 1: Forward a LINKREQUEST to create a link_table entry
+        let lr_payload = [0xBBu8; 64];
+        let (mut buf, n) = build_h2_linkrequest(&relay_hash, &dest_hash, &lr_payload);
+        let link_id = compute_link_id(&buf[..n]).unwrap();
+        transport.ingest_on(&mut buf[..n], 100, 0, &mut rng, &identity);
+
+        // Step 2: Build a PROOF packet (HEADER_1, dest_type=Link, dest_hash=link_id)
+        // This simulates the LRPROOF coming back from the responder.
+        let mut proof_buf = [0u8; rete_core::MTU];
+        let proof_len = PacketBuilder::new(&mut proof_buf)
+            .packet_type(PacketType::Proof)
+            .dest_type(DestType::Link)
+            .destination_hash(&link_id)
+            .context(CONTEXT_LRPROOF)
+            .payload(&[0x42; 96])
+            .build()
+            .unwrap();
+
+        let result = transport.ingest_on(&mut proof_buf[..proof_len], 101, 1, &mut rng, &identity);
+
+        assert!(
+            matches!(result, IngestResult::Forward { .. }),
+            "Link PROOF should be forwarded via link_table, got {:?}",
+            core::mem::discriminant(&result)
+        );
+    }
+
+    #[test]
+    fn test_link_data_without_link_table_entry_is_invalid() {
+        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut transport = TestTransport::new();
+        transport.set_local_identity(relay_hash);
+        let identity = Identity::from_seed(b"relay-no-entry-test").unwrap();
+        let mut rng = rand_core::OsRng;
+
+        // Build a link DATA packet for a link_id we don't know about
+        let unknown_link_id = [0xFFu8; TRUNCATED_HASH_LEN];
+        let mut data_buf = [0u8; rete_core::MTU];
+        let data_len = PacketBuilder::new(&mut data_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Link)
+            .destination_hash(&unknown_link_id)
+            .context(0x00)
+            .payload(&[0x42; 16])
+            .build()
+            .unwrap();
+
+        let result = transport.ingest_on(&mut data_buf[..data_len], 101, 0, &mut rng, &identity);
+
+        assert!(
+            matches!(result, IngestResult::Invalid),
+            "Link DATA without link_table entry should be Invalid, got {:?}",
+            core::mem::discriminant(&result)
+        );
+    }
+
+    #[test]
+    fn test_link_table_entry_refreshed_on_traffic() {
+        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let mut transport = make_relay_transport(relay_hash, dest_hash);
+        let identity = Identity::from_seed(b"relay-refresh-test").unwrap();
+        let mut rng = rand_core::OsRng;
+
+        // Forward a LINKREQUEST at time=100
+        let lr_payload = [0xBBu8; 64];
+        let (mut buf, n) = build_h2_linkrequest(&relay_hash, &dest_hash, &lr_payload);
+        let link_id = compute_link_id(&buf[..n]).unwrap();
+        transport.ingest_on(&mut buf[..n], 100, 0, &mut rng, &identity);
+
+        assert_eq!(transport.link_table.get(&link_id).unwrap().timestamp, 100);
+
+        // Forward link DATA at time=500 — should refresh the timestamp
+        let mut data_buf = [0u8; rete_core::MTU];
+        let data_len = PacketBuilder::new(&mut data_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Link)
+            .destination_hash(&link_id)
+            .context(0x00)
+            .payload(&[0x42; 16])
+            .build()
+            .unwrap();
+
+        transport.ingest_on(&mut data_buf[..data_len], 500, 0, &mut rng, &identity);
+
+        assert_eq!(
+            transport.link_table.get(&link_id).unwrap().timestamp,
+            500,
+            "link_table timestamp should be refreshed on traffic"
+        );
+    }
+
+    #[test]
+    fn test_link_table_entry_expires_after_stale_timeout() {
+        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let mut transport = make_relay_transport(relay_hash, dest_hash);
+        let identity = Identity::from_seed(b"relay-expiry-test").unwrap();
+        let mut rng = rand_core::OsRng;
+
+        // Forward a LINKREQUEST at time=100
+        let lr_payload = [0xBBu8; 64];
+        let (mut buf, n) = build_h2_linkrequest(&relay_hash, &dest_hash, &lr_payload);
+        let link_id = compute_link_id(&buf[..n]).unwrap();
+        transport.ingest_on(&mut buf[..n], 100, 0, &mut rng, &identity);
+
+        assert_eq!(transport.link_table.len(), 1);
+
+        // tick() before stale timeout — entry should remain
+        transport.tick(100 + crate::link::STALE_TIMEOUT_SECS);
+        assert_eq!(transport.link_table.len(), 1, "should not expire yet");
+
+        // tick() after stale timeout — entry should be removed
+        transport.tick(100 + crate::link::STALE_TIMEOUT_SECS + 1);
+        assert_eq!(
+            transport.link_table.len(),
+            0,
+            "should expire after stale timeout"
+        );
+    }
+
+    #[test]
+    fn test_multiple_link_data_forwarded_via_link_table() {
+        // Verify that multiple DATA packets can be forwarded (entry persists)
+        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let mut transport = make_relay_transport(relay_hash, dest_hash);
+        let identity = Identity::from_seed(b"relay-multi-test").unwrap();
+        let mut rng = rand_core::OsRng;
+
+        // Forward LINKREQUEST
+        let lr_payload = [0xBBu8; 64];
+        let (mut buf, n) = build_h2_linkrequest(&relay_hash, &dest_hash, &lr_payload);
+        let link_id = compute_link_id(&buf[..n]).unwrap();
+        transport.ingest_on(&mut buf[..n], 100, 0, &mut rng, &identity);
+
+        // Forward 5 DATA packets — all should succeed
+        for i in 0u8..5 {
+            let mut data_buf = [0u8; rete_core::MTU];
+            let data_len = PacketBuilder::new(&mut data_buf)
+                .packet_type(PacketType::Data)
+                .dest_type(DestType::Link)
+                .destination_hash(&link_id)
+                .context(0x00)
+                .payload(&[i; 16])
+                .build()
+                .unwrap();
+
+            let result = transport.ingest_on(
+                &mut data_buf[..data_len],
+                101 + i as u64,
+                0,
+                &mut rng,
+                &identity,
+            );
+
+            assert!(
+                matches!(result, IngestResult::Forward { .. }),
+                "DATA packet {} should be forwarded",
+                i
+            );
+        }
+
+        // link_table entry should still exist
+        assert_eq!(transport.link_table.len(), 1);
     }
 }

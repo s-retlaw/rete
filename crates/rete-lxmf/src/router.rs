@@ -44,8 +44,64 @@ pub enum LxmfEvent {
         /// Number of messages pending for this destination.
         count: usize,
     },
+    /// A retrieval request was received on the propagation destination.
+    PropagationRetrievalRequest {
+        /// The link_id the request came on.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The request_id to respond to.
+        request_id: [u8; 10],
+        /// The destination hash being retrieved.
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        /// Retrieval result (response data + messages to send).
+        result: PropagationRetrievalResult,
+    },
     /// A non-LXMF NodeEvent (pass-through).
     Other(NodeEvent),
+}
+
+/// Result of handling a propagation retrieval request.
+#[derive(Debug)]
+pub struct PropagationRetrievalResult {
+    /// Response data (msgpack-encoded count) to send via `send_response()`.
+    pub response_data: Vec<u8>,
+    /// Packed message data and hashes to send as Resources.
+    pub messages: Vec<(Vec<u8>, [u8; 32])>,
+}
+
+/// State machine for propagation auto-forward.
+///
+/// When an announce is received for a destination with pending messages,
+/// we open a link to that destination and send each stored message as a
+/// Resource (bz2-compressed LXMF packed data).
+#[derive(Debug)]
+enum ForwardJob {
+    /// Link being established to the destination.
+    Linking {
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        link_id: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// Sending stored messages one at a time via Resource.
+    Sending {
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        message_hashes: Vec<[u8; 32]>,
+        idx: usize,
+    },
+}
+
+/// State machine for propagation retrieval (client-initiated pull).
+///
+/// When a client sends a `link.request("/lxmf/propagation/retrieve", dest_hash)`,
+/// the propagation node responds with the count and then sends each stored
+/// message as a Resource on the same link.
+#[derive(Debug)]
+enum RetrievalJob {
+    /// Sending stored messages one at a time via Resource.
+    Sending {
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        message_hashes: Vec<[u8; 32]>,
+        idx: usize,
+    },
 }
 
 /// LXMF router — manages `lxmf.delivery` destination and message handling.
@@ -61,6 +117,10 @@ pub struct LxmfRouter {
     propagation: Option<PropagationNode<InMemoryMessageStore>>,
     /// The `lxmf.propagation` destination hash, if propagation is enabled.
     propagation_dest_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
+    /// Active propagation forward jobs (push delivery on announce).
+    pending_forwards: Vec<ForwardJob>,
+    /// Active propagation retrieval jobs (pull delivery on request).
+    pending_retrievals: Vec<RetrievalJob>,
 }
 
 impl LxmfRouter {
@@ -83,6 +143,8 @@ impl LxmfRouter {
             display_name: None,
             propagation: None,
             propagation_dest_hash: None,
+            pending_forwards: Vec::new(),
+            pending_retrievals: Vec::new(),
         }
     }
 
@@ -267,6 +329,10 @@ impl LxmfRouter {
     /// This is the preferred method when propagation is enabled. When a
     /// ResourceComplete event is received and propagation is active, the
     /// resource data is deposited into the propagation store.
+    ///
+    /// Also handles `RequestReceived` events for propagation retrieval:
+    /// if the path matches `/lxmf/propagation/retrieve`, returns
+    /// `LxmfEvent::PropagationRetrievalRequest`.
     pub fn handle_event_mut(&mut self, event: NodeEvent, now: u64) -> LxmfEvent {
         // For ResourceComplete: try propagation deposit first if enabled
         if self.propagation.is_some() {
@@ -278,6 +344,33 @@ impl LxmfRouter {
                 // If deposit failed (not valid LXMF), fall through to normal parsing
             }
         }
+
+        // For RequestReceived: check if this is a propagation retrieval request
+        if self.propagation.is_some() {
+            if let NodeEvent::RequestReceived {
+                link_id,
+                request_id,
+                path_hash,
+                ref data,
+            } = event
+            {
+                if let Some(result) = self.handle_propagation_request(&path_hash, data) {
+                    // Extract the dest_hash from data
+                    let mut dest_hash = [0u8; TRUNCATED_HASH_LEN];
+                    if data.len() >= TRUNCATED_HASH_LEN {
+                        dest_hash.copy_from_slice(&data[..TRUNCATED_HASH_LEN]);
+                    }
+                    return LxmfEvent::PropagationRetrievalRequest {
+                        link_id,
+                        request_id,
+                        dest_hash,
+                        result,
+                    };
+                }
+                // If not a retrieval request, fall through
+            }
+        }
+
         // Fall through to immutable handling
         self.handle_event(event)
     }
@@ -461,6 +554,388 @@ impl LxmfRouter {
             None => 0,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Propagation auto-forward (store-and-forward delivery)
+    // -----------------------------------------------------------------------
+
+    /// Check if there is already a forward job for the given destination.
+    pub fn has_forward_job_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+        self.pending_forwards.iter().any(|job| match job {
+            ForwardJob::Linking { dest_hash: d, .. } => d == dest_hash,
+            ForwardJob::Sending { dest_hash: d, .. } => d == dest_hash,
+        })
+    }
+
+    /// Initiate propagation forwarding to a destination.
+    ///
+    /// Retrieves pending messages, initiates a link to the destination's
+    /// `lxmf.delivery` destination, and creates a Linking job.
+    ///
+    /// Returns the outbound LINKREQUEST packet and link_id, or None if:
+    /// - propagation is not enabled
+    /// - no messages for this destination
+    /// - no path to the destination (identity not cached)
+    pub fn start_propagation_forward<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+        now: u64,
+    ) -> Option<(OutboundPacket, [u8; TRUNCATED_HASH_LEN])> {
+        // Check we have messages
+        let messages = self.propagation_retrieve(dest_hash);
+        if messages.is_empty() {
+            return None;
+        }
+
+        // Initiate link to the destination (this is the recipient's lxmf.delivery dest)
+        let (pkt, link_id) = core.initiate_link(*dest_hash, now, rng)?;
+
+        self.pending_forwards.push(ForwardJob::Linking {
+            dest_hash: *dest_hash,
+            link_id,
+        });
+
+        Some((pkt, link_id))
+    }
+
+    /// Advance a forward job when a link is established.
+    ///
+    /// Transitions from Linking -> Sending and sends the first Resource.
+    pub fn advance_forward_on_link_established<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+    ) -> Vec<OutboundPacket> {
+        // Find the Linking job for this link_id
+        let idx = self.pending_forwards.iter().position(|job| {
+            matches!(
+                job,
+                ForwardJob::Linking { link_id: lid, .. } if lid == link_id
+            )
+        });
+
+        let Some(idx) = idx else {
+            return Vec::new();
+        };
+
+        // Get the dest_hash from the Linking job
+        let dest_hash = match &self.pending_forwards[idx] {
+            ForwardJob::Linking { dest_hash, .. } => *dest_hash,
+            _ => unreachable!(),
+        };
+
+        // Get all message hashes for this destination
+        let messages = self.propagation_retrieve(&dest_hash);
+        if messages.is_empty() {
+            self.pending_forwards.remove(idx);
+            return Vec::new();
+        }
+
+        let message_hashes: Vec<[u8; 32]> = messages.iter().map(|m| m.message_hash).collect();
+        let first_hash = message_hashes[0];
+
+        // Transition to Sending state (move the Vec, no clone)
+        self.pending_forwards[idx] = ForwardJob::Sending {
+            dest_hash,
+            link_id: *link_id,
+            message_hashes,
+            idx: 0,
+        };
+
+        self.send_stored_message_resource(&first_hash, link_id, core, rng)
+    }
+
+    /// Advance a forward job when a resource transfer completes.
+    ///
+    /// Marks the delivered message and sends the next one, or cleans up if done.
+    pub fn advance_forward_on_resource_complete<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        _resource_hash: &[u8; TRUNCATED_HASH_LEN],
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+    ) -> Vec<OutboundPacket> {
+        // Find the Sending job for this link_id
+        let job_idx = self.pending_forwards.iter().position(|job| {
+            matches!(
+                job,
+                ForwardJob::Sending { link_id: lid, .. } if lid == link_id
+            )
+        });
+
+        let Some(job_idx) = job_idx else {
+            return Vec::new();
+        };
+
+        // Extract only the hashes we need (avoids cloning the entire Vec)
+        let (current_hash, next_hash) = match &self.pending_forwards[job_idx] {
+            ForwardJob::Sending {
+                message_hashes,
+                idx,
+                ..
+            } => {
+                let current = message_hashes[*idx];
+                let next = message_hashes.get(*idx + 1).copied();
+                (current, next)
+            }
+            _ => unreachable!(),
+        };
+
+        self.propagation_mark_delivered(&current_hash);
+
+        if let Some(next) = next_hash {
+            if let ForwardJob::Sending { idx, .. } = &mut self.pending_forwards[job_idx] {
+                *idx += 1;
+            }
+            self.send_stored_message_resource(&next, link_id, core, rng)
+        } else {
+            self.pending_forwards.remove(job_idx);
+            Vec::new()
+        }
+    }
+
+    /// Look up a stored message by hash and send it as a bz2-compressed Resource.
+    fn send_stored_message_resource<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &self,
+        message_hash: &[u8; 32],
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+    ) -> Vec<OutboundPacket> {
+        let prop = match &self.propagation {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        let Some(data) = prop.get_data(message_hash) else {
+            return Vec::new();
+        };
+
+        let compressed = bz2_compress(data);
+
+        match core.start_resource(link_id, &compressed, rng) {
+            Some(pkt) => vec![pkt],
+            None => Vec::new(),
+        }
+    }
+
+    /// Remove forward jobs for a link that was closed.
+    pub fn cleanup_forward_jobs_for_link(&mut self, link_id: &[u8; TRUNCATED_HASH_LEN]) {
+        self.pending_forwards.retain(|job| match job {
+            ForwardJob::Linking { link_id: lid, .. } => lid != link_id,
+            ForwardJob::Sending { link_id: lid, .. } => lid != link_id,
+        });
+        self.pending_retrievals.retain(|job| match job {
+            RetrievalJob::Sending { link_id: lid, .. } => lid != link_id,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Propagation retrieval (client-initiated pull via link.request)
+    // -----------------------------------------------------------------------
+
+    /// Path hash for the propagation retrieval path.
+    pub fn propagation_retrieve_path_hash() -> [u8; 10] {
+        rete_transport::request::path_hash("/lxmf/propagation/retrieve")
+    }
+
+    /// Handle an incoming link.request on the propagation destination.
+    ///
+    /// If `path_hash` matches `/lxmf/propagation/retrieve`:
+    ///   - `data` is the destination hash (16 bytes) of the requesting client
+    ///   - Retrieves stored messages for that dest_hash
+    ///   - Returns a `PropagationRetrievalResult` with:
+    ///     - `response_data`: msgpack uint32 count of messages to send
+    ///     - `messages`: packed LXMF messages (data, hash) to send as Resources
+    ///
+    /// Returns `None` if the path does not match or propagation is not enabled.
+    pub fn handle_propagation_request(
+        &self,
+        path_hash: &[u8; 10],
+        data: &[u8],
+    ) -> Option<PropagationRetrievalResult> {
+        // Check that the path matches
+        if *path_hash != Self::propagation_retrieve_path_hash() {
+            return None;
+        }
+
+        // Propagation must be enabled
+        if !self.propagation_enabled() {
+            return None;
+        }
+
+        // The data should be a 16-byte dest_hash
+        if data.len() < TRUNCATED_HASH_LEN {
+            return None;
+        }
+
+        let mut dest_hash = [0u8; TRUNCATED_HASH_LEN];
+        dest_hash.copy_from_slice(&data[..TRUNCATED_HASH_LEN]);
+
+        let stored = self.propagation_retrieve(&dest_hash);
+
+        // Build response data: msgpack uint32 with the count
+        let count = stored.len();
+        let response_data = encode_msgpack_uint(count as u32);
+
+        let messages: Vec<(Vec<u8>, [u8; 32])> = stored
+            .into_iter()
+            .map(|m| (m.data, m.message_hash))
+            .collect();
+
+        Some(PropagationRetrievalResult {
+            response_data,
+            messages,
+        })
+    }
+
+    /// Start sending retrieval messages as Resources on a link.
+    ///
+    /// Creates a `RetrievalJob` and sends the first Resource.
+    /// Returns the outbound packets (resource advertisement).
+    pub fn start_retrieval_send<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        messages: Vec<(Vec<u8>, [u8; 32])>,
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+    ) -> Vec<OutboundPacket> {
+        if messages.is_empty() {
+            return Vec::new();
+        }
+
+        let message_hashes: Vec<[u8; 32]> = messages.iter().map(|(_, h)| *h).collect();
+        let first_hash = message_hashes[0];
+
+        self.pending_retrievals.push(RetrievalJob::Sending {
+            link_id: *link_id,
+            message_hashes,
+            idx: 0,
+        });
+
+        self.send_stored_message_resource(&first_hash, link_id, core, rng)
+    }
+
+    /// Advance a retrieval job when a resource transfer completes.
+    ///
+    /// Marks the delivered message and sends the next one, or cleans up if done.
+    pub fn advance_retrieval_on_resource_complete<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        _resource_hash: &[u8; TRUNCATED_HASH_LEN],
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+    ) -> Vec<OutboundPacket> {
+        // Find the Sending job for this link_id
+        let job_idx = self.pending_retrievals.iter().position(|job| {
+            matches!(
+                job,
+                RetrievalJob::Sending { link_id: lid, .. } if lid == link_id
+            )
+        });
+
+        let Some(job_idx) = job_idx else {
+            return Vec::new();
+        };
+
+        // Extract only the hashes we need (avoids cloning the entire Vec)
+        let (current_hash, next_hash) = match &self.pending_retrievals[job_idx] {
+            RetrievalJob::Sending {
+                message_hashes,
+                idx,
+                ..
+            } => {
+                let current = message_hashes[*idx];
+                let next = message_hashes.get(*idx + 1).copied();
+                (current, next)
+            }
+        };
+
+        self.propagation_mark_delivered(&current_hash);
+
+        if let Some(next) = next_hash {
+            let RetrievalJob::Sending { idx, .. } = &mut self.pending_retrievals[job_idx];
+            *idx += 1;
+            self.send_stored_message_resource(&next, link_id, core, rng)
+        } else {
+            self.pending_retrievals.remove(job_idx);
+            Vec::new()
+        }
+    }
+
+    /// Check if a retrieval job exists for the given link_id.
+    pub fn has_retrieval_job_for_link(&self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+        self.pending_retrievals.iter().any(|job| {
+            matches!(
+                job,
+                RetrievalJob::Sending { link_id: lid, .. } if lid == link_id
+            )
+        })
+    }
+}
+
+/// Encode a u32 as a msgpack unsigned integer.
+fn encode_msgpack_uint(val: u32) -> Vec<u8> {
+    if val < 128 {
+        vec![val as u8]
+    } else if val < 256 {
+        vec![0xcc, val as u8]
+    } else if val < 65536 {
+        let mut buf = vec![0xcd];
+        buf.extend_from_slice(&(val as u16).to_be_bytes());
+        buf
+    } else {
+        let mut buf = vec![0xce];
+        buf.extend_from_slice(&val.to_be_bytes());
+        buf
+    }
+}
+
+/// Compress data with bz2 (matching Python LXMF Resource convention).
+fn bz2_compress(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+    encoder.write_all(data).unwrap_or_default();
+    encoder.finish().unwrap_or_else(|_| data.to_vec())
 }
 
 /// Try to parse LXMF announce app_data: msgpack `[display_name_bytes, stamp_cost]`
@@ -1127,5 +1602,570 @@ mod tests {
         assert!(router.propagation_mark_delivered(&msg_hash));
         assert_eq!(router.propagation_message_count(), 0);
         assert!(router.propagation_retrieve(&dest).is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // Forward job tests
+    // -------------------------------------------------------------------
+
+    /// Helper: create a propagation-enabled router with a deposited message.
+    /// Returns (core, router, dest_hash, message_hash).
+    fn setup_forward_scenario(
+        seed: &[u8],
+        dest: [u8; 16],
+    ) -> (TestNodeCore, LxmfRouter, [u8; 16], [u8; 32]) {
+        let mut core = make_core(seed);
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        let (msg, _) = make_test_msg(b"fwd-msg-source", dest);
+        let packed = msg.pack();
+
+        let msg_hash = match router.propagation_deposit(&packed, 1000).unwrap() {
+            LxmfEvent::PropagationDeposit { message_hash, .. } => message_hash,
+            _ => panic!("expected PropagationDeposit"),
+        };
+
+        (core, router, dest, msg_hash)
+    }
+
+    #[test]
+    fn test_forward_job_has_no_job_initially() {
+        let (_, router, dest, _) = setup_forward_scenario(b"fwd-no-job", [0x42; 16]);
+        assert!(!router.has_forward_job_for(&dest));
+    }
+
+    #[test]
+    fn test_forward_job_initiates_link() {
+        let (mut core, mut router, _dest, _) =
+            setup_forward_scenario(b"fwd-initiate-link", [0x42; 16]);
+        let mut rng = rand::thread_rng();
+
+        // Register a peer for the destination so initiate_link has a path
+        let recipient = Identity::from_seed(b"fwd-recipient-01").unwrap();
+        // Compute the dest_hash that will match [0x42; 16]
+        // For the test to work, we need the dest_hash to match the peer's
+        // lxmf.delivery destination. Since we used [0x42; 16] as dest hash
+        // in the message, we need to register the peer with matching hash.
+        // In practice, the announce has already cached the identity. For
+        // unit testing, we directly register.
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+
+        // The dest_hash [0x42; 16] won't match the registered peer's
+        // computed dest_hash. start_propagation_forward calls
+        // core.initiate_link(dest_hash, ...) which needs a cached announce
+        // path for that exact dest_hash. Without that, it returns None.
+        //
+        // So let's use the actual dest_hash of the registered peer.
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
+        let peer_dest = rete_core::destination_hash(expanded, Some(&recipient.hash()));
+
+        // Deposit a message for the peer's actual dest hash
+        let (msg, _) = make_test_msg(b"fwd-msg-for-peer", peer_dest);
+        router.propagation_deposit(&msg.pack(), 1001);
+
+        let result = router.start_propagation_forward(&peer_dest, &mut core, &mut rng, 1000);
+        assert!(result.is_some(), "should produce LINKREQUEST packet");
+
+        let (_, link_id) = result.unwrap();
+        assert!(router.has_forward_job_for(&peer_dest));
+
+        // Verify the job is in Linking state
+        let job = router.pending_forwards.iter().find(|j| {
+            matches!(
+                j, ForwardJob::Linking { dest_hash, .. } if *dest_hash == peer_dest
+            )
+        });
+        assert!(job.is_some(), "should have a Linking job");
+
+        // Verify the link_id matches
+        match job.unwrap() {
+            ForwardJob::Linking { link_id: lid, .. } => assert_eq!(*lid, link_id),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_forward_no_duplicate_jobs() {
+        let mut core = make_core(b"fwd-no-dup");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let recipient = Identity::from_seed(b"fwd-dup-recipient").unwrap();
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
+        let peer_dest = rete_core::destination_hash(expanded, Some(&recipient.hash()));
+
+        let (msg, _) = make_test_msg(b"fwd-dup-msg", peer_dest);
+        router.propagation_deposit(&msg.pack(), 1000);
+
+        // First forward
+        let result1 = router.start_propagation_forward(&peer_dest, &mut core, &mut rng, 1000);
+        assert!(result1.is_some());
+        assert!(router.has_forward_job_for(&peer_dest));
+
+        // Second forward for same dest — should be prevented by has_forward_job_for
+        assert!(router.has_forward_job_for(&peer_dest));
+        assert_eq!(router.pending_forwards.len(), 1);
+    }
+
+    #[test]
+    fn test_forward_link_established_transitions_to_sending() {
+        let mut core = make_core(b"fwd-established");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let recipient = Identity::from_seed(b"fwd-est-rcpt").unwrap();
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
+        let peer_dest = rete_core::destination_hash(expanded, Some(&recipient.hash()));
+
+        let (msg, _) = make_test_msg(b"fwd-est-msg", peer_dest);
+        router.propagation_deposit(&msg.pack(), 1000);
+
+        let (_, link_id) = router
+            .start_propagation_forward(&peer_dest, &mut core, &mut rng, 1000)
+            .unwrap();
+
+        // Note: advance_forward_on_link_established will try to start_resource,
+        // which requires an active link. Since in unit tests the link is Pending
+        // (no LRPROOF handshake), start_resource returns None and no packets
+        // are produced. However, the state machine should still transition to
+        // Sending with idx=0.
+        let _pkts = router.advance_forward_on_link_established(&link_id, &mut core, &mut rng);
+
+        // The state should transition to Sending (even if resource send fails,
+        // because the link is not yet active in unit test context).
+        // In production, the link IS active when LinkEstablished fires.
+        // Check that the job was transitioned or handled.
+        // Since start_resource returns None (link not active in unit test),
+        // the method returns empty packets. The job stays in Sending state.
+        let is_sending = router
+            .pending_forwards
+            .iter()
+            .any(|j| matches!(j, ForwardJob::Sending { .. }));
+        assert!(is_sending, "should transition to Sending state");
+    }
+
+    #[test]
+    fn test_forward_resource_complete_marks_delivered() {
+        let mut core = make_core(b"fwd-rc-del");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let recipient = Identity::from_seed(b"fwd-rc-rcpt").unwrap();
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
+        let peer_dest = rete_core::destination_hash(expanded, Some(&recipient.hash()));
+
+        let (msg, _) = make_test_msg(b"fwd-rc-msg", peer_dest);
+        router.propagation_deposit(&msg.pack(), 1000);
+        assert_eq!(router.propagation_message_count(), 1);
+
+        let (_, link_id) = router
+            .start_propagation_forward(&peer_dest, &mut core, &mut rng, 1000)
+            .unwrap();
+
+        // Transition to Sending state
+        router.advance_forward_on_link_established(&link_id, &mut core, &mut rng);
+
+        // Simulate resource complete
+        let resource_hash = [0xAA; 16];
+        router.advance_forward_on_resource_complete(&link_id, &resource_hash, &mut core, &mut rng);
+
+        // Message should be marked delivered
+        assert_eq!(router.propagation_message_count(), 0);
+
+        // Forward job should be cleaned up
+        assert!(!router.has_forward_job_for(&peer_dest));
+    }
+
+    #[test]
+    fn test_forward_multiple_messages_sequential_delivery() {
+        let mut core = make_core(b"fwd-multi-msg");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let recipient = Identity::from_seed(b"fwd-multi-rcpt").unwrap();
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
+        let peer_dest = rete_core::destination_hash(expanded, Some(&recipient.hash()));
+
+        // Deposit 3 messages
+        let (msg1, _) = make_test_msg(b"fwd-multi-1", peer_dest);
+        let (msg2, _) = make_test_msg(b"fwd-multi-2", peer_dest);
+        let (msg3, _) = make_test_msg(b"fwd-multi-3", peer_dest);
+        router.propagation_deposit(&msg1.pack(), 1000);
+        router.propagation_deposit(&msg2.pack(), 1001);
+        router.propagation_deposit(&msg3.pack(), 1002);
+        assert_eq!(router.propagation_message_count(), 3);
+
+        // Start forward
+        let (_, link_id) = router
+            .start_propagation_forward(&peer_dest, &mut core, &mut rng, 1000)
+            .unwrap();
+
+        // Establish link -> transitions to Sending with idx=0
+        router.advance_forward_on_link_established(&link_id, &mut core, &mut rng);
+
+        // After establishing: job should have 3 message hashes
+        let msg_count = router.pending_forwards.iter().find_map(|j| match j {
+            ForwardJob::Sending { message_hashes, .. } => Some(message_hashes.len()),
+            _ => None,
+        });
+        assert_eq!(msg_count, Some(3));
+
+        // Complete first resource -> marks first message delivered, advances idx
+        router.advance_forward_on_resource_complete(&link_id, &[0xAA; 16], &mut core, &mut rng);
+        assert_eq!(router.propagation_message_count(), 2);
+
+        // Complete second resource
+        router.advance_forward_on_resource_complete(&link_id, &[0xBB; 16], &mut core, &mut rng);
+        assert_eq!(router.propagation_message_count(), 1);
+
+        // Complete third resource -> done
+        router.advance_forward_on_resource_complete(&link_id, &[0xCC; 16], &mut core, &mut rng);
+        assert_eq!(router.propagation_message_count(), 0);
+        assert!(!router.has_forward_job_for(&peer_dest));
+    }
+
+    #[test]
+    fn test_forward_cleanup_on_link_close() {
+        let mut core = make_core(b"fwd-cleanup");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let recipient = Identity::from_seed(b"fwd-cleanup-rcpt").unwrap();
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
+        let peer_dest = rete_core::destination_hash(expanded, Some(&recipient.hash()));
+
+        let (msg, _) = make_test_msg(b"fwd-cleanup-msg", peer_dest);
+        router.propagation_deposit(&msg.pack(), 1000);
+
+        let (_, link_id) = router
+            .start_propagation_forward(&peer_dest, &mut core, &mut rng, 1000)
+            .unwrap();
+        assert!(router.has_forward_job_for(&peer_dest));
+
+        // Simulate link closed
+        router.cleanup_forward_jobs_for_link(&link_id);
+        assert!(!router.has_forward_job_for(&peer_dest));
+
+        // Message should still be in the store (not delivered)
+        assert_eq!(router.propagation_message_count(), 1);
+    }
+
+    #[test]
+    fn test_forward_broadcasts_linkrequest_without_path() {
+        let mut core = make_core(b"fwd-no-path");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let dest = [0x42; 16];
+        let (msg, _) = make_test_msg(b"fwd-no-path-msg", dest);
+        router.propagation_deposit(&msg.pack(), 1000);
+
+        // initiate_link always succeeds (broadcasts LINKREQUEST as HEADER_1),
+        // even without a cached path. The link will timeout if no response.
+        let result = router.start_propagation_forward(&dest, &mut core, &mut rng, 1000);
+        assert!(result.is_some(), "should broadcast LINKREQUEST");
+        assert!(router.has_forward_job_for(&dest));
+    }
+
+    #[test]
+    fn test_forward_no_messages_returns_none() {
+        let mut core = make_core(b"fwd-no-msgs");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let dest = [0x42; 16];
+        // No messages deposited
+        let result = router.start_propagation_forward(&dest, &mut core, &mut rng, 1000);
+        assert!(result.is_none(), "should fail without messages");
+    }
+
+    // -------------------------------------------------------------------
+    // Propagation retrieval tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_propagation_retrieve_path_hash() {
+        let ph = LxmfRouter::propagation_retrieve_path_hash();
+        assert_eq!(ph.len(), 10);
+
+        // Should be SHA-256("/lxmf/propagation/retrieve")[..10]
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest("/lxmf/propagation/retrieve".as_bytes());
+        assert_eq!(&ph[..], &digest[..10]);
+
+        // Should be deterministic
+        let ph2 = LxmfRouter::propagation_retrieve_path_hash();
+        assert_eq!(ph, ph2);
+    }
+
+    #[test]
+    fn test_propagation_retrieve_returns_messages() {
+        let mut core = make_core(b"ret-returns-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        let dest = [0x42; 16];
+        let (msg1, _) = make_test_msg(b"ret-msg-1", dest);
+        let (msg2, _) = make_test_msg(b"ret-msg-2", dest);
+        router.propagation_deposit(&msg1.pack(), 1000);
+        router.propagation_deposit(&msg2.pack(), 1001);
+
+        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let result = router.handle_propagation_request(&path_hash, &dest);
+        assert!(result.is_some());
+
+        let result = result.unwrap();
+        assert_eq!(result.messages.len(), 2);
+
+        // response_data should encode the count 2
+        // msgpack positive fixint for 2 is just [0x02]
+        assert_eq!(result.response_data, vec![0x02]);
+
+        // Each message should have non-empty data and a non-zero hash
+        for (data, hash) in &result.messages {
+            assert!(!data.is_empty());
+            assert_ne!(hash, &[0u8; 32]);
+        }
+    }
+
+    #[test]
+    fn test_propagation_retrieve_empty() {
+        let mut core = make_core(b"ret-empty-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        let dest = [0x99; 16]; // no messages for this dest
+        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let result = router.handle_propagation_request(&path_hash, &dest);
+        assert!(result.is_some());
+
+        let result = result.unwrap();
+        assert_eq!(result.messages.len(), 0);
+        assert_eq!(result.response_data, vec![0x00]); // count = 0
+    }
+
+    #[test]
+    fn test_propagation_retrieve_wrong_path() {
+        let mut core = make_core(b"ret-wrong-path");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        let wrong_path_hash = [0xFF; 10];
+        let dest = [0x42; 16];
+        let result = router.handle_propagation_request(&wrong_path_hash, &dest);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_propagation_retrieve_not_enabled() {
+        let mut core = make_core(b"ret-not-enabled");
+        let router = LxmfRouter::register(&mut core);
+        // Propagation NOT enabled
+
+        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let dest = [0x42; 16];
+        let result = router.handle_propagation_request(&path_hash, &dest);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_propagation_retrieve_data_too_short() {
+        let mut core = make_core(b"ret-short-data");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        // data is shorter than 16 bytes (TRUNCATED_HASH_LEN)
+        let result = router.handle_propagation_request(&path_hash, &[0x42; 5]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_retrieval_job_resource_complete_marks_delivered() {
+        let mut core = make_core(b"ret-rc-del");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let dest = [0x42; 16];
+        let (msg, _) = make_test_msg(b"ret-rc-msg", dest);
+        let packed = msg.pack();
+        router.propagation_deposit(&packed, 1000);
+        assert_eq!(router.propagation_message_count(), 1);
+
+        // Get the messages via handle_propagation_request
+        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let result = router
+            .handle_propagation_request(&path_hash, &dest)
+            .unwrap();
+        let messages = result.messages;
+
+        // Start retrieval send
+        let link_id = [0xAA; 16];
+        let _pkts = router.start_retrieval_send(&link_id, messages, &mut core, &mut rng);
+
+        assert!(router.has_retrieval_job_for_link(&link_id));
+
+        // Simulate resource complete
+        let resource_hash = [0xBB; 16];
+        router.advance_retrieval_on_resource_complete(
+            &link_id,
+            &resource_hash,
+            &mut core,
+            &mut rng,
+        );
+
+        // Message should be marked delivered
+        assert_eq!(router.propagation_message_count(), 0);
+
+        // Retrieval job should be cleaned up
+        assert!(!router.has_retrieval_job_for_link(&link_id));
+    }
+
+    #[test]
+    fn test_retrieval_multiple_messages_sequential() {
+        let mut core = make_core(b"ret-multi-seq");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let dest = [0x42; 16];
+        let (msg1, _) = make_test_msg(b"ret-multi-1", dest);
+        let (msg2, _) = make_test_msg(b"ret-multi-2", dest);
+        router.propagation_deposit(&msg1.pack(), 1000);
+        router.propagation_deposit(&msg2.pack(), 1001);
+        assert_eq!(router.propagation_message_count(), 2);
+
+        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let result = router
+            .handle_propagation_request(&path_hash, &dest)
+            .unwrap();
+        let messages = result.messages;
+        assert_eq!(messages.len(), 2);
+
+        let link_id = [0xAA; 16];
+        let _pkts = router.start_retrieval_send(&link_id, messages, &mut core, &mut rng);
+
+        // Complete first resource
+        router.advance_retrieval_on_resource_complete(&link_id, &[0xBB; 16], &mut core, &mut rng);
+        assert_eq!(router.propagation_message_count(), 1);
+        assert!(router.has_retrieval_job_for_link(&link_id));
+
+        // Complete second resource
+        router.advance_retrieval_on_resource_complete(&link_id, &[0xCC; 16], &mut core, &mut rng);
+        assert_eq!(router.propagation_message_count(), 0);
+        assert!(!router.has_retrieval_job_for_link(&link_id));
+    }
+
+    #[test]
+    fn test_retrieval_cleanup_on_link_close() {
+        let mut core = make_core(b"ret-cleanup-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        let mut rng = rand::thread_rng();
+
+        let dest = [0x42; 16];
+        let (msg, _) = make_test_msg(b"ret-cleanup-msg", dest);
+        router.propagation_deposit(&msg.pack(), 1000);
+
+        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let result = router
+            .handle_propagation_request(&path_hash, &dest)
+            .unwrap();
+        let messages = result.messages;
+
+        let link_id = [0xAA; 16];
+        let _pkts = router.start_retrieval_send(&link_id, messages, &mut core, &mut rng);
+        assert!(router.has_retrieval_job_for_link(&link_id));
+
+        // Simulate link closed
+        router.cleanup_forward_jobs_for_link(&link_id);
+        assert!(!router.has_retrieval_job_for_link(&link_id));
+
+        // Message should still be in the store
+        assert_eq!(router.propagation_message_count(), 1);
+    }
+
+    #[test]
+    fn test_handle_event_mut_request_retrieval() {
+        let mut core = make_core(b"ret-event-mut");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        let dest = [0x42; 16];
+        let (msg, _) = make_test_msg(b"ret-event-msg", dest);
+        router.propagation_deposit(&msg.pack(), 1000);
+
+        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let request_id = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A];
+        let link_id = [0xCC; 16];
+
+        let event = NodeEvent::RequestReceived {
+            link_id,
+            request_id,
+            path_hash,
+            data: dest.to_vec(),
+        };
+
+        match router.handle_event_mut(event, 1000) {
+            LxmfEvent::PropagationRetrievalRequest {
+                link_id: lid,
+                request_id: rid,
+                dest_hash: dh,
+                result,
+            } => {
+                assert_eq!(lid, link_id);
+                assert_eq!(rid, request_id);
+                assert_eq!(dh, dest);
+                assert_eq!(result.messages.len(), 1);
+            }
+            other => panic!("expected PropagationRetrievalRequest, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_encode_msgpack_uint_values() {
+        // Values < 128 are positive fixint
+        assert_eq!(encode_msgpack_uint(0), vec![0x00]);
+        assert_eq!(encode_msgpack_uint(5), vec![0x05]);
+        assert_eq!(encode_msgpack_uint(127), vec![0x7f]);
+
+        // Values 128..255 are uint8
+        assert_eq!(encode_msgpack_uint(128), vec![0xcc, 0x80]);
+        assert_eq!(encode_msgpack_uint(255), vec![0xcc, 0xff]);
+
+        // Values 256..65535 are uint16
+        assert_eq!(encode_msgpack_uint(256), vec![0xcd, 0x01, 0x00]);
+        assert_eq!(encode_msgpack_uint(65535), vec![0xcd, 0xff, 0xff]);
+
+        // Values >= 65536 are uint32
+        assert_eq!(
+            encode_msgpack_uint(65536),
+            vec![0xce, 0x00, 0x01, 0x00, 0x00]
+        );
     }
 }

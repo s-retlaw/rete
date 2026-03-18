@@ -48,6 +48,10 @@ pub trait MessageStore {
 
     /// Count messages for a specific destination (without cloning).
     fn count_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> usize;
+
+    /// Look up a stored message's data by its hash. Returns a reference
+    /// to the packed message bytes without cloning.
+    fn get_data(&self, message_hash: &[u8; 32]) -> Option<&[u8]>;
 }
 
 /// A stored LXMF message.
@@ -159,6 +163,10 @@ impl MessageStore for InMemoryMessageStore {
     fn count_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> usize {
         self.by_dest.get(dest_hash).map_or(0, |v| v.len())
     }
+
+    fn get_data(&self, message_hash: &[u8; 32]) -> Option<&[u8]> {
+        self.messages.get(message_hash).map(|m| m.data.as_slice())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +251,11 @@ impl<S: MessageStore> PropagationNode<S> {
     /// Get the total number of stored messages.
     pub fn message_count(&self) -> usize {
         self.store.message_count()
+    }
+
+    /// Look up a stored message's data by hash (O(1) via HashMap).
+    pub fn get_data(&self, message_hash: &[u8; 32]) -> Option<&[u8]> {
+        self.store.get_data(message_hash)
     }
 
     /// Get a reference to the underlying store.

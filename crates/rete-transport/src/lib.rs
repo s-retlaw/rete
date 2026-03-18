@@ -16,6 +16,7 @@ pub mod dedup;
 pub mod link;
 pub mod path;
 pub mod receipt;
+pub mod request;
 pub mod resource;
 pub mod transport;
 
@@ -28,6 +29,10 @@ pub use dedup::DedupWindow;
 pub use link::{compute_link_id, Link, LinkRole, LinkState, TeardownReason, LINK_MDU};
 pub use path::Path;
 pub use receipt::{PacketReceipt, ReceiptStatus, ReceiptTable};
+pub use request::{
+    build_request, build_response, parse_request, parse_response, path_hash, request_id,
+    RequestError, PATH_HASH_LEN, REQUEST_ID_LEN,
+};
 pub use resource::{Resource, ResourceFlags, ResourceState};
 pub use transport::{
     IngestResult, ReverseEntry, TickResult, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,

@@ -893,6 +893,7 @@ dependencies = [
 name = "rete-lxmf"
 version = "0.1.0"
 dependencies = [
+ "bzip2",
  "hex",
  "rand",
  "rand_core",

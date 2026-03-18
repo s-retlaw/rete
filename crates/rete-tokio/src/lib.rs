@@ -192,14 +192,24 @@ impl TokioNode {
     }
 
     /// Run the main event loop with a single interface (no command channel).
-    pub async fn run<I, F>(&mut self, iface: &mut I, on_event: F)
+    pub async fn run<I, F>(&mut self, iface: &mut I, mut on_event: F)
     where
         I: ReteInterface,
         F: FnMut(NodeEvent),
     {
         let (dummy_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
         drop(dummy_tx);
-        self.run_with_commands(iface, cmd_rx, on_event).await;
+        self.run_with_app_handler(
+            iface,
+            cmd_rx,
+            |e, _, _: &mut rand::rngs::ThreadRng| {
+                on_event(e);
+                Vec::new()
+            },
+            |_, _, _: &mut rand::rngs::ThreadRng| None,
+            rand::thread_rng(),
+        )
+        .await;
     }
 
     /// Run the main event loop with a single interface and command channel.
@@ -207,7 +217,7 @@ impl TokioNode {
         &mut self,
         iface: &mut I,
         cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
-        on_event: F,
+        mut on_event: F,
     ) where
         I: ReteInterface,
         F: FnMut(NodeEvent),
@@ -215,7 +225,10 @@ impl TokioNode {
         self.run_with_app_handler(
             iface,
             cmd_rx,
-            on_event,
+            |e, _, _: &mut rand::rngs::ThreadRng| {
+                on_event(e);
+                Vec::new()
+            },
             |_, _, _: &mut rand::rngs::ThreadRng| None,
             rand::thread_rng(),
         )
@@ -223,6 +236,10 @@ impl TokioNode {
     }
     /// Run the main event loop with a single interface, command channel, and
     /// application-level command handler.
+    ///
+    /// The `on_event` callback receives the event, a mutable reference to the
+    /// node core, and the RNG. It may return outbound packets to send (e.g.
+    /// for propagation auto-forward). Return an empty Vec for no packets.
     ///
     /// The `rng` parameter is used for both the runtime's own operations
     /// and passed to the app command handler for encryption/signing.
@@ -235,7 +252,7 @@ impl TokioNode {
         mut rng: R,
     ) where
         I: ReteInterface,
-        F: FnMut(NodeEvent),
+        F: FnMut(NodeEvent, &mut HostedNodeCore, &mut R) -> Vec<OutboundPacket>,
         R: rand_core::RngCore + rand_core::CryptoRng,
         C: FnMut(NodeCommand, &mut HostedNodeCore, &mut R) -> Option<Vec<OutboundPacket>>,
     {
@@ -291,7 +308,8 @@ impl TokioNode {
                             let outcome = self.core.handle_ingest(data, now, 0, &mut rng);
                             dispatch_single(iface, &outcome.packets).await;
                             if let Some(event) = outcome.event {
-                                on_event(event);
+                                let extra = on_event(event, &mut self.core, &mut rng);
+                                dispatch_single(iface, &extra).await;
                             }
                         }
                         Err(e) => {
@@ -323,7 +341,8 @@ impl TokioNode {
                     let outcome = self.core.handle_tick(now, &mut rng);
                     dispatch_single(iface, &outcome.packets).await;
                     if let Some(event) = outcome.event {
-                        on_event(event);
+                        let extra = on_event(event, &mut self.core, &mut rng);
+                        dispatch_single(iface, &extra).await;
                     }
                 }
             }
@@ -358,17 +377,28 @@ impl TokioNode {
         &mut self,
         iface_senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>>,
         inbound_rx: tokio::sync::mpsc::Receiver<InboundMsg>,
-        on_event: F,
+        mut on_event: F,
     ) where
         F: FnMut(NodeEvent),
     {
         let (dummy_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
         drop(dummy_tx);
-        self.run_multi_with_commands(iface_senders, inbound_rx, cmd_rx, on_event)
-            .await;
+        self.run_multi_with_commands(
+            iface_senders,
+            inbound_rx,
+            cmd_rx,
+            |e, _, _: &mut rand::rngs::ThreadRng| {
+                on_event(e);
+                Vec::new()
+            },
+        )
+        .await;
     }
 
     /// Run the main event loop with multiple interfaces and a command channel.
+    ///
+    /// The `on_event` callback receives the event, a mutable reference to the
+    /// node core, and the RNG. It may return outbound packets to send.
     pub async fn run_multi_with_commands<F>(
         &mut self,
         iface_senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>>,
@@ -376,7 +406,7 @@ impl TokioNode {
         mut cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
         mut on_event: F,
     ) where
-        F: FnMut(NodeEvent),
+        F: FnMut(NodeEvent, &mut HostedNodeCore, &mut rand::rngs::ThreadRng) -> Vec<OutboundPacket>,
     {
         let mut rng = rand::thread_rng();
 
@@ -413,7 +443,8 @@ impl TokioNode {
                     let outcome = self.core.handle_ingest(&msg.data, now, msg.iface_idx, &mut rng);
                     dispatch_multi(&iface_senders, &outcome.packets, msg.iface_idx).await;
                     if let Some(event) = outcome.event {
-                        on_event(event);
+                        let extra = on_event(event, &mut self.core, &mut rng);
+                        dispatch_multi(&iface_senders, &extra, 0).await;
                     }
                 }
                 cmd = cmd_rx.recv() => {
@@ -433,7 +464,8 @@ impl TokioNode {
                     let outcome = self.core.handle_tick(now, &mut rng);
                     dispatch_multi(&iface_senders, &outcome.packets, 0).await;
                     if let Some(event) = outcome.event {
-                        on_event(event);
+                        let extra = on_event(event, &mut self.core, &mut rng);
+                        dispatch_multi(&iface_senders, &extra, 0).await;
                     }
                 }
             }

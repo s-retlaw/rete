@@ -471,6 +471,49 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         Some(OutboundPacket::broadcast(pkt))
     }
 
+    /// Send a link.request() on an established link.
+    ///
+    /// Returns `(outbound_packet, request_id)` on success, or `None` if the link
+    /// is not active. The `request_id` can be used to correlate the eventual response.
+    pub fn send_request<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        path: &str,
+        data: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Option<(OutboundPacket, [u8; 10])> {
+        let packed = rete_transport::build_request(path, data, now as f64);
+        let req_id = rete_transport::request_id(&packed);
+        let pkt = self.transport.build_link_data_packet(
+            link_id,
+            &packed,
+            rete_core::CONTEXT_REQUEST,
+            rng,
+        )?;
+        Some((OutboundPacket::broadcast(pkt), req_id))
+    }
+
+    /// Send a link.response() on an established link.
+    ///
+    /// Returns the outbound packet on success, or `None` if the link is not active.
+    pub fn send_response<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        request_id: &[u8; 10],
+        data: &[u8],
+        rng: &mut R,
+    ) -> Option<OutboundPacket> {
+        let packed = rete_transport::build_response(request_id, data);
+        let pkt = self.transport.build_link_data_packet(
+            link_id,
+            &packed,
+            rete_core::CONTEXT_RESPONSE,
+            rng,
+        )?;
+        Some(OutboundPacket::broadcast(pkt))
+    }
+
     /// Start a resource transfer on a link.
     ///
     /// Returns the outbound advertisement packet.
@@ -694,6 +737,32 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                     .link_proof_outbound(&packet_hash, &link_id)
                     .into_iter()
                     .collect(),
+            },
+            IngestResult::RequestReceived {
+                link_id,
+                request_id,
+                path_hash,
+                data,
+            } => IngestOutcome {
+                event: Some(NodeEvent::RequestReceived {
+                    link_id,
+                    request_id,
+                    path_hash,
+                    data,
+                }),
+                packets: Vec::new(),
+            },
+            IngestResult::ResponseReceived {
+                link_id,
+                request_id,
+                data,
+            } => IngestOutcome {
+                event: Some(NodeEvent::ResponseReceived {
+                    link_id,
+                    request_id,
+                    data,
+                }),
+                packets: Vec::new(),
             },
             IngestResult::LinkClosed { link_id } => IngestOutcome {
                 event: Some(NodeEvent::LinkClosed { link_id }),
