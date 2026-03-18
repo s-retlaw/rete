@@ -24,48 +24,7 @@ import sys
 import tempfile
 import time
 
-
-def write_rnsd_config(config_dir: str, port: int, ifac_netname: str = None) -> str:
-    """Write a minimal rnsd config file with optional IFAC. Returns config dir."""
-    os.makedirs(config_dir, exist_ok=True)
-    config_path = os.path.join(config_dir, "config")
-
-    ifac_line = ""
-    if ifac_netname:
-        ifac_line = f"\n    networkname = {ifac_netname}"
-
-    with open(config_path, "w") as f:
-        f.write(f"""\
-[reticulum]
-  enable_transport = yes
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-
-  [[TCP Server Interface]]
-    type = TCPServerInterface
-    enabled = yes
-    listen_ip = 127.0.0.1
-    listen_port = {port}{ifac_line}
-""")
-    return config_dir
-
-
-def wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
-    """Wait until a TCP port is accepting connections."""
-    import socket
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return True
-        except (ConnectionRefusedError, OSError):
-            time.sleep(0.2)
-    return False
+from interop_helpers import write_rnsd_config, wait_for_port
 
 
 def start_rnsd(config_dir: str, port: int, ifac_netname: str = None):

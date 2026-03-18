@@ -33,52 +33,7 @@ import tempfile
 import threading
 import time
 
-
-def write_rnsd_config(config_dir: str, port: int = 4254) -> str:
-    """Write a minimal rnsd config file. Returns the config dir path."""
-    os.makedirs(config_dir, exist_ok=True)
-    config_path = os.path.join(config_dir, "config")
-    with open(config_path, "w") as f:
-        f.write(f"""\
-[reticulum]
-  enable_transport = yes
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-
-  [[TCP Server Interface]]
-    type = TCPServerInterface
-    enabled = yes
-    listen_ip = 127.0.0.1
-    listen_port = {port}
-""")
-    return config_dir
-
-
-def wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
-    """Wait until a TCP port is accepting connections."""
-    import socket
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return True
-        except (ConnectionRefusedError, OSError):
-            time.sleep(0.2)
-    return False
-
-
-def read_stdout_lines(proc, lines, stop_event):
-    """Read stdout lines from a subprocess into a list."""
-    while not stop_event.is_set():
-        line = proc.stdout.readline()
-        if not line:
-            break
-        lines.append(line.decode(errors="replace").rstrip("\n"))
+from interop_helpers import write_rnsd_config, wait_for_port, read_stdout_lines
 
 
 def main():

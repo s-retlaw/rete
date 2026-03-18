@@ -40,6 +40,8 @@ import sys
 import tempfile
 import time
 
+from interop_helpers import write_rnsd_config, wait_for_port
+
 
 # ---------------------------------------------------------------------------
 # HDLC framing
@@ -61,46 +63,6 @@ def hdlc_encode(data: bytes) -> bytes:
             out.append(b)
     out.append(FLAG)
     return bytes(out)
-
-
-# ---------------------------------------------------------------------------
-# rnsd config + port waiting
-# ---------------------------------------------------------------------------
-
-def write_rnsd_config(config_dir: str, port: int = 4249) -> str:
-    """Write a minimal rnsd config file. Returns the config dir path."""
-    os.makedirs(config_dir, exist_ok=True)
-    config_path = os.path.join(config_dir, "config")
-    with open(config_path, "w") as f:
-        f.write(f"""\
-[reticulum]
-  enable_transport = yes
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-
-  [[TCP Server Interface]]
-    type = TCPServerInterface
-    enabled = yes
-    listen_ip = 127.0.0.1
-    listen_port = {port}
-""")
-    return config_dir
-
-
-def wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
-    """Wait until a TCP port is accepting connections."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return True
-        except (ConnectionRefusedError, OSError):
-            time.sleep(0.2)
-    return False
 
 
 # ---------------------------------------------------------------------------
