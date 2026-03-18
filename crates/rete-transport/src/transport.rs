@@ -590,7 +590,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         dest.copy_from_slice(pkt.destination_hash);
                         let is_link_request = pkt.packet_type == PacketType::LinkRequest;
 
-                        // Drop borrow on raw before mutating
+                        // End pkt borrow on raw before mutating
+                        #[allow(clippy::drop_non_drop)]
                         drop(pkt);
 
                         raw[1] = raw[1].saturating_add(1);
@@ -682,10 +683,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 // Check for LRPROOF (link proof from responder to initiator).
                 // Only handle locally if we have a pending link for this link_id;
                 // otherwise fall through to reverse-table forwarding (relay case).
-                if pkt.context == CONTEXT_LRPROOF && pkt.dest_type == DestType::Link {
-                    if self.links.contains_key(&dh) {
-                        return self.handle_lrproof(&dh, pkt.payload, now);
-                    }
+                if pkt.context == CONTEXT_LRPROOF
+                    && pkt.dest_type == DestType::Link
+                    && self.links.contains_key(&dh)
+                {
+                    return self.handle_lrproof(&dh, pkt.payload, now);
                 }
 
                 // Check receipt table for delivery proof (DATA packets)
@@ -1055,7 +1057,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     if let Some(res) = self.resources.iter_mut().find(|r| {
                         r.is_sender
                             && r.link_id == *link_id
-                            && req_hash.map_or(true, |h| h == r.resource_hash)
+                            && req_hash.is_none_or(|h| h == r.resource_hash)
                     }) {
                         res.handle_request(decrypted)
                     } else {
@@ -1104,7 +1106,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 if let Some(res) = self.resources.iter_mut().find(|r| {
                     r.is_sender
                         && r.link_id == *link_id
-                        && proof_rh.map_or(true, |h| h == r.resource_hash)
+                        && proof_rh.is_none_or(|h| h == r.resource_hash)
                 }) {
                     let mut rh = [0u8; TRUNCATED_HASH_LEN];
                     rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
@@ -1622,7 +1624,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(data); // original plaintext
-            hasher.update(&resource.random_hash);
+            hasher.update(resource.random_hash);
             resource.resource_hash = hasher.finalize().into();
         }
         // Also store the original plaintext in resource.data for proof validation.
