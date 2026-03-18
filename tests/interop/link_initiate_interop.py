@@ -19,121 +19,31 @@ Usage:
   uv run python link_initiate_interop.py --rust-binary ../../target/debug/rete-linux
 """
 
-import argparse
-import os
-import shutil
-import signal
-import subprocess
-import sys
-import tempfile
-import threading
 import time
 
-from interop_helpers import write_rnsd_config, wait_for_port, read_stdout_lines
+from interop_helpers import InteropTest
 
 
 def main():
-    parser = argparse.ArgumentParser(description="rete link-initiation interop test")
-    parser.add_argument(
-        "--rust-binary",
-        default="../../target/debug/rete-linux",
-        help="Path to the rete-linux binary",
-    )
-    parser.add_argument(
-        "--port", type=int, default=4250, help="TCP port for rnsd"
-    )
-    parser.add_argument(
-        "--timeout", type=float, default=30.0, help="Test timeout in seconds"
-    )
-    args = parser.parse_args()
-
-    rust_binary = os.path.abspath(args.rust_binary)
-    if not os.path.exists(rust_binary):
-        print(f"FAIL: Rust binary not found at {rust_binary}")
-        print("  Build it with: cargo build -p rete-example-linux")
-        sys.exit(1)
-
-    tmpdir = tempfile.mkdtemp(prefix="rete_link_init_interop_")
-    rnsd_config_dir = os.path.join(tmpdir, "rnsd_config")
-    procs = []
-    passed = 0
-    failed = 0
-    stop_event = threading.Event()
-
-    try:
-        # --- Step 1: Start rnsd ---
-        print(f"[link-init-interop] setting up rnsd config in {rnsd_config_dir}")
-        write_rnsd_config(rnsd_config_dir, args.port)
-
-        print(f"[link-init-interop] starting rnsd on port {args.port}...")
-        rnsd_proc = subprocess.Popen(
-            [sys.executable, "-m", "RNS.Utilities.rnsd", "--config", rnsd_config_dir],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        procs.append(rnsd_proc)
-
-        if not wait_for_port("127.0.0.1", args.port, timeout=15.0):
-            print("[link-init-interop] FAIL: rnsd did not start listening within 15s")
-            if rnsd_proc.poll() is not None:
-                stderr = rnsd_proc.stderr.read().decode(errors="replace")
-                print(f"  rnsd stderr:\n{stderr}")
-            sys.exit(1)
-        print("[link-init-interop] rnsd is listening")
-
-        # --- Step 2: Start Rust node with stdin piped ---
-        print("[link-init-interop] starting Rust node...")
-        rust_proc = subprocess.Popen(
-            [
-                rust_binary,
-                "--connect", f"127.0.0.1:{args.port}",
-                "--identity-seed", "link-init-seed-99",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        procs.append(rust_proc)
-
-        rust_lines = []
-        rust_reader = threading.Thread(
-            target=read_stdout_lines, args=(rust_proc, rust_lines, stop_event)
-        )
-        rust_reader.daemon = True
-        rust_reader.start()
+    with InteropTest("link-init-interop", default_port=4250) as t:
+        t.start_rnsd()
+        rust = t.start_rust(seed="link-init-seed-99")
 
         # Give Rust time to connect and announce
         time.sleep(3)
 
-        # --- Step 3: Start Python helper that accepts inbound links ---
-        py_helper = os.path.join(tmpdir, "py_link_responder.py")
-        with open(py_helper, "w") as f:
-            f.write(f"""\
+        # Start Python responder that accepts inbound links
+        py = t.start_py_helper(f"""\
 import RNS
 import time
 import sys
 import os
 import threading
 
-config_dir = os.path.join("{tmpdir}", "py_responder_config")
+config_dir = os.path.join("{t.tmpdir}", "py_responder_config")
 os.makedirs(config_dir, exist_ok=True)
 with open(os.path.join(config_dir, "config"), "w") as cf:
-    cf.write(\"\"\"
-[reticulum]
-  enable_transport = no
-  share_instance = no
-
-[logging]
-  loglevel = 5
-
-[interfaces]
-
-  [[TCP Client Interface]]
-    type = TCPClientInterface
-    enabled = yes
-    target_host = 127.0.0.1
-    target_port = {args.port}
-\"\"\")
+    cf.write(\"\"\"{t.py_rns_config()}\"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)
 
@@ -171,20 +81,15 @@ def inbound_link_established(link):
     pkt.send()
     print("PY_LINK_DATA_SENT", flush=True)
 
-def link_closed_cb(link):
-    print(f"PY_LINK_CLOSED:{{link.link_id.hex()}}", flush=True)
-
 py_dest.set_link_established_callback(inbound_link_established)
 
 # Announce so Rust can discover us
 py_dest.announce()
 print(f"PY_DEST_HASH:{{py_dest.hexhash}}", flush=True)
-print(f"PY_IDENTITY_HASH:{{py_identity.hexhash}}", flush=True)
 print("PY_ANNOUNCE_SENT", flush=True)
 
 # Wait for link establishment
-timeout = {args.timeout}
-if not link_established.wait(timeout=timeout):
+if not link_established.wait(timeout={t.timeout}):
     print("PY_FAIL:no_link_established", flush=True)
     sys.exit(1)
 
@@ -206,204 +111,53 @@ if active_link[0]:
 print("PY_DONE", flush=True)
 """)
 
-        print("[link-init-interop] starting Python responder...")
-        py_proc = subprocess.Popen(
-            [sys.executable, py_helper],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        procs.append(py_proc)
-
-        # --- Step 4: Read Python stdout for dest hash, then tell Rust to link ---
-        py_lines = []
-        py_reader = threading.Thread(
-            target=read_stdout_lines, args=(py_proc, py_lines, stop_event)
-        )
-        py_reader.daemon = True
-        py_reader.start()
-
-        # Wait for Python's dest hash
-        deadline = time.time() + args.timeout
-        py_dest_hash = None
-        while time.time() < deadline:
-            for line in py_lines:
-                if line.startswith("PY_DEST_HASH:"):
-                    py_dest_hash = line.split(":", 1)[1].strip()
-                    break
-            if py_dest_hash:
-                break
-            time.sleep(0.3)
-
+        # Wait for Python's dest hash, then Rust's announce discovery
+        py_dest_hash = t.wait_for_line(py, "PY_DEST_HASH:")
         if not py_dest_hash:
             print("[link-init-interop] FAIL: Python did not report dest hash")
-            sys.exit(1)
-        print(f"[link-init-interop] Python dest hash: {py_dest_hash}")
+            return
 
-        # Wait for Rust to see Python's announce
-        print("[link-init-interop] waiting for Rust to discover Python's announce...")
-        rust_saw_announce = False
-        while time.time() < deadline:
-            for line in rust_lines:
-                if line.startswith("ANNOUNCE:") and py_dest_hash in line:
-                    rust_saw_announce = True
-                    break
-            if rust_saw_announce:
-                break
-            time.sleep(0.3)
+        rust_saw_announce = t.wait_for_line(rust, f"ANNOUNCE:{py_dest_hash}") is not None
 
-        if not rust_saw_announce:
-            print("[link-init-interop] FAIL: Rust did not see Python's announce")
-            print(f"  Rust stdout lines: {rust_lines}")
-            # Try proceeding anyway — the announce may still arrive
-        else:
-            print("[link-init-interop] Rust discovered Python's announce")
+        # Tell Rust to initiate a link
+        t.send_rust(f"link {py_dest_hash}")
 
-        # --- Step 5: Tell Rust to initiate a link ---
-        print(f"[link-init-interop] sending 'link {py_dest_hash}' to Rust stdin...")
-        rust_proc.stdin.write(f"link {py_dest_hash}\n".encode())
-        rust_proc.stdin.flush()
-
-        # Wait for Rust LINK_ESTABLISHED
-        print("[link-init-interop] waiting for link establishment...")
-        rust_link_id = None
-        while time.time() < deadline:
-            for line in rust_lines:
-                if line.startswith("LINK_ESTABLISHED:"):
-                    rust_link_id = line.split(":", 1)[1].strip()
-                    break
-            if rust_link_id:
-                break
-            time.sleep(0.3)
-
+        # Wait for Rust link establishment
+        rust_link_id = t.wait_for_line(rust, "LINK_ESTABLISHED:")
         if rust_link_id:
-            print(f"[link-init-interop] Rust link established: {rust_link_id}")
+            time.sleep(1)  # let link settle
+            t.send_rust(f"linkdata {rust_link_id} hello from rust via link")
 
-            # --- Step 6: Send data from Rust to Python over the link ---
-            time.sleep(1)  # let link fully settle
-            print(f"[link-init-interop] sending 'linkdata {rust_link_id} hello from rust via link' ...")
-            rust_proc.stdin.write(f"linkdata {rust_link_id} hello from rust via link\n".encode())
-            rust_proc.stdin.flush()
-        else:
-            print("[link-init-interop] link not established on Rust side")
-
-        # --- Step 7: Wait for Python to finish ---
-        print(f"[link-init-interop] waiting up to {args.timeout}s for Python to finish...")
-        try:
-            py_proc.wait(timeout=args.timeout)
-        except subprocess.TimeoutExpired:
-            py_proc.kill()
-            py_proc.wait()
-
-        # Give Rust time to process remaining events
+        # Wait for Python to finish
+        t.wait_for_line(py, "PY_DONE", timeout=t.timeout)
         time.sleep(2)
 
-        # Collect results
-        stop_event.set()
-        rust_proc.send_signal(signal.SIGTERM)
-        try:
-            _, rust_stderr = rust_proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            rust_proc.kill()
-            _, rust_stderr = rust_proc.communicate()
+        # Collect output for diagnostics
+        rust_stderr = t.collect_rust_stderr()
+        t.dump_output("Python responder stdout", py)
+        t.dump_output("Rust node stdout", rust)
+        t.dump_output("Rust node stderr (last 1000)", rust_stderr.strip().split("\n"))
 
-        rust_err_output = rust_stderr.decode(errors="replace")
-        py_output = "\n".join(py_lines)
+        # Assertions
+        t.check(rust_saw_announce, "Rust discovered Python's announce")
 
-        print("[link-init-interop] Python responder stdout:")
-        for line in py_lines:
-            if line.strip():
-                print(f"  {line}")
-
-        print("[link-init-interop] Rust node stdout:")
-        for line in rust_lines:
-            if line.strip():
-                print(f"  {line}")
-
-        print("[link-init-interop] Rust node stderr (last 1000 chars):")
-        for line in rust_err_output[-1000:].strip().split("\n"):
-            if line.strip():
-                print(f"  {line}")
-
-        # --- Assertions ---
-
-        # 1. Rust discovered Python's announce
-        if rust_saw_announce:
-            print("[link-init-interop] PASS [1/5]: Rust discovered Python's announce")
-            passed += 1
-        else:
-            print("[link-init-interop] FAIL [1/5]: Rust did not discover Python's announce")
-            failed += 1
-
-        # 2. Link established (both sides)
-        rust_link_ok = any(l.startswith("LINK_ESTABLISHED:") for l in rust_lines)
-        py_link_ok = any(l.startswith("PY_LINK_ESTABLISHED:") for l in py_lines)
-        if rust_link_ok and py_link_ok:
-            print("[link-init-interop] PASS [2/5]: Link established (both sides)")
-            passed += 1
-        else:
-            print(f"[link-init-interop] FAIL [2/5]: Link established — Rust={rust_link_ok} Python={py_link_ok}")
-            failed += 1
-
-        # 3. Python received data from Rust
-        py_got_rust_data = any(
-            l.startswith("PY_LINK_DATA_RECEIVED:") and "hello from rust via link" in l
-            for l in py_lines
+        t.check(
+            t.has_line(rust, "LINK_ESTABLISHED:") and t.has_line(py, "PY_LINK_ESTABLISHED:"),
+            "Link established (both sides)",
+            detail=f"Rust={t.has_line(rust, 'LINK_ESTABLISHED:')} Python={t.has_line(py, 'PY_LINK_ESTABLISHED:')}",
         )
-        if py_got_rust_data:
-            print("[link-init-interop] PASS [3/5]: Python received data from Rust")
-            passed += 1
-        else:
-            print("[link-init-interop] FAIL [3/5]: Python did not receive data from Rust")
-            py_data_lines = [l for l in py_lines if "PY_LINK_DATA" in l]
-            if py_data_lines:
-                print(f"  Python data lines: {py_data_lines}")
-            failed += 1
 
-        # 4. Rust received data from Python
-        rust_got_py_data = any(
-            l.startswith("LINK_DATA:") and "hello from python via link" in l
-            for l in rust_lines
+        t.check(
+            t.has_line(py, "PY_LINK_DATA_RECEIVED:", contains="hello from rust via link"),
+            "Python received data from Rust",
         )
-        if rust_got_py_data:
-            print("[link-init-interop] PASS [4/5]: Rust received data from Python")
-            passed += 1
-        else:
-            print("[link-init-interop] FAIL [4/5]: Rust did not receive data from Python")
-            rust_data_lines = [l for l in rust_lines if l.startswith("LINK_DATA:")]
-            if rust_data_lines:
-                print(f"  Rust LINK_DATA lines: {rust_data_lines}")
-            failed += 1
 
-        # 5. Link teardown
-        rust_link_closed = any(l.startswith("LINK_CLOSED:") for l in rust_lines)
-        if rust_link_closed:
-            print("[link-init-interop] PASS [5/5]: Link teardown confirmed")
-            passed += 1
-        else:
-            print("[link-init-interop] FAIL [5/5]: Rust did not receive LINK_CLOSED")
-            failed += 1
+        t.check(
+            t.has_line(rust, "LINK_DATA:", contains="hello from python via link"),
+            "Rust received data from Python",
+        )
 
-    finally:
-        print("[link-init-interop] cleaning up...")
-        for p in procs:
-            try:
-                p.kill()
-                p.wait(timeout=5)
-            except Exception:
-                pass
-        try:
-            shutil.rmtree(tmpdir)
-        except Exception:
-            pass
-
-    total = passed + failed
-    print(f"\n[link-init-interop] Results: {passed}/{total} passed, {failed}/{total} failed")
-
-    if failed > 0:
-        sys.exit(1)
-    else:
-        print("[link-init-interop] ALL TESTS PASSED")
-        sys.exit(0)
+        t.check(t.has_line(rust, "LINK_CLOSED:"), "Link teardown confirmed")
 
 
 if __name__ == "__main__":
