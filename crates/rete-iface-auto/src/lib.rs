@@ -927,4 +927,59 @@ mod tests {
         assert!(!is_link_local(&"::1".parse().unwrap()));
         assert!(!is_link_local(&"ff02::1".parse().unwrap()));
     }
+
+    #[test]
+    fn test_discovery_token_different_groups() {
+        // Different group_ids must produce different tokens for the same address
+        let addr = "fe80::1";
+        let token_a = compute_discovery_token(b"group_alpha", addr);
+        let token_b = compute_discovery_token(b"group_beta", addr);
+        assert_ne!(
+            token_a, token_b,
+            "different group_ids should produce different discovery tokens"
+        );
+    }
+
+    #[test]
+    fn test_multicast_address_different_groups() {
+        // Different group_ids must produce different multicast addresses
+        let hash_a = compute_group_hash(b"group_alpha");
+        let hash_b = compute_group_hash(b"group_beta");
+        let addr_a = multicast_address_from_group_hash(&hash_a);
+        let addr_b = multicast_address_from_group_hash(&hash_b);
+        assert_ne!(
+            addr_a, addr_b,
+            "different group_ids should produce different multicast addresses"
+        );
+    }
+
+    #[test]
+    fn test_dedup_ring_full_cycle() {
+        // DedupRing with capacity 4: fill it, then cycle through more entries
+        let mut ring = DedupRing::new(4);
+
+        // Fill all 4 slots
+        assert!(!ring.is_duplicate(b"a"));
+        assert!(!ring.is_duplicate(b"b"));
+        assert!(!ring.is_duplicate(b"c"));
+        assert!(!ring.is_duplicate(b"d"));
+        assert_eq!(ring.entries.len(), 4);
+
+        // All 4 should be detected as duplicates
+        assert!(ring.is_duplicate(b"a"));
+        assert!(ring.is_duplicate(b"b"));
+        assert!(ring.is_duplicate(b"c"));
+        assert!(ring.is_duplicate(b"d"));
+
+        // Adding a 5th entry evicts the oldest ("a")
+        assert!(!ring.is_duplicate(b"e"));
+        assert_eq!(ring.entries.len(), 4);
+        // "a" was evicted, so it's no longer a duplicate
+        assert!(!ring.is_duplicate(b"a"));
+        // "b" was evicted by the re-insertion of "a" above
+        assert!(!ring.is_duplicate(b"b"));
+
+        // After cycling, ring still has exactly 4 entries
+        assert_eq!(ring.entries.len(), 4);
+    }
 }

@@ -980,7 +980,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
     /// Periodic maintenance: expire paths, collect pending announces, send keepalives.
     pub fn handle_tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> IngestOutcome {
-        let result = self.transport.tick(now);
         let mut packets = self.flush_announces(now);
 
         // Drain any resource outbound packets queued during ingest
@@ -988,7 +987,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             packets.push(OutboundPacket::broadcast(pkt));
         }
 
-        // Send keepalives for idle links
+        // Send keepalives BEFORE tick — tick may mark links Stale, which would
+        // prevent build_keepalive_packet from working (it requires Active state).
+        // With dynamic keepalive on fast links, keepalive_interval can be as low
+        // as 5s, which equals TICK_INTERVAL. Sending keepalives first ensures
+        // they go out before the stale check.
         for ka in self.transport.build_pending_keepalives(now, rng) {
             packets.push(OutboundPacket::broadcast(ka));
         }
@@ -997,6 +1000,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         for retx in self.transport.pending_channel_retransmits(now, rng) {
             packets.push(OutboundPacket::broadcast(retx));
         }
+
+        // Now run tick: expire paths, check stale links, etc.
+        let result = self.transport.tick(now);
 
         IngestOutcome {
             event: Some(NodeEvent::Tick {

@@ -43,3 +43,37 @@ impl Path {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_path_direct_creation() {
+        let path = Path::direct(100);
+        assert!(path.via.is_none());
+        assert_eq!(path.hops, 1);
+        assert_eq!(path.learned_at, 100);
+        assert!(path.announce_raw.is_none());
+    }
+
+    #[test]
+    fn test_path_via_repeater_creation() {
+        let repeater = [0xAAu8; TRUNCATED_HASH_LEN];
+        let path = Path::via_repeater(repeater, 3, 200);
+        assert_eq!(path.via, Some(repeater));
+        assert_eq!(path.hops, 3);
+        assert_eq!(path.learned_at, 200);
+        assert!(path.announce_raw.is_none());
+    }
+
+    #[test]
+    fn test_path_announce_raw_storage() {
+        let mut path = Path::direct(50);
+        assert!(path.announce_raw.is_none());
+
+        let raw_data = alloc::vec![0x01, 0x02, 0x03];
+        path.announce_raw = Some(raw_data.clone());
+        assert_eq!(path.announce_raw.as_ref().unwrap(), &raw_data);
+    }
+}

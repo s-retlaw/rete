@@ -68,6 +68,17 @@ pub const KEEPALIVE_INTERVAL_SECS: u64 = 360;
 /// Default stale timeout in seconds (2x keepalive, matches Python RNS).
 pub const STALE_TIMEOUT_SECS: u64 = KEEPALIVE_INTERVAL_SECS * 2;
 
+/// Maximum RTT that produces the maximum keepalive interval.
+/// Python: `Link.KEEPALIVE_TIMEOUT_FACTOR = 4` → `360 / (4/1.75*1) = 1.75` effectively.
+/// Formula: `keepalive = rtt * (KEEPALIVE_MAX / KEEPALIVE_MAX_RTT)`.
+pub const KEEPALIVE_MAX_RTT: f32 = 1.75;
+/// Maximum keepalive interval in seconds.
+pub const KEEPALIVE_MAX: f32 = 360.0;
+/// Minimum keepalive interval in seconds.
+pub const KEEPALIVE_MIN: f32 = 5.0;
+/// Stale timeout multiplier relative to keepalive interval.
+pub const STALE_FACTOR: f32 = 2.0;
+
 /// An encrypted link session.
 pub struct Link {
     /// Unique 16-byte link identifier.
@@ -334,6 +345,24 @@ impl Link {
             .decrypt(ciphertext, out)
     }
 
+    /// Update keepalive and stale timers based on measured RTT.
+    ///
+    /// Matches Python `Link.__update_keepalive()`:
+    /// ```python
+    /// self.keepalive = max(min(rtt * (360/1.75), 360), 5)
+    /// self.stale_time = self.keepalive * 2
+    /// ```
+    pub fn update_keepalive(&mut self, rtt: f32) {
+        if rtt <= 0.0 {
+            return; // Don't update if RTT not measured
+        }
+        self.rtt = rtt;
+        let ka = (rtt * (KEEPALIVE_MAX / KEEPALIVE_MAX_RTT)).clamp(KEEPALIVE_MIN, KEEPALIVE_MAX);
+        // Ensure at least 1 second to prevent zero-interval issues
+        self.keepalive_interval = (ka as u64).max(1);
+        self.stale_time = ((ka * STALE_FACTOR) as u64).max(2);
+    }
+
     /// Activate the link (after RTT measurement completes).
     pub fn activate(&mut self, now: u64) {
         self.state = LinkState::Active;
@@ -401,10 +430,11 @@ impl Link {
 
     /// Whether a keepalive should be sent proactively.
     ///
-    /// Returns true if the link is active and half the keepalive interval
-    /// has elapsed since our last outbound packet.
+    /// Returns true if the link is active (or stale) and half the keepalive
+    /// interval has elapsed since our last outbound packet. Also sends
+    /// keepalives on stale links to attempt revival.
     pub fn needs_keepalive(&self, now: u64) -> bool {
-        self.state == LinkState::Active
+        (self.state == LinkState::Active || self.state == LinkState::Stale)
             && now.saturating_sub(self.last_outbound) > self.keepalive_interval / 2
     }
 
@@ -859,6 +889,123 @@ mod tests {
             link_id, link_id2,
             "link_id should be same with or without MTU signalling"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic keepalive tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_update_keepalive_low_rtt() {
+        // RTT=0.05s (loopback) → keepalive ≈ 10s, stale ≈ 20s
+        let mut rng = rand_core::OsRng;
+        let payload = [0xBBu8; 64];
+        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+
+        link.update_keepalive(0.05);
+        // 0.05 * (360/1.75) ≈ 10.28, clamped to max(5, min(360, 10.28)) = 10
+        assert_eq!(link.keepalive_interval, 10);
+        assert_eq!(link.stale_time, 20);
+        assert!((link.rtt - 0.05).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_update_keepalive_high_rtt() {
+        // RTT=2.0s → keepalive = 360 (clamped to max), stale = 720
+        let mut rng = rand_core::OsRng;
+        let payload = [0xBBu8; 64];
+        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+
+        link.update_keepalive(2.0);
+        // 2.0 * (360/1.75) ≈ 411.4 → clamped to 360
+        assert_eq!(link.keepalive_interval, 360);
+        assert_eq!(link.stale_time, 720);
+    }
+
+    #[test]
+    fn test_update_keepalive_medium_rtt() {
+        // RTT=0.5s → keepalive ≈ 102, stale ≈ 205
+        let mut rng = rand_core::OsRng;
+        let payload = [0xBBu8; 64];
+        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+
+        link.update_keepalive(0.5);
+        // 0.5 * (360/1.75) ≈ 102.86 → 102 (truncated to u64)
+        assert_eq!(link.keepalive_interval, 102);
+        assert_eq!(link.stale_time, 205);
+    }
+
+    #[test]
+    fn test_update_keepalive_very_low_rtt() {
+        // RTT=0.001s → keepalive = 5 (clamped to min)
+        let mut rng = rand_core::OsRng;
+        let payload = [0xBBu8; 64];
+        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+
+        link.update_keepalive(0.001);
+        // 0.001 * (360/1.75) ≈ 0.206 → clamped to max(5, ...) = 5
+        assert_eq!(link.keepalive_interval, 5);
+        assert_eq!(link.stale_time, 10);
+    }
+
+    #[test]
+    fn test_update_keepalive_zero_rtt_no_change() {
+        // RTT=0.0 → should not change defaults
+        let mut rng = rand_core::OsRng;
+        let payload = [0xBBu8; 64];
+        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+
+        let orig_ka = link.keepalive_interval;
+        let orig_stale = link.stale_time;
+        link.update_keepalive(0.0);
+        assert_eq!(link.keepalive_interval, orig_ka);
+        assert_eq!(link.stale_time, orig_stale);
+    }
+
+    #[test]
+    fn test_check_stale_with_dynamic_keepalive() {
+        // After update_keepalive(0.05), stale triggers at ~10s not 360s
+        let mut rng = rand_core::OsRng;
+        let payload = [0xBBu8; 64];
+        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+        link.update_keepalive(0.05);
+        link.activate(100);
+
+        // At 109 (9s elapsed) — should still be active
+        assert!(!link.check_stale(109));
+        assert_eq!(link.state, LinkState::Active);
+
+        // At 111 (11s elapsed, > keepalive_interval=10) — should be stale
+        assert!(!link.check_stale(111));
+        assert_eq!(link.state, LinkState::Stale);
+
+        // At 121 (21s elapsed, > stale_time=20) — should be closed
+        assert!(link.check_stale(121));
+        assert_eq!(link.state, LinkState::Closed);
+    }
+
+    #[test]
+    fn test_needs_keepalive_with_dynamic_keepalive() {
+        // After update_keepalive(0.05), needs_keepalive triggers at ~5s not 180s
+        let mut rng = rand_core::OsRng;
+        let payload = [0xBBu8; 64];
+        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+        link.update_keepalive(0.05);
+        link.activate(100);
+
+        // keepalive_interval=10, half=5
+        // At 104 (4s since last_outbound=100) — not yet
+        assert!(!link.needs_keepalive(104));
+
+        // At 106 (6s since last_outbound=100, > 5) — should need keepalive
+        assert!(link.needs_keepalive(106));
     }
 
     #[test]

@@ -264,7 +264,7 @@ fn bidirectional_link_data() {
 
 #[test]
 fn keepalive_request_response() {
-    let (init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
+    let (mut init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
     let mut rng = rand::thread_rng();
 
     // Activate responder
@@ -691,5 +691,45 @@ fn channel_teardown_on_max_retries() {
         init_t.link_count(),
         0,
         "link should be removed after max retries"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic keepalive integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn link_handshake_sets_dynamic_keepalive() {
+    // After full handshake through Transport, verify link's keepalive_interval
+    // was updated from the default 360.
+    let (init_t, _init_id, mut resp_t, resp_id, link_id) = full_handshake();
+    let mut rng = rand::thread_rng();
+
+    // Initiator link should have updated keepalive (RTT = 101 - 100 = 1s)
+    let init_link = init_t.get_link(&link_id).unwrap();
+    // RTT=1s → keepalive = 1.0 * (360/1.75) ≈ 205.7 → 205
+    assert_ne!(
+        init_link.keepalive_interval, 360,
+        "initiator keepalive should be updated from default 360"
+    );
+    assert!(init_link.rtt > 0.0, "initiator RTT should be set");
+
+    // Activate responder via LRRTT
+    let lrrtt = init_t
+        .build_lrrtt_packet(&link_id, b"rtt", &mut rng)
+        .unwrap();
+    let mut lrrtt_buf = lrrtt;
+    let _ = resp_t.ingest(&mut lrrtt_buf, 102, &mut rng, &resp_id);
+
+    // Responder link should also have updated keepalive (RTT = 102 - 100 = 2s)
+    let resp_link = resp_t.get_link(&link_id).unwrap();
+    assert!(
+        resp_link.rtt > 0.0,
+        "responder RTT should be set after LRRTT"
+    );
+    assert_eq!(
+        resp_link.state,
+        rete_transport::LinkState::Active,
+        "responder link should be active"
     );
 }

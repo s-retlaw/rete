@@ -521,14 +521,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     }
 
     /// Build a keepalive request/response packet for a link.
+    ///
+    /// Allows sending on both Active and Stale links — a keepalive response
+    /// to a Stale link can revive it when the peer receives it and responds.
     pub fn build_keepalive_packet<R: RngCore + CryptoRng>(
-        &self,
+        &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         request: bool,
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
         let link = self.links.get(link_id)?;
-        if !link.is_active() {
+        if !link.is_active() && link.state != crate::link::LinkState::Stale {
             return None;
         }
         let payload: &[u8] = if request { &[0xFF] } else { &[0xFE] };
@@ -966,6 +969,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             return IngestResult::Invalid;
         }
 
+        // Compute RTT: time since LINKREQUEST was sent (last_outbound was set at creation).
+        // With u64-second timestamps, loopback RTT rounds to 0. Use a floor of 0.001s
+        // so update_keepalive still fires (producing keepalive=5s for sub-second RTT).
+        let raw_rtt = now.saturating_sub(link.last_outbound) as f32;
+        let rtt = if raw_rtt <= 0.0 { 0.001 } else { raw_rtt };
+        link.update_keepalive(rtt);
+
         // Initiator activates after proof validation (will send LRRTT next)
         link.activate(now);
 
@@ -1075,7 +1085,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         match context {
             CONTEXT_LRRTT => {
-                // RTT measurement — activates responder link (no data needed)
+                // RTT measurement — activates responder link.
+                // Compute RTT: time since link was created (proof sent shortly after).
+                // Floor at 0.001s so sub-second RTT (from u64 truncation) still triggers
+                // dynamic keepalive tuning.
+                let raw_rtt = now.saturating_sub(link.last_outbound) as f32;
+                let rtt = if raw_rtt <= 0.0 { 0.001 } else { raw_rtt };
+                link.update_keepalive(rtt);
                 link.activate(now);
                 IngestResult::LinkEstablished { link_id: *link_id }
             }
@@ -2451,5 +2467,146 @@ mod tests {
 
         // link_table entry should still exist
         assert_eq!(transport.link_table.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Link lifecycle tests (keepalive, stale expiry)
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a transport with one active link via the handshake flow.
+    /// Returns (transport, link_id, responder_identity).
+    fn make_transport_with_active_link(
+        now: u64,
+    ) -> (TestTransport, [u8; TRUNCATED_HASH_LEN], Identity) {
+        let mut transport = TestTransport::new();
+        let mut rng = rand_core::OsRng;
+
+        let initiator_identity = Identity::from_seed(b"transport-test-initiator").unwrap();
+        let responder_identity = Identity::from_seed(b"transport-test-responder").unwrap();
+
+        // Compute the destination hash for the responder
+        let id_hash = responder_identity.hash();
+        let dest_hash = rete_core::destination_hash("test.link.target", Some(&id_hash));
+
+        // Register the responder's identity so validate_proof can look it up
+        transport.register_identity(dest_hash, responder_identity.public_key(), now);
+
+        // Initiate a link (creates a Pending/Handshake link)
+        let (lr_raw, link_id) = transport
+            .initiate_link(dest_hash, &initiator_identity, &mut rng, now)
+            .expect("initiate_link should succeed");
+
+        // Parse the LINKREQUEST to extract the initiator's payload
+        let lr_pkt = rete_core::Packet::parse(&lr_raw).unwrap();
+        // Determine raw payload offset: for HEADER_2 packets, strip the
+        // transport_id prefix that PacketBuilder may have added.
+        let request_payload = lr_pkt.payload;
+
+        // Responder creates a link from the request
+        let responder_link = Link::from_request(link_id, request_payload, &mut rng, now).unwrap();
+
+        // Responder builds LRPROOF
+        let proof_payload = responder_link.build_proof(&responder_identity).unwrap();
+
+        // Build an LRPROOF packet and feed it through ingest to complete the handshake
+        let mut proof_buf = [0u8; rete_core::MTU];
+        let proof_len = PacketBuilder::new(&mut proof_buf)
+            .packet_type(PacketType::Proof)
+            .dest_type(DestType::Link)
+            .destination_hash(&link_id)
+            .context(CONTEXT_LRPROOF)
+            .payload(&proof_payload)
+            .build()
+            .unwrap();
+
+        let result = transport.ingest_on(
+            &mut proof_buf[..proof_len],
+            now,
+            0,
+            &mut rng,
+            &initiator_identity,
+        );
+        assert!(
+            matches!(result, IngestResult::LinkEstablished { .. }),
+            "handshake should complete, got {:?}",
+            core::mem::discriminant(&result)
+        );
+
+        // Verify link is active
+        let link = transport.get_link(&link_id).unwrap();
+        assert!(link.is_active());
+
+        (transport, link_id, responder_identity)
+    }
+
+    #[test]
+    fn test_tick_expires_stale_link() {
+        let now = 1000u64;
+        let (mut transport, link_id, _) = make_transport_with_active_link(now);
+        assert_eq!(transport.link_count(), 1);
+
+        let stale_time = transport.get_link(&link_id).unwrap().stale_time;
+
+        // tick before stale_time — link should remain
+        let result = transport.tick(now + stale_time);
+        assert_eq!(result.closed_links, 0);
+        assert_eq!(transport.link_count(), 1);
+
+        // tick after stale_time — link should be closed and removed
+        let result = transport.tick(now + stale_time + 1);
+        assert_eq!(result.closed_links, 1);
+        assert_eq!(transport.link_count(), 0);
+    }
+
+    #[test]
+    fn test_keepalive_updates_last_outbound() {
+        let now = 1000u64;
+        let (mut transport, link_id, _) = make_transport_with_active_link(now);
+        let mut rng = rand_core::OsRng;
+
+        let keepalive_interval = transport.get_link(&link_id).unwrap().keepalive_interval;
+
+        // At now + keepalive/2 + 1, the link should need a keepalive
+        let ka_time = now + keepalive_interval / 2 + 1;
+        let packets = transport.build_pending_keepalives(ka_time, &mut rng);
+        assert!(
+            !packets.is_empty(),
+            "should produce at least one keepalive packet"
+        );
+
+        // Verify last_outbound was updated
+        let link = transport.get_link(&link_id).unwrap();
+        assert_eq!(
+            link.last_outbound, ka_time,
+            "last_outbound should be updated to keepalive time"
+        );
+    }
+
+    #[test]
+    fn test_build_keepalive_request_vs_response() {
+        let now = 1000u64;
+        let (mut transport, link_id, _) = make_transport_with_active_link(now);
+        let mut rng = rand_core::OsRng;
+
+        // Build a keepalive request
+        let request_raw = transport
+            .build_keepalive_packet(&link_id, true, &mut rng)
+            .expect("should build keepalive request");
+
+        // Build a keepalive response
+        let response_raw = transport
+            .build_keepalive_packet(&link_id, false, &mut rng)
+            .expect("should build keepalive response");
+
+        // Parse both and verify they are CONTEXT_KEEPALIVE link packets
+        let req_pkt = rete_core::Packet::parse(&request_raw).expect("should parse request");
+        assert_eq!(req_pkt.dest_type, DestType::Link);
+        assert_eq!(req_pkt.context, CONTEXT_KEEPALIVE);
+        assert_eq!(req_pkt.destination_hash, &link_id);
+
+        let resp_pkt = rete_core::Packet::parse(&response_raw).expect("should parse response");
+        assert_eq!(resp_pkt.dest_type, DestType::Link);
+        assert_eq!(resp_pkt.context, CONTEXT_KEEPALIVE);
+        assert_eq!(resp_pkt.destination_hash, &link_id);
     }
 }
