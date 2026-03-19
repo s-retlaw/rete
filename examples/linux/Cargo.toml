@@ -20,4 +20,4 @@ rete-lxmf         = { workspace = true }
 tokio             = { workspace = true }
 rand              = "0.8"
 hex               = "0.4"
-bzip2             = "0.5"
+libbz2-rs-sys     = { version = "0.2.2", default-features = false, features = ["rust-allocator"] }

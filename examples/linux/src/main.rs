@@ -34,6 +34,38 @@ const ASPECTS: &[&str] = &["example", "v1"];
 const PROPAGATION_TTL_SECS: u64 = 2_592_000;
 
 // ---------------------------------------------------------------------------
+// bz2 decompression for resource data
+// ---------------------------------------------------------------------------
+
+fn bz2_decompress(data: &[u8]) -> Option<Vec<u8>> {
+    use core::ffi::{c_char, c_uint};
+    use libbz2_rs_sys::BZ2_bzBuffToBuffDecompress;
+
+    let out_size = (data.len() * 10).max(4096);
+    let mut out = vec![0u8; out_size];
+    let mut dest_len = out_size as c_uint;
+
+    let ret = unsafe {
+        BZ2_bzBuffToBuffDecompress(
+            out.as_mut_ptr() as *mut c_char,
+            &mut dest_len,
+            data.as_ptr() as *mut c_char,
+            data.len() as c_uint,
+            0, // small=0 (fast mode)
+            0, // verbosity=0
+        )
+    };
+
+    if ret == 0 {
+        // BZ_OK
+        out.truncate(dest_len as usize);
+        Some(out)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Identity persistence
 // ---------------------------------------------------------------------------
 
@@ -333,6 +365,7 @@ async fn main() {
 
     // Create node
     let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
+    node.core.decompress_fn = Some(bz2_decompress);
     if transport_mode {
         node.core.enable_transport();
         eprintln!("[rete] transport mode enabled");
@@ -803,30 +836,6 @@ fn on_event(
     core: &mut rete_stack::HostedNodeCore,
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
 ) -> Vec<OutboundPacket> {
-    // For ResourceComplete, try bz2 decompression before passing to LXMF router.
-    // Python RNS compresses resource data with bz2, so we need to decompress
-    // before the LXMF router can parse it.
-    let event = match event {
-        NodeEvent::ResourceComplete {
-            link_id,
-            resource_hash,
-            ref data,
-        } if data.starts_with(b"BZh") => {
-            use std::io::Read;
-            let mut decompressor = bzip2::read::BzDecoder::new(&data[..]);
-            let mut decompressed = Vec::new();
-            match decompressor.read_to_end(&mut decompressed) {
-                Ok(_) => NodeEvent::ResourceComplete {
-                    link_id,
-                    resource_hash,
-                    data: decompressed,
-                },
-                Err(_) => event,
-            }
-        }
-        other => other,
-    };
-
     // Handle propagation pruning on tick events
     if let NodeEvent::Tick { .. } = &event {
         let now = rete_tokio::current_time_secs();
@@ -1042,12 +1051,22 @@ fn on_node_event(event: NodeEvent) {
                     })
                     .unwrap_or_default(),
             );
-            println!(
-                "ANNOUNCE:{}:{}:{}",
-                hex::encode(dest_hash),
-                hex::encode(identity_hash),
-                hops,
-            );
+            if let Some(ref ad) = app_data {
+                println!(
+                    "ANNOUNCE:{}:{}:{}:{}",
+                    hex::encode(dest_hash),
+                    hex::encode(identity_hash),
+                    hops,
+                    hex::encode(ad),
+                );
+            } else {
+                println!(
+                    "ANNOUNCE:{}:{}:{}",
+                    hex::encode(dest_hash),
+                    hex::encode(identity_hash),
+                    hops,
+                );
+            }
         }
         NodeEvent::DataReceived { dest_hash, payload } => {
             eprintln!(
@@ -1197,8 +1216,6 @@ fn on_node_event(event: NodeEvent) {
             resource_hash,
             ref data,
         } => {
-            // bz2 decompression is already handled in on_event() before
-            // this point — the data here is already decompressed.
             let display = match std::str::from_utf8(data) {
                 Ok(text) => text.to_string(),
                 Err(_) => hex::encode(data),

@@ -96,6 +96,10 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     echo_data: bool,
     /// Dest hash of the most recently announced peer (echo target).
     last_peer: Option<[u8; TRUNCATED_HASH_LEN]>,
+    /// Optional decompressor for bz2-compressed resource data.
+    /// Called when a received resource has the compressed flag set.
+    /// Desktop: provide bz2 decompressor. MCUs without enough RAM: leave as None.
+    pub decompress_fn: Option<fn(&[u8]) -> Option<Vec<u8>>>,
 }
 
 /// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
@@ -144,6 +148,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             auto_reply: None,
             echo_data: false,
             last_peer: None,
+            decompress_fn: None,
         }
     }
 
@@ -824,49 +829,63 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 let mut packets = Vec::new();
                 // If all parts received, assemble and send proof
                 if current == total && total > 0 {
-                    // Step 1: assemble data and build proof (borrows transport mutably)
-                    let assembly_result = {
+                    // Step 1: Assemble encrypted parts and get compressed flag
+                    let (assembly_result, is_compressed) = {
                         if let Some(res) = self.transport.get_resource_mut(&link_id, &resource_hash)
                         {
+                            let compressed = res.flags.compressed;
                             match res.assemble() {
-                                Ok(data) => {
-                                    let proof = res.build_proof();
-                                    Some(Ok((data, proof)))
-                                }
-                                Err(_) => Some(Err(())),
+                                Ok(data) => (Some(Ok(data)), compressed),
+                                Err(_) => (Some(Err(())), compressed),
                             }
                         } else {
-                            None
+                            (None, false)
                         }
                     };
-                    // Step 2: Decrypt assembled data via link Token, strip 4-byte prepend.
-                    // Python flow: link.decrypt() -> bz2.decompress() -> strip 4 prepend bytes
-                    // We skip decompression for now (app layer can handle it).
-                    if let Some(Ok((encrypted_data, proof))) = assembly_result {
-                        // Decrypt via link Token
-                        let data = if let Some(link) = self.transport.get_link(&link_id) {
+
+                    if let Some(Ok(encrypted_data)) = assembly_result {
+                        // Step 2: Decrypt via link Token, strip 4-byte random prepend
+                        let decrypted = if let Some(link) = self.transport.get_link(&link_id) {
                             let mut dec_buf = vec![0u8; encrypted_data.len()];
                             if let Ok(dec_len) = link.decrypt(&encrypted_data, &mut dec_buf) {
-                                // Strip 4-byte random prepend
                                 if dec_len >= 4 {
                                     dec_buf[4..dec_len].to_vec()
                                 } else {
                                     dec_buf[..dec_len].to_vec()
                                 }
                             } else {
-                                // Decryption failed — return encrypted data as-is
-                                // (might be from our own Rust sender without encryption)
                                 encrypted_data
                             }
                         } else {
                             encrypted_data
                         };
 
-                        // Step 3: Build and send proof packet.
-                        // Resource proof is Proof packet type, NOT link-encrypted.
-                        // Matches Python: packet_type=PROOF, context=RESOURCE_PRF,
-                        // and "Resource proofs are not encrypted" in Packet.pack().
-                        {
+                        // Step 3: Decompress if compressed flag is set
+                        let plaintext = if is_compressed {
+                            if let Some(decompress) = self.decompress_fn {
+                                decompress(&decrypted).unwrap_or(decrypted)
+                            } else {
+                                decrypted
+                            }
+                        } else {
+                            decrypted
+                        };
+
+                        // Step 4: Set resource data to plaintext, then build proof
+                        // Proof = SHA-256(plaintext || resource_hash) — must match Python
+                        let proof = {
+                            if let Some(res) =
+                                self.transport.get_resource_mut(&link_id, &resource_hash)
+                            {
+                                res.data = plaintext.clone();
+                                res.build_proof()
+                            } else {
+                                Vec::new()
+                            }
+                        };
+
+                        // Step 5: Build and send proof packet
+                        if !proof.is_empty() {
                             let mut pkt_buf = [0u8; MTU];
                             if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
                                 .packet_type(PacketType::Proof)
@@ -880,18 +899,18 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                                     .push(OutboundPacket::broadcast(pkt_buf[..pkt_len].to_vec()));
                             }
                         }
+
                         // Drain any resource outbound packets
                         for pkt in self.transport.drain_resource_outbound() {
                             packets.push(OutboundPacket::broadcast(pkt));
                         }
-                        // Clean up completed receiver resource so it doesn't
-                        // interfere with subsequent resource operations on this link
+                        // Clean up completed receiver resource
                         self.transport.cleanup_resources();
                         return IngestOutcome {
                             event: Some(NodeEvent::ResourceComplete {
                                 link_id,
                                 resource_hash,
-                                data,
+                                data: plaintext,
                             }),
                             packets,
                         };

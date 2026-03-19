@@ -276,7 +276,7 @@ print("PY_DONE", flush=True)
         time.sleep(2)
 
         # Collect output
-        rust_stderr = t.collect_rust_stderr()
+        rust_stderr = t.collect_rust_stderr(last_chars=1000)
         t.dump_output("Python helper output", py)
         t.dump_output("Rust node stdout", rust)
         t.dump_output("Rust node stderr (last 1000)", rust_stderr.strip().split("\n"))
