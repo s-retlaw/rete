@@ -348,20 +348,22 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     /// Store a learned path.  If the table is full, evicts the
     /// least-recently-used entry first.  Always succeeds.
     pub fn insert_path(&mut self, dest: [u8; TRUNCATED_HASH_LEN], path: Path) -> bool {
-        if self.paths.insert(dest, path.clone()).is_ok() {
-            return true;
-        }
-        // Table full — evict LRU entry
-        if let Some(lru_key) = self
-            .paths
-            .iter()
-            .min_by_key(|(_, p)| p.last_accessed)
-            .map(|(k, _)| *k)
-        {
-            self.paths.remove(&lru_key);
-            self.paths.insert(dest, path).is_ok()
-        } else {
-            false
+        match self.paths.insert(dest, path) {
+            Ok(_) => true,
+            Err((dest, path)) => {
+                // Table full — evict LRU entry
+                if let Some(lru_key) = self
+                    .paths
+                    .iter()
+                    .min_by_key(|(_, p)| p.last_accessed)
+                    .map(|(k, _)| *k)
+                {
+                    self.paths.remove(&lru_key);
+                    self.paths.insert(dest, path).is_ok()
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -412,21 +414,27 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     }
 
     /// Store a known identity.  If the table is full, evicts the entry
-    /// whose matching path has the oldest `last_accessed` (or the first
-    /// entry if no paths exist).
+    /// whose matching path has the oldest `last_accessed` (or `0` for
+    /// identities with no corresponding path — evicted first).
     fn insert_identity(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN], pub_key: [u8; 64]) {
-        if self.known_identities.insert(dest_hash, pub_key).is_ok() {
-            return;
-        }
-        // Table full — evict the identity whose path is least-recently-used
-        if let Some(lru_key) = self
-            .known_identities
-            .keys()
-            .min_by_key(|k| self.paths.get(*k).map(|p| p.last_accessed).unwrap_or(0))
-            .copied()
-        {
-            self.known_identities.remove(&lru_key);
-            let _ = self.known_identities.insert(dest_hash, pub_key);
+        match self.known_identities.insert(dest_hash, pub_key) {
+            Ok(_) => {}
+            Err((dest_hash, pub_key)) => {
+                if let Some(lru_key) = self
+                    .known_identities
+                    .keys()
+                    .min_by_key(|k| {
+                        self.paths
+                            .get(*k)
+                            .map(|p| p.last_accessed)
+                            .unwrap_or(0)
+                    })
+                    .copied()
+                {
+                    self.known_identities.remove(&lru_key);
+                    let _ = self.known_identities.insert(dest_hash, pub_key);
+                }
+            }
         }
     }
 
@@ -572,6 +580,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // If we have a transport path (via relay), build HEADER_2 so the relay
         // creates a link_table entry and can route the LRPROOF back.
         let via = self.paths.get(&dest_hash).and_then(|p| p.via);
+        self.touch_path(&dest_hash, now);
         let mut pkt_buf = [0u8; rete_core::MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)

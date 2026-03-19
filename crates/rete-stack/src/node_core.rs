@@ -313,6 +313,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         let mut ct_buf = [0u8; MTU];
         let ct_len = recipient.encrypt(plaintext, rng, &mut ct_buf).ok()?;
         let via = self.transport.get_path(dest_hash).and_then(|p| p.via);
+        self.transport.touch_path(dest_hash, now);
         let mut pkt_buf = [0u8; MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
@@ -572,23 +573,21 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         data: &[u8],
         rng: &mut R,
     ) -> Option<OutboundPacket> {
-        let (send_data, compressed) = if let Some(compress) = self.compress_fn {
-            if let Some(c) = compress(data) {
-                if c.len() < data.len() {
-                    (c, true)
-                } else {
-                    (data.to_vec(), false)
-                }
-            } else {
-                (data.to_vec(), false)
-            }
-        } else {
-            (data.to_vec(), false)
+        use alloc::borrow::Cow;
+
+        let compressed = self
+            .compress_fn
+            .and_then(|f| f(data))
+            .filter(|c| c.len() < data.len());
+
+        let (send_data, is_compressed): (Cow<'_, [u8]>, bool) = match compressed {
+            Some(c) => (Cow::Owned(c), true),
+            None => (Cow::Borrowed(data), false),
         };
 
-        let pkt = self
-            .transport
-            .start_resource(link_id, &send_data, data, compressed, rng)?;
+        let pkt =
+            self.transport
+                .start_resource(link_id, &send_data, data, is_compressed, rng)?;
         Some(OutboundPacket::broadcast(pkt))
     }
 
