@@ -99,7 +99,7 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     /// Optional decompressor for bz2-compressed resource data.
     /// Called when a received resource has the compressed flag set.
     /// Desktop: provide bz2 decompressor. MCUs without enough RAM: leave as None.
-    pub decompress_fn: Option<fn(&[u8]) -> Option<Vec<u8>>>,
+    decompress_fn: Option<fn(&[u8]) -> Option<Vec<u8>>>,
 }
 
 /// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
@@ -175,6 +175,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
     pub fn set_echo_data(&mut self, echo: bool) {
         self.echo_data = echo;
+    }
+
+    /// Set the decompression function for bz2-compressed resource data.
+    pub fn set_decompress_fn(&mut self, f: Option<fn(&[u8]) -> Option<Vec<u8>>>) {
+        self.decompress_fn = f;
     }
 
     /// Returns a reference to the primary destination.
@@ -848,11 +853,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         let decrypted = if let Some(link) = self.transport.get_link(&link_id) {
                             let mut dec_buf = vec![0u8; encrypted_data.len()];
                             if let Ok(dec_len) = link.decrypt(&encrypted_data, &mut dec_buf) {
-                                if dec_len >= 4 {
-                                    dec_buf[4..dec_len].to_vec()
-                                } else {
-                                    dec_buf[..dec_len].to_vec()
+                                dec_buf.truncate(dec_len);
+                                if dec_buf.len() >= 4 {
+                                    dec_buf.drain(..4);
                                 }
+                                dec_buf
                             } else {
                                 encrypted_data
                             }
@@ -871,18 +876,18 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                             decrypted
                         };
 
-                        // Step 4: Set resource data to plaintext, then build proof
+                        // Step 4: Move plaintext into resource, build proof, take it back
                         // Proof = SHA-256(plaintext || resource_hash) — must match Python
-                        let proof = {
+                        let (proof, plaintext) =
                             if let Some(res) =
                                 self.transport.get_resource_mut(&link_id, &resource_hash)
                             {
-                                res.data = plaintext.clone();
-                                res.build_proof()
+                                res.data = plaintext;
+                                let proof = res.build_proof();
+                                (proof, core::mem::take(&mut res.data))
                             } else {
-                                Vec::new()
-                            }
-                        };
+                                (Vec::new(), plaintext)
+                            };
 
                         // Step 5: Build and send proof packet
                         if !proof.is_empty() {

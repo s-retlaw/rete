@@ -41,28 +41,34 @@ fn bz2_decompress(data: &[u8]) -> Option<Vec<u8>> {
     use core::ffi::{c_char, c_uint};
     use libbz2_rs_sys::BZ2_bzBuffToBuffDecompress;
 
-    let out_size = (data.len() * 10).max(4096);
-    let mut out = vec![0u8; out_size];
-    let mut dest_len = out_size as c_uint;
+    const BZ_OUTBUFF_FULL: i32 = -8;
 
-    let ret = unsafe {
-        BZ2_bzBuffToBuffDecompress(
-            out.as_mut_ptr() as *mut c_char,
-            &mut dest_len,
-            data.as_ptr() as *mut c_char,
-            data.len() as c_uint,
-            0, // small=0 (fast mode)
-            0, // verbosity=0
-        )
-    };
+    // Try 10x first, retry with 100x if buffer was too small
+    for multiplier in [10, 100] {
+        let out_size = (data.len() * multiplier).max(4096);
+        let mut out = vec![0u8; out_size];
+        let mut dest_len = out_size as c_uint;
 
-    if ret == 0 {
-        // BZ_OK
-        out.truncate(dest_len as usize);
-        Some(out)
-    } else {
-        None
+        let ret = unsafe {
+            BZ2_bzBuffToBuffDecompress(
+                out.as_mut_ptr() as *mut c_char,
+                &mut dest_len,
+                data.as_ptr() as *mut c_char,
+                data.len() as c_uint,
+                0, // small=0 (fast mode)
+                0, // verbosity=0
+            )
+        };
+
+        if ret == 0 {
+            out.truncate(dest_len as usize);
+            return Some(out);
+        }
+        if ret != BZ_OUTBUFF_FULL {
+            return None;
+        }
     }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +371,7 @@ async fn main() {
 
     // Create node
     let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
-    node.core.decompress_fn = Some(bz2_decompress);
+    node.core.set_decompress_fn(Some(bz2_decompress));
     if transport_mode {
         node.core.enable_transport();
         eprintln!("[rete] transport mode enabled");
