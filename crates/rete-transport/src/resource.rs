@@ -505,6 +505,15 @@ pub enum ResourceState {
     Corrupt,
 }
 
+/// Result of `Resource::handle_request()`.
+#[derive(Debug, Default)]
+pub struct HandleRequestResult {
+    /// Parts to send: `(part_index, part_data)` pairs.
+    pub parts: Vec<(usize, Vec<u8>)>,
+    /// Whether the receiver signaled HASHMAP_IS_EXHAUSTED (sender should send HMU).
+    pub needs_hmu: bool,
+}
+
 /// Resource flags bitfield.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceFlags {
@@ -771,27 +780,30 @@ impl Resource {
 
     /// Handle a RESOURCE_REQ from the receiver.
     ///
-    /// Parses the request and returns a list of `(part_index, part_data)` pairs
-    /// for segments the receiver has requested.
+    /// Parses the request and returns a `HandleRequestResult` containing the
+    /// list of `(part_index, part_data)` pairs for segments the receiver
+    /// requested, and whether the receiver signaled HASHMAP_IS_EXHAUSTED
+    /// (meaning the sender should send more hash entries via HMU).
     ///
     /// Request format:
     /// ```text
     /// status[1] + (last_map_hash[4] if status==0xFF else b"") + resource_hash[32] + requested_hashes[N*4]
     /// ```
-    pub fn handle_request(&mut self, req_payload: &[u8]) -> Vec<(usize, Vec<u8>)> {
+    pub fn handle_request(&mut self, req_payload: &[u8]) -> HandleRequestResult {
         if req_payload.is_empty() {
-            return Vec::new();
+            return HandleRequestResult::default();
         }
 
         self.state = ResourceState::Transferring;
 
         let hashmap_status = req_payload[0];
+        let needs_hmu = hashmap_status == HASHMAP_IS_EXHAUSTED;
         let mut offset = 1;
 
         // If hashmap is exhausted, the next 4 bytes are the last known map hash
-        if hashmap_status == HASHMAP_IS_EXHAUSTED {
+        if needs_hmu {
             if req_payload.len() < offset + MAPHASH_LEN {
-                return Vec::new();
+                return HandleRequestResult::default();
             }
             // Skip the last_map_hash (4 bytes) — we don't need it for part lookup
             offset += MAPHASH_LEN;
@@ -799,7 +811,7 @@ impl Resource {
 
         // Next 32 bytes: resource_hash
         if req_payload.len() < offset + 32 {
-            return Vec::new();
+            return HandleRequestResult::default();
         }
         let _req_hash = &req_payload[offset..offset + 32];
         offset += 32;
@@ -807,7 +819,7 @@ impl Resource {
         // Remaining: requested part hashes (N * 4 bytes)
         let requested_hashes_data = &req_payload[offset..];
         let num_requested = requested_hashes_data.len() / MAPHASH_LEN;
-        let mut result = Vec::new();
+        let mut parts = Vec::new();
 
         for i in 0..num_requested {
             let start = i * MAPHASH_LEN;
@@ -821,18 +833,18 @@ impl Resource {
             // Find the matching part
             for (idx, ph) in self.part_hashes.iter().enumerate() {
                 if *ph == req_hash {
-                    result.push((idx, self.parts[idx].clone()));
+                    parts.push((idx, self.parts[idx].clone()));
                     break;
                 }
             }
         }
 
         // If no more parts to request (all sent), transition to AwaitingProof
-        if num_requested == 0 || result.is_empty() {
+        if num_requested == 0 || parts.is_empty() {
             self.state = ResourceState::AwaitingProof;
         }
 
-        result
+        HandleRequestResult { parts, needs_hmu }
     }
 
     /// Handle RESOURCE_PRF from the receiver. Returns true if transfer is complete.
@@ -891,6 +903,11 @@ impl Resource {
     /// Handle cancel from the receiver.
     pub fn handle_cancel(&mut self) {
         self.state = ResourceState::Failed;
+    }
+
+    /// Update the last activity timestamp.
+    pub fn touch_activity(&mut self, now: u64) {
+        self.last_activity = now;
     }
 
     /// Build a hashmap update payload.
@@ -1255,6 +1272,11 @@ impl Resource {
     pub fn needs_hashmap_update(&self) -> bool {
         self.part_hashes.len() < self.total_segments
     }
+
+    /// Whether this sender resource still has unsent hashmap entries.
+    pub fn has_pending_hashmap_entries(&self) -> bool {
+        self.hashmap_cursor < self.total_segments
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1417,11 +1439,11 @@ mod tests {
         let req = receiver.build_request();
 
         // Step 4: Sender handles request, returns parts
-        let parts = sender.handle_request(&req);
-        assert!(!parts.is_empty());
+        let result = sender.handle_request(&req);
+        assert!(!result.parts.is_empty());
 
         // Step 5: Receiver receives parts
-        for (_idx, part) in &parts {
+        for (_idx, part) in &result.parts {
             receiver.receive_part(part);
         }
 
@@ -1509,11 +1531,11 @@ mod tests {
         assert_eq!(req[0], 0x00);
 
         // Step 4: Sender handles request
-        let parts = sender.handle_request(&req);
-        assert!(!parts.is_empty());
+        let result = sender.handle_request(&req);
+        assert!(!result.parts.is_empty());
 
         // Step 5: Receiver receives parts
-        for (_idx, part) in &parts {
+        for (_idx, part) in &result.parts {
             receiver.receive_part(part);
         }
 
@@ -1527,8 +1549,8 @@ mod tests {
         // All 5 hashes now known, so status is 0x00 (not exhausted)
         let req2 = receiver.build_request();
         assert_eq!(req2[0], 0x00);
-        let parts2 = sender.handle_request(&req2);
-        for (_idx, part) in &parts2 {
+        let result2 = sender.handle_request(&req2);
+        for (_idx, part) in &result2.parts {
             receiver.receive_part(part);
         }
 

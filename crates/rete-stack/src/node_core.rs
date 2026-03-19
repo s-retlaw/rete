@@ -984,6 +984,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 for pkt in self.transport.drain_resource_outbound() {
                     packets.push(OutboundPacket::broadcast(pkt));
                 }
+                // Bug A fix: Build follow-up RESOURCE_REQ if not all parts received
+                if current < total {
+                    if let Some(req_pkt) = self.transport.build_followup_request(
+                        &link_id, &resource_hash, rng,
+                    ) {
+                        packets.push(OutboundPacket::broadcast(req_pkt));
+                    }
+                }
                 IngestOutcome {
                     event: Some(NodeEvent::ResourceProgress {
                         link_id,
@@ -1053,7 +1061,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     pub fn handle_tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> IngestOutcome {
         let mut packets = self.flush_announces(now);
 
-        // Drain any resource outbound packets queued during ingest
+        // Resource maintenance: send HMU for sender resources with unsent hashes
+        self.transport.tick_resources(rng);
+
+        // Drain any resource outbound packets queued during ingest or tick_resources
         for pkt in self.transport.drain_resource_outbound() {
             packets.push(OutboundPacket::broadcast(pkt));
         }

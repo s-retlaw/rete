@@ -113,6 +113,160 @@ test-e2e-auto:
     cargo build -p rete-example-linux
     cd tests/interop && uv run python auto_interop.py
 
+# CONVENTION: When adding a new interop test:
+#   1. Add an individual recipe (test-e2e-<name>)
+#   2. Add it to the run_e2e calls AND summary printf in test-all
+
+# E2E link initiation (Rust initiates Link to Python)
+test-e2e-link-initiate:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python link_initiate_interop.py
+
+# E2E link initiation via relay (Rust initiates Link through relay)
+test-e2e-link-initiate-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python link_initiate_relay_interop.py
+
+# E2E link with Rust as relay node
+test-e2e-link-rust-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python link_rust_relay_interop.py
+
+# E2E link relay (Python-to-Python link through Rust relay)
+test-e2e-link-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python link_relay_interop.py
+
+# E2E link burst transfer
+test-e2e-link-burst:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python link_burst_interop.py
+
+# E2E link teardown race conditions
+test-e2e-link-teardown-race:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python link_teardown_race_interop.py
+
+# E2E concurrent links
+test-e2e-concurrent-links:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python concurrent_links_interop.py
+
+# E2E keepalive tuning
+test-e2e-keepalive:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python keepalive_interop.py
+
+# E2E LXMF opportunistic delivery
+test-e2e-lxmf-opportunistic:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python lxmf_opportunistic_interop.py
+
+# E2E LXMF direct delivery
+test-e2e-lxmf-direct:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python lxmf_direct_interop.py
+
+# E2E LXMF bidirectional delivery
+test-e2e-lxmf-bidirectional:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python lxmf_bidirectional_interop.py
+
+# E2E LXMF propagation node
+test-e2e-lxmf-propagation:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python lxmf_propagation_interop.py
+
+# E2E LXMF store-and-forward
+test-e2e-lxmf-store-forward:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python lxmf_store_forward_interop.py
+
+# E2E LXMF auto-forward
+test-e2e-lxmf-auto-forward:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python lxmf_auto_forward_interop.py
+
+# E2E LXMF message retrieval
+test-e2e-lxmf-retrieval:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python lxmf_retrieval_interop.py
+
+# E2E IFAC mismatch rejection
+test-e2e-ifac-mismatch:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python ifac_mismatch_interop.py
+
+# E2E IFAC relay
+test-e2e-ifac-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python ifac_relay_interop.py
+
+# E2E IFAC link
+test-e2e-ifac-link:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python ifac_link_interop.py
+
+# E2E IFAC large packet
+test-e2e-ifac-large-packet:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python ifac_large_packet_interop.py
+
+# E2E auto interface data exchange
+test-e2e-auto-data:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python auto_data_interop.py
+
+# E2E auto interface group isolation
+test-e2e-auto-group-isolation:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python auto_group_isolation_interop.py
+
+# E2E announce with app_data
+test-e2e-announce-appdata:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python announce_appdata_interop.py
+
+# E2E announce deduplication
+test-e2e-announce-dedup:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python announce_dedup_e2e_interop.py
+
+# E2E TCP disconnect recovery
+test-e2e-tcp-disconnect:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python tcp_disconnect_interop.py
+
+# E2E HDLC recovery
+test-e2e-hdlc-recovery:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python hdlc_recovery_interop.py
+
+# E2E dual interface
+test-e2e-dual-interface:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python dual_interface_interop.py
+
+# E2E multi-hop relay
+test-e2e-multi-hop-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python multi_hop_relay_interop.py
+
+# E2E concurrent resource transfers
+test-e2e-resource-concurrent:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python resource_concurrent_interop.py
+
+# E2E resource multi-window transfer
+test-e2e-resource-multiwindow:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python resource_multiwindow_interop.py
+
+# E2E stability (long-running)
+test-e2e-stability:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python stability_interop.py
+
 # All software tests (unit + E2E, no hardware)
 test-all:
     #!/usr/bin/env bash
@@ -178,16 +332,69 @@ test-all:
         echo ""
     }
 
+    # Core (7)
     run_e2e LIVE live_interop.py
     run_e2e LINK link_interop.py
     run_e2e CHANNEL channel_interop.py
-    run_e2e RESOURCE resource_interop.py
     run_e2e RELAY relay_interop.py
-    run_e2e TRANSPORT transport_relay_interop.py
     run_e2e PATHREQ path_request_interop.py
     run_e2e PROOF proof_routing_interop.py
-    run_e2e IFAC ifac_interop.py
     run_e2e ROBUSTNESS robustness_interop.py
+
+    # Link advanced (7)
+    run_e2e LINKINIT link_initiate_interop.py
+    run_e2e LINKRELAY link_relay_interop.py
+    run_e2e LINKRUSTRELAY link_rust_relay_interop.py
+    run_e2e LINKINITRELAY link_initiate_relay_interop.py
+    run_e2e LINKBURST link_burst_interop.py
+    run_e2e CONCURRENT concurrent_links_interop.py
+    run_e2e TEARDOWN link_teardown_race_interop.py
+
+    # IFAC (5)
+    run_e2e IFAC ifac_interop.py
+    run_e2e IFACMISMATCH ifac_mismatch_interop.py
+    run_e2e IFACRELAY ifac_relay_interop.py
+    run_e2e IFACLINK ifac_link_interop.py
+    run_e2e IFACLARGE ifac_large_packet_interop.py
+
+    # Transport/relay (3)
+    run_e2e TRANSPORT transport_relay_interop.py
+    run_e2e DUAL dual_interface_interop.py
+    run_e2e MULTIHOP multi_hop_relay_interop.py
+
+    # Auto/mDNS (3)
+    run_e2e AUTO auto_interop.py
+    run_e2e AUTODATA auto_data_interop.py
+    run_e2e AUTOGROUP auto_group_isolation_interop.py
+
+    # Announce (2)
+    run_e2e ANNAPPDATA announce_appdata_interop.py
+    run_e2e ANNDEDUP announce_dedup_e2e_interop.py
+
+    # Local IPC (1)
+    run_e2e LOCALIPC local_ipc_interop.py
+
+    # LXMF (7)
+    run_e2e LXMFOPP lxmf_opportunistic_interop.py
+    run_e2e LXMFDIR lxmf_direct_interop.py
+    run_e2e LXMFBIDI lxmf_bidirectional_interop.py
+    run_e2e LXMFPROP lxmf_propagation_interop.py
+    run_e2e LXMFSF lxmf_store_forward_interop.py
+    run_e2e LXMFAF lxmf_auto_forward_interop.py
+    run_e2e LXMFRET lxmf_retrieval_interop.py
+
+    # Robustness edge (2)
+    run_e2e TCPDISC tcp_disconnect_interop.py
+    run_e2e HDLC hdlc_recovery_interop.py
+
+    # Resource (3)
+    run_e2e RESOURCE resource_interop.py
+    run_e2e RESCONCUR resource_concurrent_interop.py
+    run_e2e RESMULTI resource_multiwindow_interop.py
+
+    # Long-running (2)
+    run_e2e KEEPALIVE keepalive_interop.py
+    run_e2e STABILITY stability_interop.py
 
     # --- Combined summary ---
     echo ""
@@ -201,20 +408,83 @@ test-all:
     printf "  %-30s %s passed, %s failed%s\n" "unit total" "$UNIT_PASS" "$UNIT_FAIL" "$IGN_TOTAL"
     echo ""
     echo "  E2E tests:"
+    echo "    Core:"
     printf "  %-30s %s passed, %s failed\n" "live-interop" "$LIVE_PASS" "$LIVE_FAIL"
     printf "  %-30s %s passed, %s failed\n" "link-interop" "$LINK_PASS" "$LINK_FAIL"
     printf "  %-30s %s passed, %s failed\n" "channel-interop" "$CHANNEL_PASS" "$CHANNEL_FAIL"
-    printf "  %-30s %s passed, %s failed\n" "resource-interop" "$RESOURCE_PASS" "$RESOURCE_FAIL"
     printf "  %-30s %s passed, %s failed\n" "relay-interop" "$RELAY_PASS" "$RELAY_FAIL"
-    printf "  %-30s %s passed, %s failed\n" "transport-relay-interop" "$TRANSPORT_PASS" "$TRANSPORT_FAIL"
     printf "  %-30s %s passed, %s failed\n" "path-request-interop" "$PATHREQ_PASS" "$PATHREQ_FAIL"
     printf "  %-30s %s passed, %s failed\n" "proof-routing-interop" "$PROOF_PASS" "$PROOF_FAIL"
-    printf "  %-30s %s passed, %s failed\n" "ifac-interop" "$IFAC_PASS" "$IFAC_FAIL"
     printf "  %-30s %s passed, %s failed\n" "robustness-interop" "$ROBUSTNESS_PASS" "$ROBUSTNESS_FAIL"
-    E2E_PASS=$((LIVE_PASS + LINK_PASS + CHANNEL_PASS + RESOURCE_PASS + RELAY_PASS + TRANSPORT_PASS + PATHREQ_PASS + PROOF_PASS + IFAC_PASS + ROBUSTNESS_PASS))
-    E2E_FAIL=$((LIVE_FAIL + LINK_FAIL + CHANNEL_FAIL + RESOURCE_FAIL + RELAY_FAIL + TRANSPORT_FAIL + PATHREQ_FAIL + PROOF_FAIL + IFAC_FAIL + ROBUSTNESS_FAIL))
+    echo "    Link advanced:"
+    printf "  %-30s %s passed, %s failed\n" "link-initiate-interop" "$LINKINIT_PASS" "$LINKINIT_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "link-relay-interop" "$LINKRELAY_PASS" "$LINKRELAY_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "link-rust-relay-interop" "$LINKRUSTRELAY_PASS" "$LINKRUSTRELAY_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "link-initiate-relay-interop" "$LINKINITRELAY_PASS" "$LINKINITRELAY_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "link-burst-interop" "$LINKBURST_PASS" "$LINKBURST_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "concurrent-links-interop" "$CONCURRENT_PASS" "$CONCURRENT_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "link-teardown-race-interop" "$TEARDOWN_PASS" "$TEARDOWN_FAIL"
+    echo "    IFAC:"
+    printf "  %-30s %s passed, %s failed\n" "ifac-interop" "$IFAC_PASS" "$IFAC_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "ifac-mismatch-interop" "$IFACMISMATCH_PASS" "$IFACMISMATCH_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "ifac-relay-interop" "$IFACRELAY_PASS" "$IFACRELAY_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "ifac-link-interop" "$IFACLINK_PASS" "$IFACLINK_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "ifac-large-packet-interop" "$IFACLARGE_PASS" "$IFACLARGE_FAIL"
+    echo "    Transport/relay:"
+    printf "  %-30s %s passed, %s failed\n" "transport-relay-interop" "$TRANSPORT_PASS" "$TRANSPORT_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "dual-interface-interop" "$DUAL_PASS" "$DUAL_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "multi-hop-relay-interop" "$MULTIHOP_PASS" "$MULTIHOP_FAIL"
+    echo "    Auto/mDNS:"
+    printf "  %-30s %s passed, %s failed\n" "auto-interop" "$AUTO_PASS" "$AUTO_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "auto-data-interop" "$AUTODATA_PASS" "$AUTODATA_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "auto-group-isolation-interop" "$AUTOGROUP_PASS" "$AUTOGROUP_FAIL"
+    echo "    Announce:"
+    printf "  %-30s %s passed, %s failed\n" "announce-appdata-interop" "$ANNAPPDATA_PASS" "$ANNAPPDATA_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "announce-dedup-interop" "$ANNDEDUP_PASS" "$ANNDEDUP_FAIL"
+    echo "    Local IPC:"
+    printf "  %-30s %s passed, %s failed\n" "local-ipc-interop" "$LOCALIPC_PASS" "$LOCALIPC_FAIL"
+    echo "    LXMF:"
+    printf "  %-30s %s passed, %s failed\n" "lxmf-opportunistic-interop" "$LXMFOPP_PASS" "$LXMFOPP_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "lxmf-direct-interop" "$LXMFDIR_PASS" "$LXMFDIR_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "lxmf-bidirectional-interop" "$LXMFBIDI_PASS" "$LXMFBIDI_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "lxmf-propagation-interop" "$LXMFPROP_PASS" "$LXMFPROP_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "lxmf-store-forward-interop" "$LXMFSF_PASS" "$LXMFSF_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "lxmf-auto-forward-interop" "$LXMFAF_PASS" "$LXMFAF_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "lxmf-retrieval-interop" "$LXMFRET_PASS" "$LXMFRET_FAIL"
+    echo "    Robustness edge:"
+    printf "  %-30s %s passed, %s failed\n" "tcp-disconnect-interop" "$TCPDISC_PASS" "$TCPDISC_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "hdlc-recovery-interop" "$HDLC_PASS" "$HDLC_FAIL"
+    echo "    Resource:"
+    printf "  %-30s %s passed, %s failed\n" "resource-interop" "$RESOURCE_PASS" "$RESOURCE_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "resource-concurrent-interop" "$RESCONCUR_PASS" "$RESCONCUR_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "resource-multiwindow-interop" "$RESMULTI_PASS" "$RESMULTI_FAIL"
+    echo "    Long-running:"
+    printf "  %-30s %s passed, %s failed\n" "keepalive-interop" "$KEEPALIVE_PASS" "$KEEPALIVE_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "stability-interop" "$STABILITY_PASS" "$STABILITY_FAIL"
+    E2E_PASS=$((LIVE_PASS + LINK_PASS + CHANNEL_PASS + RELAY_PASS + PATHREQ_PASS + PROOF_PASS + ROBUSTNESS_PASS \
+        + LINKINIT_PASS + LINKRELAY_PASS + LINKRUSTRELAY_PASS + LINKINITRELAY_PASS + LINKBURST_PASS + CONCURRENT_PASS + TEARDOWN_PASS \
+        + IFAC_PASS + IFACMISMATCH_PASS + IFACRELAY_PASS + IFACLINK_PASS + IFACLARGE_PASS \
+        + TRANSPORT_PASS + DUAL_PASS + MULTIHOP_PASS \
+        + AUTO_PASS + AUTODATA_PASS + AUTOGROUP_PASS \
+        + ANNAPPDATA_PASS + ANNDEDUP_PASS \
+        + LOCALIPC_PASS \
+        + LXMFOPP_PASS + LXMFDIR_PASS + LXMFBIDI_PASS + LXMFPROP_PASS + LXMFSF_PASS + LXMFAF_PASS + LXMFRET_PASS \
+        + TCPDISC_PASS + HDLC_PASS \
+        + RESOURCE_PASS + RESCONCUR_PASS + RESMULTI_PASS \
+        + KEEPALIVE_PASS + STABILITY_PASS))
+    E2E_FAIL=$((LIVE_FAIL + LINK_FAIL + CHANNEL_FAIL + RELAY_FAIL + PATHREQ_FAIL + PROOF_FAIL + ROBUSTNESS_FAIL \
+        + LINKINIT_FAIL + LINKRELAY_FAIL + LINKRUSTRELAY_FAIL + LINKINITRELAY_FAIL + LINKBURST_FAIL + CONCURRENT_FAIL + TEARDOWN_FAIL \
+        + IFAC_FAIL + IFACMISMATCH_FAIL + IFACRELAY_FAIL + IFACLINK_FAIL + IFACLARGE_FAIL \
+        + TRANSPORT_FAIL + DUAL_FAIL + MULTIHOP_FAIL \
+        + AUTO_FAIL + AUTODATA_FAIL + AUTOGROUP_FAIL \
+        + ANNAPPDATA_FAIL + ANNDEDUP_FAIL \
+        + LOCALIPC_FAIL \
+        + LXMFOPP_FAIL + LXMFDIR_FAIL + LXMFBIDI_FAIL + LXMFPROP_FAIL + LXMFSF_FAIL + LXMFAF_FAIL + LXMFRET_FAIL \
+        + TCPDISC_FAIL + HDLC_FAIL \
+        + RESOURCE_FAIL + RESCONCUR_FAIL + RESMULTI_FAIL \
+        + KEEPALIVE_FAIL + STABILITY_FAIL))
     echo ""
-    printf "  %-30s %s passed, %s failed\n" "e2e total" "$E2E_PASS" "$E2E_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "e2e total (42 suites)" "$E2E_PASS" "$E2E_FAIL"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))

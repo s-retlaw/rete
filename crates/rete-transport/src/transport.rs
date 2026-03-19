@@ -1091,9 +1091,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 | CONTEXT_RESOURCE_ICL
                 | CONTEXT_RESOURCE_RCL
         ) {
-            // CONTEXT_RESOURCE (0x01) data parts are NOT link-encrypted in Python RNS.
-            // The resource handles its own encryption. All other resource contexts
-            // (ADV, REQ, HMU, PRF, ICL, RCL) ARE link-encrypted.
+            // CONTEXT_RESOURCE data parts are NOT link-encrypted — they travel as raw payload.
+            // All other resource contexts (ADV, REQ, HMU, PRF, ICL, RCL) ARE link-encrypted.
             if context == CONTEXT_RESOURCE {
                 // Pass raw ciphertext payload directly (no link decryption).
                 // Still need to verify link is active and touch inbound.
@@ -1256,8 +1255,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         link_id: &[u8; TRUNCATED_HASH_LEN],
         context: u8,
         decrypted: &[u8],
-        _now: u64,
-        _rng: &mut R,
+        now: u64,
+        rng: &mut R,
     ) -> IngestResult<'a> {
         match context {
             CONTEXT_RESOURCE => {
@@ -1267,6 +1266,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     .iter_mut()
                     .find(|r| !r.is_sender && r.link_id == *link_id)
                 {
+                    res.touch_activity(now);
                     let all_received = res.receive_part(decrypted);
                     let mut rh = [0u8; TRUNCATED_HASH_LEN];
                     rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
@@ -1309,23 +1309,28 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             }
             CONTEXT_RESOURCE_REQ => {
                 // Resource request from receiver (we are sender).
-                // Extract the resource hash from the request to match the correct resource
-                // (multiple sender resources may exist on the same link).
                 let req_hash = Resource::extract_request_hash(decrypted);
-                let parts_to_send = {
+                let (parts_to_send, hmu_payload) = {
                     if let Some(res) = self.resources.iter_mut().find(|r| {
                         r.is_sender
                             && r.link_id == *link_id
                             && req_hash.is_none_or(|h| h == r.resource_hash)
                     }) {
-                        res.handle_request(decrypted)
+                        res.touch_activity(now);
+                        let result = res.handle_request(decrypted);
+                        // If receiver signaled HASHMAP_IS_EXHAUSTED, build HMU
+                        // in the same borrow scope (avoids double lookup).
+                        let hmu = if result.needs_hmu {
+                            res.build_hashmap_update()
+                        } else {
+                            None
+                        };
+                        (result.parts, hmu)
                     } else {
                         return IngestResult::Invalid;
                     }
                 };
-                // resources borrow released. Send parts as CONTEXT_RESOURCE.
-                // IMPORTANT: CONTEXT_RESOURCE parts are NOT link-encrypted in Python RNS.
-                // The resource data segments go on the wire as raw payload.
+                // Send data parts (NOT link-encrypted in Python RNS).
                 for (_idx, part_data) in parts_to_send {
                     let mut pkt_buf = [0u8; rete_core::MTU];
                     if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
@@ -1337,6 +1342,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         .build()
                     {
                         self.resource_outbound.push(pkt_buf[..pkt_len].to_vec());
+                    }
+                }
+                // Send link-encrypted HMU so receiver gets hashes for next window.
+                if let Some(payload) = hmu_payload {
+                    if let Some(link) = self.links.get(link_id) {
+                        if let Some(pkt) = Self::build_hmu_packet(link, link_id, &payload, rng) {
+                            self.resource_outbound.push(pkt);
+                        }
                     }
                 }
                 IngestResult::Duplicate // Parts queued in resource_outbound
@@ -1937,10 +1950,45 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             })?;
             res.build_request()
         };
+        self.build_resource_req_packet(link_id, &req, rng)
+    }
 
+    /// Build a follow-up RESOURCE_REQ for a receiver resource that still has
+    /// unreceived parts.
+    ///
+    /// Used by NodeCore after receiving a window of parts (ResourceProgress
+    /// with current < total) to request the next batch.
+    pub fn build_followup_request<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        resource_hash: &[u8; TRUNCATED_HASH_LEN],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let req = {
+            let res = self.resources.iter().find(|r| {
+                !r.is_sender
+                    && r.link_id == *link_id
+                    && r.resource_hash[..TRUNCATED_HASH_LEN] == *resource_hash
+            })?;
+            // All parts already received — no follow-up needed
+            if res.received.iter().all(|&r| r) {
+                return None;
+            }
+            res.build_request()
+        };
+        self.build_resource_req_packet(link_id, &req, rng)
+    }
+
+    /// Encrypt a RESOURCE_REQ payload via a link and build the packet.
+    fn build_resource_req_packet<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        req_payload: &[u8],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
         let link = self.links.get(link_id)?;
         let mut ct_buf = [0u8; rete_core::MTU];
-        let ct_len = link.encrypt(&req, rng, &mut ct_buf).ok()?;
+        let ct_len = link.encrypt(req_payload, rng, &mut ct_buf).ok()?;
 
         let mut pkt_buf = [0u8; rete_core::MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
@@ -1953,6 +2001,58 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             .ok()?;
 
         Some(pkt_buf[..pkt_len].to_vec())
+    }
+
+    /// Build a link-encrypted CONTEXT_RESOURCE_HMU packet.
+    fn build_hmu_packet<R: RngCore + CryptoRng>(
+        link: &crate::link::Link,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        payload: &[u8],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let mut ct_buf = [0u8; rete_core::MTU];
+        let ct_len = link.encrypt(payload, rng, &mut ct_buf).ok()?;
+        let mut pkt_buf = [0u8; rete_core::MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Link)
+            .destination_hash(link_id)
+            .context(CONTEXT_RESOURCE_HMU)
+            .payload(&ct_buf[..ct_len])
+            .build()
+            .ok()?;
+        Some(pkt_buf[..pkt_len].to_vec())
+    }
+
+    /// Periodic resource maintenance: send HMU for sender resources that
+    /// still have unsent hashmap entries.
+    ///
+    /// Only acts on resources in the `Transferring` state to avoid sending
+    /// HMUs for resources that are queued, awaiting proof, or complete.
+    pub fn tick_resources<R: RngCore + CryptoRng>(&mut self, rng: &mut R) {
+        if self.resources.is_empty() {
+            return;
+        }
+        // Collect pending HMU payloads to avoid borrow conflicts with self.links.
+        let mut pending = alloc::vec::Vec::new();
+        for res in self.resources.iter_mut() {
+            if res.is_sender
+                && res.state == crate::resource::ResourceState::Transferring
+                && res.has_pending_hashmap_entries()
+            {
+                if let Some(hmu_payload) = res.build_hashmap_update() {
+                    pending.push((res.link_id, hmu_payload));
+                }
+            }
+        }
+        // Build link-encrypted HMU packets.
+        for (link_id, payload) in pending {
+            if let Some(link) = self.links.get(&link_id) {
+                if let Some(pkt) = Self::build_hmu_packet(link, &link_id, &payload, rng) {
+                    self.resource_outbound.push(pkt);
+                }
+            }
+        }
     }
 
     /// Drain pending resource outbound packets.
