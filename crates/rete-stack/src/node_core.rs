@@ -482,15 +482,21 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         data: &[u8],
         now: u64,
         rng: &mut R,
-    ) -> Option<(OutboundPacket, [u8; 10])> {
+    ) -> Option<(OutboundPacket, [u8; TRUNCATED_HASH_LEN])> {
         let packed = rete_transport::build_request(path, data, now as f64);
-        let req_id = rete_transport::request_id(&packed);
         let pkt = self.transport.build_link_data_packet(
             link_id,
             &packed,
             rete_core::CONTEXT_REQUEST,
             rng,
         )?;
+        // Compute request_id from the packet's truncated hash — must match
+        // how the receiver computes it (transport.rs uses pkt_hash[..16]).
+        // Python RNS Link.py: RequestReceipt uses packet_receipt.truncated_hash.
+        let parsed = rete_core::Packet::parse(&pkt).ok()?;
+        let pkt_hash = parsed.compute_hash();
+        let mut req_id = [0u8; TRUNCATED_HASH_LEN];
+        req_id.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
         Some((OutboundPacket::broadcast(pkt), req_id))
     }
 
@@ -500,7 +506,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     pub fn send_response<R: RngCore + CryptoRng>(
         &self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
-        request_id: &[u8; 10],
+        request_id: &[u8; TRUNCATED_HASH_LEN],
         data: &[u8],
         rng: &mut R,
     ) -> Option<OutboundPacket> {

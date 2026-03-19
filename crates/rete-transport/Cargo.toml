@@ -17,6 +17,9 @@ x25519-dalek  = { workspace = true }
 hkdf          = { workspace = true }
 zeroize       = { workspace = true }
 
+[features]
+trace-ingest = []
+
 [dev-dependencies]
 serde_json = { workspace = true }
 hex        = "0.4"

@@ -17,6 +17,16 @@ use rete_core::{
 };
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "trace-ingest")]
+fn trace_hex(bytes: &[u8]) -> alloc::string::String {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Protocol constants (from Python Transport.py)
 // ---------------------------------------------------------------------------
@@ -207,10 +217,10 @@ pub enum IngestResult<'a> {
     RequestReceived {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
-        /// The request_id (SHA-256(packed_request)[..10]).
-        request_id: [u8; 10],
-        /// The path_hash (SHA-256(path)[..10]).
-        path_hash: [u8; 10],
+        /// The request_id (truncated packet hash for single-packet requests).
+        request_id: [u8; TRUNCATED_HASH_LEN],
+        /// The path_hash (SHA-256(path)[..16]).
+        path_hash: [u8; TRUNCATED_HASH_LEN],
         /// The request data payload.
         data: alloc::vec::Vec<u8>,
     },
@@ -219,7 +229,7 @@ pub enum IngestResult<'a> {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
         /// The request_id this response is for.
-        request_id: [u8; 10],
+        request_id: [u8; TRUNCATED_HASH_LEN],
         /// The response data payload.
         data: alloc::vec::Vec<u8>,
     },
@@ -618,6 +628,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         // Dedup check
         if self.is_duplicate(&pkt_hash) {
+            #[cfg(feature = "trace-ingest")]
+            std::eprintln!("[transport] DUPLICATE packet dropped");
             return IngestResult::Duplicate;
         }
 
@@ -701,6 +713,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             Err(_) => return IngestResult::Invalid,
         };
 
+        #[cfg(feature = "trace-ingest")]
+        {
+            let dh_hex = trace_hex(&pkt.destination_hash[..8]);
+            std::eprintln!(
+                "[transport] ingest: pkt_type={:?} dest_type={:?} ctx=0x{:02x} hdr={:?} hops={} dest={}.. len={}",
+                pkt.packet_type, pkt.dest_type, pkt.context,
+                pkt.header_type, pkt.hops, dh_hex, raw.len()
+            );
+        }
+
         match pkt.packet_type {
             PacketType::Announce => self.handle_announce(&pkt, raw, now),
             PacketType::Data => {
@@ -714,6 +736,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 // Link data handling: dest_type == Link
                 if pkt.dest_type == DestType::Link {
+                    #[cfg(feature = "trace-ingest")]
+                    {
+                        let has_local = self.links.contains_key(&dh);
+                        let has_relay = self.link_table.contains_key(&dh);
+                        std::eprintln!(
+                            "[transport] link data: link_id={} ctx=0x{:02x} local_link={} relay_entry={} payload_len={}",
+                            trace_hex(&dh),
+                            pkt.context, has_local, has_relay, pkt.payload.len()
+                        );
+                    }
                     // If we own this link locally, handle it.
                     if self.links.contains_key(&dh) {
                         return self.handle_link_data(
@@ -1001,15 +1033,45 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         let link = match self.links.get_mut(link_id) {
             Some(l) => l,
-            None => return IngestResult::Invalid,
+            None => {
+                #[cfg(feature = "trace-ingest")]
+                std::eprintln!(
+                    "[transport] handle_link_data: link_id={} NOT FOUND in self.links",
+                    trace_hex(link_id)
+                );
+                return IngestResult::Invalid;
+            }
         };
+
+        #[cfg(feature = "trace-ingest")]
+        std::eprintln!(
+            "[transport] handle_link_data: link_id={} ctx=0x{:02x} active={} ct_len={}",
+            trace_hex(link_id),
+            context,
+            link.is_active(),
+            ciphertext.len()
+        );
 
         // Decrypt payload into stack buffer (heap alloc deferred to branches that need it)
         let mut dec_buf = [0u8; rete_core::MTU];
         let dec_len = match link.decrypt(ciphertext, &mut dec_buf) {
             Ok(n) => n,
-            Err(_) => return IngestResult::Invalid,
+            Err(_) => {
+                #[cfg(feature = "trace-ingest")]
+                std::eprintln!(
+                    "[transport] handle_link_data: DECRYPT FAILED for ctx=0x{:02x}",
+                    context
+                );
+                return IngestResult::Invalid;
+            }
         };
+
+        #[cfg(feature = "trace-ingest")]
+        std::eprintln!(
+            "[transport] handle_link_data: decrypted {} bytes for ctx=0x{:02x}",
+            dec_len,
+            context
+        );
 
         match context {
             CONTEXT_LRRTT => {
@@ -1069,9 +1131,22 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     return IngestResult::Invalid;
                 }
                 link.touch_inbound(now);
+                #[cfg(feature = "trace-ingest")]
+                {
+                    let hex_dump = trace_hex(&dec_buf[..dec_len.min(64)]);
+                    std::eprintln!(
+                        "[transport] REQUEST raw decrypted ({} bytes): {}",
+                        dec_len,
+                        hex_dump
+                    );
+                }
                 match crate::request::parse_request(&dec_buf[..dec_len]) {
                     Ok((_ts, rq_path_hash, data)) => {
-                        let req_id = crate::request::request_id(&dec_buf[..dec_len]);
+                        // Python RNS uses the packet's truncated hash as request_id
+                        // for single-packet requests (Link.py: RequestReceipt uses
+                        // packet_receipt.truncated_hash). This is SHA-256(hashable)[..16].
+                        let mut req_id = [0u8; TRUNCATED_HASH_LEN];
+                        req_id.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
                         IngestResult::RequestReceived {
                             link_id: *link_id,
                             request_id: req_id,
@@ -1079,7 +1154,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             data,
                         }
                     }
-                    Err(_) => IngestResult::Invalid,
+                    Err(_e) => {
+                        #[cfg(feature = "trace-ingest")]
+                        std::eprintln!("[transport] REQUEST parse_request FAILED: {:?}", _e);
+                        IngestResult::Invalid
+                    }
                 }
             }
             CONTEXT_RESPONSE => {

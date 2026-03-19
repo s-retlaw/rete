@@ -6,27 +6,29 @@
 //! ```text
 //! fixarray(3) = 0x93
 //! float64     = 0xcb + 8 bytes BE (timestamp)
-//! bin8/bin16  = path_hash (10 bytes, SHA-256(path.encode("utf-8"))[0:10])
+//! bin8/bin16  = path_hash (16 bytes, SHA-256(path.encode("utf-8"))[0:16])
 //! bin8/bin16/bin32 = data (arbitrary bytes)
 //! ```
 //!
 //! # Response wire format (msgpack)
 //! ```text
 //! fixarray(2) = 0x92
-//! bin8        = request_id (10 bytes, SHA-256(packed_request)[0:10])
+//! bin8        = request_id (16 bytes, truncated packet hash for single-packet requests)
 //! bin8/bin16/bin32 = response data
 //! ```
 
 extern crate alloc;
 
 use alloc::vec::Vec;
+use rete_core::TRUNCATED_HASH_LEN;
 use sha2::{Digest, Sha256};
 
-/// Length of a path hash (truncated SHA-256).
-pub const PATH_HASH_LEN: usize = 10;
+/// Length of a path hash (truncated SHA-256, same as `Identity.truncated_hash` in Python RNS).
+pub const PATH_HASH_LEN: usize = TRUNCATED_HASH_LEN;
 
-/// Length of a request ID (truncated SHA-256 of packed request).
-pub const REQUEST_ID_LEN: usize = 10;
+/// Length of a request ID (truncated hash of the packet's hashable part for single-packet requests,
+/// or truncated hash of the packed request data for resource-based requests).
+pub const REQUEST_ID_LEN: usize = TRUNCATED_HASH_LEN;
 
 /// Errors from request/response parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,13 +41,13 @@ pub enum RequestError {
     BadTimestamp,
     /// Expected msgpack bin (path_hash or data) not found.
     BadBin,
-    /// Path hash has wrong length (expected 10 bytes).
+    /// Path hash has wrong length (expected 16 bytes).
     BadPathHashLen,
-    /// Request ID has wrong length (expected 10 bytes).
+    /// Request ID has wrong length (expected 16 bytes).
     BadRequestIdLen,
 }
 
-/// Compute path hash: `SHA-256(path.as_bytes())[..10]`.
+/// Compute path hash: `SHA-256(path.as_bytes())[..16]`.
 pub fn path_hash(path: &str) -> [u8; PATH_HASH_LEN] {
     let digest = Sha256::digest(path.as_bytes());
     let mut out = [0u8; PATH_HASH_LEN];
@@ -53,7 +55,10 @@ pub fn path_hash(path: &str) -> [u8; PATH_HASH_LEN] {
     out
 }
 
-/// Compute request_id from packed request bytes: `SHA-256(packed)[..10]`.
+/// Compute request_id from packed request bytes: `SHA-256(packed)[..16]`.
+///
+/// Note: This is only correct for resource-based (multi-packet) requests.
+/// For single-packet requests, Python RNS uses the packet's truncated hash instead.
 pub fn request_id(packed_request: &[u8]) -> [u8; REQUEST_ID_LEN] {
     let digest = Sha256::digest(packed_request);
     let mut out = [0u8; REQUEST_ID_LEN];
@@ -65,8 +70,8 @@ pub fn request_id(packed_request: &[u8]) -> [u8; REQUEST_ID_LEN] {
 pub fn build_request(path: &str, data: &[u8], now_secs_f64: f64) -> Vec<u8> {
     let ph = path_hash(path);
 
-    // Estimate capacity: 1 (array) + 9 (float64) + 12 (bin8 + 10) + 3+ (bin header + data)
-    let mut buf = Vec::with_capacity(1 + 9 + 12 + 3 + data.len());
+    // Estimate capacity: 1 (array) + 9 (float64) + 2+16 (bin8 + path_hash) + 3+ (bin header + data)
+    let mut buf = Vec::with_capacity(1 + 9 + (2 + PATH_HASH_LEN) + 3 + data.len());
 
     // fixarray(3)
     buf.push(0x93);
@@ -75,7 +80,7 @@ pub fn build_request(path: &str, data: &[u8], now_secs_f64: f64) -> Vec<u8> {
     buf.push(0xcb);
     buf.extend_from_slice(&now_secs_f64.to_be_bytes());
 
-    // path_hash as bin8 (always 10 bytes)
+    // path_hash as bin8 (always 16 bytes)
     write_bin(&mut buf, &ph);
 
     // data as bin
@@ -97,7 +102,7 @@ pub fn parse_request(packed: &[u8]) -> Result<(f64, [u8; PATH_HASH_LEN], Vec<u8>
     // Read float64 timestamp
     let timestamp = read_float64(packed, &mut pos)?;
 
-    // Read path_hash (bin, expect 10 bytes)
+    // Read path_hash (bin, expect 16 bytes)
     let ph_bytes = read_bin(packed, &mut pos)?;
     if ph_bytes.len() != PATH_HASH_LEN {
         return Err(RequestError::BadPathHashLen);
@@ -118,7 +123,7 @@ pub fn build_response(req_id: &[u8; REQUEST_ID_LEN], data: &[u8]) -> Vec<u8> {
     // fixarray(2)
     buf.push(0x92);
 
-    // request_id as bin8 (always 10 bytes)
+    // request_id as bin8 (always 16 bytes)
     write_bin(&mut buf, req_id);
 
     // response data as bin
@@ -137,7 +142,7 @@ pub fn parse_response(packed: &[u8]) -> Result<([u8; REQUEST_ID_LEN], Vec<u8>), 
         return Err(RequestError::BadArrayHeader);
     }
 
-    // Read request_id (bin, expect 10 bytes)
+    // Read request_id (bin, expect 16 bytes)
     let rid_bytes = read_bin(packed, &mut pos)?;
     if rid_bytes.len() != REQUEST_ID_LEN {
         return Err(RequestError::BadRequestIdLen);
@@ -342,7 +347,10 @@ mod tests {
 
     #[test]
     fn test_build_parse_response_roundtrip() {
-        let req_id = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A];
+        let req_id = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10,
+        ];
         let resp_data = b"response payload";
 
         let packed = build_response(&req_id, resp_data);
@@ -395,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_response_with_empty_data() {
-        let req_id = [0xAA; REQUEST_ID_LEN];
+        let req_id: [u8; REQUEST_ID_LEN] = [0xAA; REQUEST_ID_LEN];
         let packed = build_response(&req_id, &[]);
         let (parsed_rid, parsed_data) = parse_response(&packed).unwrap();
 

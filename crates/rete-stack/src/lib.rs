@@ -96,10 +96,10 @@ pub enum NodeEvent {
     RequestReceived {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
-        /// The request_id (SHA-256(packed_request)[..10]).
-        request_id: [u8; 10],
-        /// The path_hash (SHA-256(path)[..10]).
-        path_hash: [u8; 10],
+        /// The request_id (truncated packet hash for single-packet requests).
+        request_id: [u8; TRUNCATED_HASH_LEN],
+        /// The path_hash (SHA-256(path)[..16]).
+        path_hash: [u8; TRUNCATED_HASH_LEN],
         /// The request data payload.
         data: alloc::vec::Vec<u8>,
     },
@@ -108,7 +108,7 @@ pub enum NodeEvent {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
         /// The request_id this response is for.
-        request_id: [u8; 10],
+        request_id: [u8; TRUNCATED_HASH_LEN],
         /// The response data payload.
         data: alloc::vec::Vec<u8>,
     },

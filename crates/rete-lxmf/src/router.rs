@@ -49,7 +49,7 @@ pub enum LxmfEvent {
         /// The link_id the request came on.
         link_id: [u8; TRUNCATED_HASH_LEN],
         /// The request_id to respond to.
-        request_id: [u8; 10],
+        request_id: [u8; TRUNCATED_HASH_LEN],
         /// The destination hash being retrieved.
         dest_hash: [u8; TRUNCATED_HASH_LEN],
         /// Retrieval result (response data + messages to send).
@@ -762,7 +762,7 @@ impl LxmfRouter {
     // -----------------------------------------------------------------------
 
     /// Path hash for the propagation retrieval path.
-    pub fn propagation_retrieve_path_hash() -> [u8; 10] {
+    pub fn propagation_retrieve_path_hash() -> [u8; TRUNCATED_HASH_LEN] {
         rete_transport::request::path_hash("/lxmf/propagation/retrieve")
     }
 
@@ -778,7 +778,7 @@ impl LxmfRouter {
     /// Returns `None` if the path does not match or propagation is not enabled.
     pub fn handle_propagation_request(
         &self,
-        path_hash: &[u8; 10],
+        path_hash: &[u8; TRUNCATED_HASH_LEN],
         data: &[u8],
     ) -> Option<PropagationRetrievalResult> {
         // Check that the path matches
@@ -1910,12 +1910,12 @@ mod tests {
     #[test]
     fn test_propagation_retrieve_path_hash() {
         let ph = LxmfRouter::propagation_retrieve_path_hash();
-        assert_eq!(ph.len(), 10);
+        assert_eq!(ph.len(), 16);
 
-        // Should be SHA-256("/lxmf/propagation/retrieve")[..10]
+        // Should be SHA-256("/lxmf/propagation/retrieve")[..16]
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest("/lxmf/propagation/retrieve".as_bytes());
-        assert_eq!(&ph[..], &digest[..10]);
+        assert_eq!(&ph[..], &digest[..16]);
 
         // Should be deterministic
         let ph2 = LxmfRouter::propagation_retrieve_path_hash();
@@ -1974,7 +1974,7 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let wrong_path_hash = [0xFF; 10];
+        let wrong_path_hash = [0xFF; 16];
         let dest = [0x42; 16];
         let result = router.handle_propagation_request(&wrong_path_hash, &dest);
         assert!(result.is_none());
@@ -2121,7 +2121,10 @@ mod tests {
         router.propagation_deposit(&msg.pack(), 1000);
 
         let path_hash = LxmfRouter::propagation_retrieve_path_hash();
-        let request_id = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A];
+        let request_id = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10,
+        ];
         let link_id = [0xCC; 16];
 
         let event = NodeEvent::RequestReceived {

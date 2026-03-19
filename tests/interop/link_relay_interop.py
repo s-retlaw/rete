@@ -131,6 +131,38 @@ channel.send(msg2)
 print("PY_CHANNEL_MSG2_SENT:0x0200", flush=True)
 time.sleep(3)
 
+# Test link.request() through relay
+request_response = threading.Event()
+request_result = [None]
+
+def req_response_cb(receipt):
+    if receipt.response is not None:
+        request_result[0] = receipt.response
+        print(f"PY_REQUEST_RESPONSE:{{len(receipt.response) if isinstance(receipt.response, (bytes, bytearray)) else receipt.response}}", flush=True)
+    else:
+        print("PY_REQUEST_RESPONSE_NONE", flush=True)
+    request_response.set()
+
+def req_failed_cb(receipt):
+    print(f"PY_REQUEST_FAILED:{{receipt.status}}", flush=True)
+    request_response.set()
+
+print("PY_SENDING_REQUEST", flush=True)
+receipt = link.request(
+    "/test/echo",
+    b"hello from relay request",
+    response_callback=req_response_cb,
+    failed_callback=req_failed_cb,
+)
+print("PY_REQUEST_SENT", flush=True)
+
+if request_response.wait(timeout=2):
+    print(f"PY_REQUEST_DONE:result={{request_result[0]}}", flush=True)
+else:
+    print("PY_REQUEST_TIMEOUT", flush=True)
+
+time.sleep(1)
+
 link.teardown()
 print("PY_LINK_TEARDOWN_SENT", flush=True)
 time.sleep(2)
@@ -168,6 +200,11 @@ print("PY_DONE", flush=True)
         t.check(
             t.has_line(rust, "CHANNEL_MSG:", contains="second relay channel msg"),
             "Rust received second channel message (type=0x0200)",
+        )
+
+        t.check(
+            t.has_line(rust, "REQUEST_RECEIVED:"),
+            "Rust received link.request() through relay",
         )
 
         t.check(t.has_line(rust, "LINK_CLOSED:"), "Link teardown confirmed")

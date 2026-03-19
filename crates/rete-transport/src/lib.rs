@@ -7,6 +7,9 @@
 //! All collections are const-generic bounded for bare-metal targets.
 
 #![no_std]
+#[cfg(feature = "trace-ingest")]
+extern crate std;
+
 extern crate alloc;
 
 pub mod announce;
