@@ -12,6 +12,8 @@ pub struct Path {
     pub via: Option<[u8; TRUNCATED_HASH_LEN]>,
     /// Monotonic timestamp (ticks or seconds) when this path was learned.
     pub learned_at: u64,
+    /// Monotonic timestamp of last access (for LRU eviction).
+    pub last_accessed: u64,
     /// Last observed SNR × 4 (as in the Python reference).
     pub last_snr: i8,
     /// Hop count to destination.
@@ -26,6 +28,7 @@ impl Path {
         Path {
             via: None,
             learned_at,
+            last_accessed: learned_at,
             last_snr: 0,
             hops: 1,
             announce_raw: None,
@@ -37,6 +40,7 @@ impl Path {
         Path {
             via: Some(repeater),
             learned_at,
+            last_accessed: learned_at,
             last_snr: 0,
             hops,
             announce_raw: None,

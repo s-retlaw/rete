@@ -8,6 +8,9 @@ repository.workspace = true
 keywords.workspace   = true
 categories.workspace = true
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
 rete-core     = { workspace = true }
 heapless      = { workspace = true }
@@ -16,6 +19,7 @@ rand_core     = { workspace = true }
 x25519-dalek  = { workspace = true }
 hkdf          = { workspace = true }
 zeroize       = { workspace = true }
+serde         = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

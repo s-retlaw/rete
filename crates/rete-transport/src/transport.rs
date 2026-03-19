@@ -338,9 +338,31 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         self.paths.get(dest)
     }
 
-    /// Store a learned path. Returns `false` if the path table is full.
+    /// Update `last_accessed` on a path (call when the path is used for routing).
+    pub fn touch_path(&mut self, dest: &[u8; TRUNCATED_HASH_LEN], now: u64) {
+        if let Some(p) = self.paths.get_mut(dest) {
+            p.last_accessed = now;
+        }
+    }
+
+    /// Store a learned path.  If the table is full, evicts the
+    /// least-recently-used entry first.  Always succeeds.
     pub fn insert_path(&mut self, dest: [u8; TRUNCATED_HASH_LEN], path: Path) -> bool {
-        self.paths.insert(dest, path).is_ok()
+        if self.paths.insert(dest, path.clone()).is_ok() {
+            return true;
+        }
+        // Table full — evict LRU entry
+        if let Some(lru_key) = self
+            .paths
+            .iter()
+            .min_by_key(|(_, p)| p.last_accessed)
+            .map(|(k, _)| *k)
+        {
+            self.paths.remove(&lru_key);
+            self.paths.insert(dest, path).is_ok()
+        } else {
+            false
+        }
     }
 
     /// Remove a path entry (expiry or explicit reset).
@@ -385,8 +407,97 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         pub_key: [u8; 64],
         now: u64,
     ) {
-        let _ = self.known_identities.insert(dest_hash, pub_key);
-        let _ = self.paths.insert(dest_hash, Path::direct(now));
+        self.insert_identity(dest_hash, pub_key);
+        let _ = self.insert_path(dest_hash, Path::direct(now));
+    }
+
+    /// Store a known identity.  If the table is full, evicts the entry
+    /// whose matching path has the oldest `last_accessed` (or the first
+    /// entry if no paths exist).
+    fn insert_identity(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN], pub_key: [u8; 64]) {
+        if self.known_identities.insert(dest_hash, pub_key).is_ok() {
+            return;
+        }
+        // Table full — evict the identity whose path is least-recently-used
+        if let Some(lru_key) = self
+            .known_identities
+            .keys()
+            .min_by_key(|k| self.paths.get(*k).map(|p| p.last_accessed).unwrap_or(0))
+            .copied()
+        {
+            self.known_identities.remove(&lru_key);
+            let _ = self.known_identities.insert(dest_hash, pub_key);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot — save / load
+    // -----------------------------------------------------------------------
+
+    /// Capture the current path table and known identities into a [`Snapshot`].
+    ///
+    /// `detail` controls whether the announce cache is included (see
+    /// [`SnapshotDetail`]).
+    pub fn save_snapshot(
+        &self,
+        detail: crate::snapshot::SnapshotDetail,
+    ) -> crate::snapshot::Snapshot {
+        use crate::snapshot::{IdentityEntry, PathEntry, Snapshot, SnapshotDetail};
+
+        let include_announce = matches!(detail, SnapshotDetail::Standard | SnapshotDetail::Full);
+
+        let paths = self
+            .paths
+            .iter()
+            .map(|(k, p)| PathEntry {
+                dest_hash: *k,
+                via: p.via,
+                learned_at: p.learned_at,
+                last_accessed: p.last_accessed,
+                last_snr: p.last_snr,
+                hops: p.hops,
+                announce_raw: if include_announce {
+                    p.announce_raw.clone()
+                } else {
+                    None
+                },
+            })
+            .collect();
+
+        let identities = self
+            .known_identities
+            .iter()
+            .map(|(k, v)| IdentityEntry {
+                dest_hash: *k,
+                pub_key: *v,
+            })
+            .collect();
+
+        Snapshot {
+            version: 1,
+            paths,
+            identities,
+        }
+    }
+
+    /// Restore paths and identities from a previously saved [`Snapshot`].
+    ///
+    /// Entries that would overflow the tables are silently dropped.
+    pub fn load_snapshot(&mut self, snap: &crate::snapshot::Snapshot) {
+        for pe in &snap.paths {
+            let path = Path {
+                via: pe.via,
+                learned_at: pe.learned_at,
+                last_accessed: pe.last_accessed,
+                last_snr: pe.last_snr,
+                hops: pe.hops,
+                announce_raw: pe.announce_raw.clone(),
+            };
+            self.insert_path(pe.dest_hash, path);
+        }
+        for ie in &snap.identities {
+            self.insert_identity(ie.dest_hash, ie.pub_key);
+        }
     }
 
     /// Set the local identity hash, enabling HEADER_2 forwarding.
@@ -1336,7 +1447,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 let mut pk = [0u8; 64];
                 pk.copy_from_slice(info.pub_key);
-                let _ = self.known_identities.insert(dh, pk);
+                self.insert_identity(dh, pk);
 
                 if pkt.hops < PATHFINDER_M {
                     let retransmit_raw = if let Some(local_id) = self.local_identity_hash {
@@ -1714,16 +1825,23 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     ///
     /// Matches Python RNS protocol flow:
     /// 1. Prepend 4 random bytes to data
-    /// 2. Skip compression (no bz2 in no_std)
+    /// 2. Optionally compress (caller decides)
     /// 3. Encrypt prepended data via link Token
     /// 4. Create Resource from the encrypted blob
     /// 5. Build advertisement and send it
+    ///
+    /// `data` is the bytes to transmit (possibly compressed).
+    /// `original_data` is the original uncompressed plaintext (for proof
+    /// validation and `original_size`).  When not compressed, pass the
+    /// same slice for both.
     ///
     /// Returns the advertisement payload as raw packet bytes.
     pub fn start_resource<R: RngCore + CryptoRng>(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         data: &[u8],
+        original_data: &[u8],
+        compressed: bool,
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
         // Step 1: Check link is active and encrypt data (immutable borrow scope)
@@ -1750,11 +1868,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         };
 
         // Step 2: Create Resource from the encrypted blob
-        let original_size = data.len();
+        let original_size = original_data.len();
         let mut resource =
             Resource::new_outbound(&encrypted, *link_id, LINK_MDU, original_size, rng);
         // Set the encrypted flag (Python: self.flags |= Resource.FLAG_ENCRYPTED)
         resource.flags.encrypted = true;
+        resource.flags.compressed = compressed;
 
         // Python computes resource_hash from the ORIGINAL PLAINTEXT (the `data`
         // parameter of Resource.__init__), not the encrypted blob. Override the
@@ -1762,14 +1881,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
-            hasher.update(data); // original plaintext
+            hasher.update(original_data); // original plaintext
             hasher.update(resource.random_hash);
             resource.resource_hash = hasher.finalize().into();
         }
         // Also store the original plaintext in resource.data for proof validation.
         // Python receiver proves with SHA-256(plaintext || resource_hash), so the
         // sender needs the plaintext (not ciphertext) for handle_proof verification.
-        resource.data = data.to_vec();
+        resource.data = original_data.to_vec();
 
         let adv = resource.build_advertisement();
 
@@ -2330,7 +2449,7 @@ mod tests {
         // Forward a LINKREQUEST at time=100
         let lr_payload = [0xBBu8; 64];
         let (mut buf, n) = build_h2_linkrequest(&relay_hash, &dest_hash, &lr_payload);
-        let link_id = compute_link_id(&buf[..n]).unwrap();
+        let _link_id = compute_link_id(&buf[..n]).unwrap();
         transport.ingest_on(&mut buf[..n], 100, 0, &mut rng, &identity);
 
         assert_eq!(transport.link_table.len(), 1);

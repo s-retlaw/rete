@@ -34,8 +34,37 @@ const ASPECTS: &[&str] = &["example", "v1"];
 const PROPAGATION_TTL_SECS: u64 = 2_592_000;
 
 // ---------------------------------------------------------------------------
-// bz2 decompression for resource data
+// bz2 compression / decompression for resource data
 // ---------------------------------------------------------------------------
+
+fn bz2_compress(data: &[u8]) -> Option<Vec<u8>> {
+    use core::ffi::{c_char, c_int, c_uint};
+    use libbz2_rs_sys::BZ2_bzBuffToBuffCompress;
+
+    // bz2 worst-case: input + 1% + 600 bytes
+    let out_size = data.len() + data.len() / 100 + 600;
+    let mut out = vec![0u8; out_size];
+    let mut dest_len = out_size as c_uint;
+
+    let ret = unsafe {
+        BZ2_bzBuffToBuffCompress(
+            out.as_mut_ptr() as *mut c_char,
+            &mut dest_len,
+            data.as_ptr() as *mut c_char,
+            data.len() as c_uint,
+            9 as c_int, // blockSize100k=9 (max compression)
+            0,          // verbosity=0
+            30,         // workFactor=30 (Python default)
+        )
+    };
+
+    if ret == 0 {
+        out.truncate(dest_len as usize);
+        Some(out)
+    } else {
+        None
+    }
+}
 
 fn bz2_decompress(data: &[u8]) -> Option<Vec<u8>> {
     use core::ffi::{c_char, c_uint};
@@ -75,9 +104,57 @@ fn bz2_decompress(data: &[u8]) -> Option<Vec<u8>> {
 // Identity persistence
 // ---------------------------------------------------------------------------
 
-fn default_identity_path() -> PathBuf {
+fn default_rete_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".rete").join("identity")
+    PathBuf::from(home).join(".rete")
+}
+
+fn default_identity_path() -> PathBuf {
+    default_rete_dir().join("identity")
+}
+
+fn default_snapshot_path() -> PathBuf {
+    default_rete_dir().join("snapshot.json")
+}
+
+// ---------------------------------------------------------------------------
+// Path table snapshot persistence
+// ---------------------------------------------------------------------------
+
+fn load_snapshot(path: &std::path::Path) -> Option<rete_transport::Snapshot> {
+    match std::fs::read_to_string(path) {
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(snap) => {
+                eprintln!("[rete] loaded snapshot from {}", path.display());
+                Some(snap)
+            }
+            Err(e) => {
+                eprintln!("[rete] failed to parse snapshot: {e}");
+                None
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("[rete] failed to read snapshot: {e}");
+            None
+        }
+    }
+}
+
+fn save_snapshot(path: &std::path::Path, snap: &rete_transport::Snapshot) {
+    match serde_json::to_string(snap) {
+        Ok(json) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(path, json) {
+                eprintln!("[rete] failed to write snapshot: {e}");
+            }
+        }
+        Err(e) => {
+            eprintln!("[rete] failed to serialize snapshot: {e}");
+        }
+    }
 }
 
 fn load_or_create_identity(path: &std::path::Path) -> Identity {
@@ -372,6 +449,17 @@ async fn main() {
     // Create node
     let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
     node.core.set_decompress_fn(Some(bz2_decompress));
+    node.core.set_compress_fn(Some(bz2_compress));
+
+    // Load snapshot from previous run (if any)
+    let snapshot_path = default_snapshot_path();
+    if let Some(snap) = load_snapshot(&snapshot_path) {
+        let n_paths = snap.paths.len();
+        let n_ids = snap.identities.len();
+        node.core.load_snapshot(&snap);
+        eprintln!("[rete] restored {n_paths} paths, {n_ids} identities from snapshot");
+    }
+
     if transport_mode {
         node.core.enable_transport();
         eprintln!("[rete] transport mode enabled");
@@ -842,7 +930,7 @@ fn on_event(
     core: &mut rete_stack::HostedNodeCore,
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
 ) -> Vec<OutboundPacket> {
-    // Handle propagation pruning on tick events
+    // Handle propagation pruning + periodic snapshot on tick events
     if let NodeEvent::Tick { .. } = &event {
         let now = rete_tokio::current_time_secs();
         let pruned = lxmf_router
@@ -850,6 +938,20 @@ fn on_event(
             .prune_propagation(now, PROPAGATION_TTL_SECS);
         if pruned > 0 {
             eprintln!("[rete] propagation: pruned {pruned} expired messages");
+        }
+
+        // Save snapshot every ~5 minutes (60 ticks × 5s interval)
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+        let ticks = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if ticks.is_multiple_of(60) && core.path_count() > 0 {
+            let snap = core.save_snapshot(rete_transport::SnapshotDetail::Standard);
+            save_snapshot(&default_snapshot_path(), &snap);
+            eprintln!(
+                "[rete] snapshot saved: {} paths, {} identities",
+                snap.paths.len(),
+                snap.identities.len()
+            );
         }
     }
 

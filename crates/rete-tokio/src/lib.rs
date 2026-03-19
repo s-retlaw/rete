@@ -169,10 +169,7 @@ impl TokioNode {
                     );
                     (vec![pkt], true)
                 } else {
-                    eprintln!(
-                        "[rete] cmd: resource send failed (link {})",
-                        hex(&link_id)
-                    );
+                    eprintln!("[rete] cmd: resource send failed (link {})", hex(&link_id));
                     (vec![], true)
                 }
             }

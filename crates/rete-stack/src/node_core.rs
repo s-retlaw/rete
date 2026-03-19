@@ -17,6 +17,9 @@ use rete_transport::{IngestResult, PendingAnnounce, Transport, RECEIPT_TIMEOUT};
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::{NodeEvent, ProofStrategy};
 
+/// Callback type for data compression/decompression functions.
+pub type TransformFn = fn(&[u8]) -> Option<Vec<u8>>;
+
 // ---------------------------------------------------------------------------
 // OutboundPacket + PacketRouting
 // ---------------------------------------------------------------------------
@@ -99,7 +102,11 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     /// Optional decompressor for bz2-compressed resource data.
     /// Called when a received resource has the compressed flag set.
     /// Desktop: provide bz2 decompressor. MCUs without enough RAM: leave as None.
-    decompress_fn: Option<fn(&[u8]) -> Option<Vec<u8>>>,
+    decompress_fn: Option<TransformFn>,
+    /// Optional compressor for outbound resource data.
+    /// When set, `start_resource` will try to compress data before sending.
+    /// Only uses the compressed version if it is actually smaller.
+    compress_fn: Option<TransformFn>,
 }
 
 /// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
@@ -149,6 +156,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             echo_data: false,
             last_peer: None,
             decompress_fn: None,
+            compress_fn: None,
         }
     }
 
@@ -178,8 +186,31 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     }
 
     /// Set the decompression function for bz2-compressed resource data.
-    pub fn set_decompress_fn(&mut self, f: Option<fn(&[u8]) -> Option<Vec<u8>>>) {
+    pub fn set_decompress_fn(&mut self, f: Option<TransformFn>) {
         self.decompress_fn = f;
+    }
+
+    /// Set the compression function for outbound resource data.
+    pub fn set_compress_fn(&mut self, f: Option<TransformFn>) {
+        self.compress_fn = f;
+    }
+
+    /// Number of learned paths in the transport table.
+    pub fn path_count(&self) -> usize {
+        self.transport.path_count()
+    }
+
+    /// Capture transport state into a snapshot for persistence.
+    pub fn save_snapshot(
+        &self,
+        detail: rete_transport::SnapshotDetail,
+    ) -> rete_transport::Snapshot {
+        self.transport.save_snapshot(detail)
+    }
+
+    /// Restore transport state from a previously saved snapshot.
+    pub fn load_snapshot(&mut self, snap: &rete_transport::Snapshot) {
+        self.transport.load_snapshot(snap);
     }
 
     /// Returns a reference to the primary destination.
@@ -532,14 +563,32 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
     /// Start a resource transfer on a link.
     ///
-    /// Returns the outbound advertisement packet.
+    /// If a `compress_fn` is set, tries to compress `data` and only uses the
+    /// compressed version when it is actually smaller.  Returns the outbound
+    /// advertisement packet.
     pub fn start_resource<R: RngCore + CryptoRng>(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         data: &[u8],
         rng: &mut R,
     ) -> Option<OutboundPacket> {
-        let pkt = self.transport.start_resource(link_id, data, rng)?;
+        let (send_data, compressed) = if let Some(compress) = self.compress_fn {
+            if let Some(c) = compress(data) {
+                if c.len() < data.len() {
+                    (c, true)
+                } else {
+                    (data.to_vec(), false)
+                }
+            } else {
+                (data.to_vec(), false)
+            }
+        } else {
+            (data.to_vec(), false)
+        };
+
+        let pkt = self
+            .transport
+            .start_resource(link_id, &send_data, data, compressed, rng)?;
         Some(OutboundPacket::broadcast(pkt))
     }
 
@@ -878,16 +927,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
                         // Step 4: Move plaintext into resource, build proof, take it back
                         // Proof = SHA-256(plaintext || resource_hash) — must match Python
-                        let (proof, plaintext) =
-                            if let Some(res) =
-                                self.transport.get_resource_mut(&link_id, &resource_hash)
-                            {
-                                res.data = plaintext;
-                                let proof = res.build_proof();
-                                (proof, core::mem::take(&mut res.data))
-                            } else {
-                                (Vec::new(), plaintext)
-                            };
+                        let (proof, plaintext) = if let Some(res) =
+                            self.transport.get_resource_mut(&link_id, &resource_hash)
+                        {
+                            res.data = plaintext;
+                            let proof = res.build_proof();
+                            (proof, core::mem::take(&mut res.data))
+                        } else {
+                            (Vec::new(), plaintext)
+                        };
 
                         // Step 5: Build and send proof packet
                         if !proof.is_empty() {
