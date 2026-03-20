@@ -1370,8 +1370,11 @@ name = "rete-stack"
 version = "0.1.0"
 dependencies = [
  "embedded-io-async 0.6.1",
+ "heapless 0.8.0",
+ "rand_core 0.6.4",
  "rete-core",
  "rete-transport",
+ "sha2",
 ]
 
 [[package]]
@@ -1379,9 +1382,12 @@ name = "rete-transport"
 version = "0.1.0"
 dependencies = [
  "heapless 0.8.0",
+ "hkdf",
  "rand_core 0.6.4",
  "rete-core",
  "sha2",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

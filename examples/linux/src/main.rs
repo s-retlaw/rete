@@ -261,6 +261,22 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             let (link_id, data) = parse_link_and_text(line, "resource")?;
             Some(NodeCommand::SendResource { link_id, data })
         }
+        "close" if parts.len() >= 2 => Some(NodeCommand::CloseLink {
+            link_id: parse_hex_16(parts[1])?,
+        }),
+        "request" => {
+            let parts: Vec<&str> = line.splitn(4, ' ').collect();
+            if parts.len() < 4 {
+                eprintln!("[rete] usage: request <link_id_hex> <path> <data>");
+                return None;
+            }
+            let link_id = parse_hex_16(parts[1])?;
+            Some(NodeCommand::SendRequest {
+                link_id,
+                path: parts[2].to_string(),
+                payload: parts[3].as_bytes().to_vec(),
+            })
+        }
         "lxmf" => {
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
             if parts.len() < 3 {
@@ -302,7 +318,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
         "quit" => Some(NodeCommand::Shutdown),
         _ => {
             eprintln!("[rete] unknown command: {line}");
-            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | lxmf-prop-announce | quit");
+            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | close <link_id> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | request <link_id> <path> <data> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | lxmf-prop-announce | quit");
             None
         }
     }

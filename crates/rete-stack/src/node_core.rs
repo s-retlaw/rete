@@ -500,6 +500,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         )
     }
 
+    /// Close a link, sending a LINKCLOSE packet and removing it from the map.
+    pub fn close_link<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        rng: &mut R,
+    ) -> Option<OutboundPacket> {
+        let pkt = self.transport.build_linkclose_packet(link_id, rng)?;
+        Some(OutboundPacket::broadcast(pkt))
+    }
+
     /// Send plain data over an established link.
     pub fn send_link_data<R: RngCore + CryptoRng>(
         &self,

@@ -17,9 +17,11 @@ use embassy_time::{Duration, Instant, Timer};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
 use rete_core::{Identity, MTU};
+pub use rete_stack::EmbeddedNodeCore;
 pub use rete_stack::NodeEvent;
+pub use rete_stack::OutboundPacket;
 pub use rete_stack::ProofStrategy;
-use rete_stack::{EmbeddedNodeCore, PacketRouting, ReteInterface};
+use rete_stack::{PacketRouting, ReteInterface};
 use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 // ---------------------------------------------------------------------------
@@ -171,13 +173,29 @@ impl EmbassyNode {
         R: RngCore + CryptoRng,
         F: FnMut(NodeEvent),
     {
+        self.run_with_handler(iface, rng, |event, _, _| {
+            on_event(event);
+            Vec::new()
+        })
+        .await;
+    }
+
+    /// Run the main event loop with a single interface and handler callback.
+    ///
+    /// The `on_event` callback receives the event, a mutable reference to the
+    /// node core, and the RNG. It may call methods like `core.initiate_link()`,
+    /// `core.send_channel_message()`, etc. and return outbound packets to send.
+    pub async fn run_with_handler<I, R, F>(&mut self, iface: &mut I, rng: &mut R, mut on_event: F)
+    where
+        I: ReteInterface,
+        R: RngCore + CryptoRng,
+        F: FnMut(NodeEvent, &mut EmbeddedNodeCore, &mut R) -> Vec<OutboundPacket>,
+    {
         // Queue initial announce through transport (gets immediate + one retransmit)
         {
             let now = Instant::now().as_secs();
             self.core.queue_announce(None, rng, self.announce_time());
-            for pkt in &self.core.flush_announces(now) {
-                let _ = iface.send(&pkt.data).await;
-            }
+            dispatch(iface, &self.core.flush_announces(now)).await;
         }
 
         let mut recv_buf = [0u8; MTU];
@@ -196,15 +214,10 @@ impl EmbassyNode {
                     Ok(data) => {
                         let now = Instant::now().as_secs();
                         let outcome = self.core.handle_ingest(data, now, 0, rng);
-                        for pkt in &outcome.packets {
-                            // Single interface: skip AllExceptSource (would echo back to source)
-                            if pkt.routing == PacketRouting::AllExceptSource {
-                                continue;
-                            }
-                            let _ = iface.send(&pkt.data).await;
-                        }
+                        dispatch(iface, &outcome.packets).await;
                         if let Some(event) = outcome.event {
-                            on_event(event);
+                            let extra = on_event(event, &mut self.core, rng);
+                            dispatch(iface, &extra).await;
                         }
                     }
                     Err(_) => break,
@@ -213,22 +226,32 @@ impl EmbassyNode {
                     next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
                     let now = Instant::now().as_secs();
                     self.core.queue_announce(None, rng, self.announce_time());
-                    for pkt in &self.core.flush_announces(now) {
-                        let _ = iface.send(&pkt.data).await;
-                    }
+                    dispatch(iface, &self.core.flush_announces(now)).await;
                 }
                 Either3::Third(()) => {
                     next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
                     let now = Instant::now().as_secs();
                     let outcome = self.core.handle_tick(now, rng);
-                    for pkt in &outcome.packets {
-                        let _ = iface.send(&pkt.data).await;
-                    }
+                    dispatch(iface, &outcome.packets).await;
                     if let Some(event) = outcome.event {
-                        on_event(event);
+                        let extra = on_event(event, &mut self.core, rng);
+                        dispatch(iface, &extra).await;
                     }
                 }
             }
         }
+    }
+}
+
+/// Dispatch outbound packets on a single interface.
+///
+/// `AllExceptSource` is a no-op: the only interface IS the source,
+/// so forwarded packets must not be sent back where they came from.
+async fn dispatch<I: ReteInterface>(iface: &mut I, packets: &[OutboundPacket]) {
+    for pkt in packets {
+        if pkt.routing == PacketRouting::AllExceptSource {
+            continue;
+        }
+        let _ = iface.send(&pkt.data).await;
     }
 }

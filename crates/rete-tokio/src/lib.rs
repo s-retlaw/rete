@@ -41,6 +41,14 @@ pub enum NodeCommand {
         link_id: [u8; TRUNCATED_HASH_LEN],
         data: Vec<u8>,
     },
+    /// Close an established link.
+    CloseLink { link_id: [u8; TRUNCATED_HASH_LEN] },
+    /// Send a request on an established link.
+    SendRequest {
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        path: String,
+        payload: Vec<u8>,
+    },
     /// Emit an announce (optionally with app_data).
     Announce { app_data: Option<Vec<u8>> },
     /// Application-layer command, opaque to the runtime.
@@ -170,6 +178,34 @@ impl TokioNode {
                     (vec![pkt], true)
                 } else {
                     eprintln!("[rete] cmd: resource send failed (link {})", hex(&link_id));
+                    (vec![], true)
+                }
+            }
+            NodeCommand::CloseLink { link_id } => {
+                if let Some(outbound) = self.core.close_link(&link_id, rng) {
+                    eprintln!("[rete] cmd: closed link {}", hex(&link_id));
+                    (vec![outbound], true)
+                } else {
+                    eprintln!("[rete] cmd: close failed (link {})", hex(&link_id));
+                    (vec![], true)
+                }
+            }
+            NodeCommand::SendRequest {
+                link_id,
+                path,
+                payload,
+            } => {
+                if let Some((outbound, request_id)) =
+                    self.core.send_request(&link_id, &path, &payload, now, rng)
+                {
+                    eprintln!(
+                        "[rete] cmd: sent request on link {} (req_id={})",
+                        hex(&link_id),
+                        hex(&request_id)
+                    );
+                    (vec![outbound], true)
+                } else {
+                    eprintln!("[rete] cmd: request send failed");
                     (vec![], true)
                 }
             }

@@ -14,6 +14,10 @@ required-features = ["wifi"]
 name = "rete-esp32c6-serial"
 path = "src/bin/serial.rs"
 
+[[bin]]
+name = "rete-esp32c6-serial-test"
+path = "src/bin/serial_test.rs"
+
 [dependencies]
 # Rete crates (workspace path deps)
 rete-core    = { path = "../../crates/rete-core" }

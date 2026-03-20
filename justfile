@@ -532,10 +532,21 @@ build-esp32c6:
         --features esp32c6 --bin rete-esp32c6-serial \
         --target {{esp32c6_target}}
 
+# Build the ESP32-C6 test firmware (comprehensive handler)
+build-esp32c6-test:
+    cd {{esp32c6_dir}} && cargo +nightly build --release \
+        --features esp32c6 --bin rete-esp32c6-serial-test \
+        --target {{esp32c6_target}}
+
 # Flash the ESP32-C6 serial firmware
 flash-esp32c6: build-esp32c6
     espflash flash --port {{serial_port}} \
         {{esp32c6_dir}}/target/{{esp32c6_target}}/release/rete-esp32c6-serial
+
+# Flash the ESP32-C6 test firmware
+flash-esp32c6-test: build-esp32c6-test
+    espflash flash --port {{serial_port}} \
+        {{esp32c6_dir}}/target/{{esp32c6_target}}/release/rete-esp32c6-serial-test
 
 # Build the ESP32-C6 WiFi firmware
 build-esp32c6-wifi:
@@ -603,6 +614,113 @@ e2e-esp32c6: build-esp32c6
         echo "=== FAIL: expected DATA containing 'echo:$PING' ==="
         exit 1
     fi
+
+# --------------------------------------------------------------------------
+# ESP32-C6 hardware-in-the-loop tests (requires test firmware flashed)
+# --------------------------------------------------------------------------
+
+# ESP32 link test (ESP32 as responder, Topology A)
+test-esp32c6-link: flash-esp32c6-test
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python esp32c6_link_interop.py \
+        --rust-binary ../../target/debug/rete-linux \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 resource transfer test (Topology A)
+test-esp32c6-resource: flash-esp32c6-test
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python esp32c6_resource_interop.py \
+        --rust-binary ../../target/debug/rete-linux \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 proof of delivery test (Topology A)
+test-esp32c6-proof: flash-esp32c6-test
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python esp32c6_proof_interop.py \
+        --rust-binary ../../target/debug/rete-linux \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 link initiation test (ESP32 as initiator, Topology A)
+test-esp32c6-link-initiate: flash-esp32c6-test
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python esp32c6_link_initiate_interop.py \
+        --rust-binary ../../target/debug/rete-linux \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 Python announce exchange (Topology B via bridge)
+test-esp32c6-py-announce: flash-esp32c6-test
+    cd tests/interop && uv run python esp32c6_py_announce_interop.py \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 Python link test (Topology B via bridge)
+test-esp32c6-py-link: flash-esp32c6-test
+    cd tests/interop && uv run python esp32c6_py_link_interop.py \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 Python channel test (Topology B via bridge)
+test-esp32c6-py-channel: flash-esp32c6-test
+    cd tests/interop && uv run python esp32c6_py_channel_interop.py \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 Python data test (Topology B via bridge)
+test-esp32c6-py-data: flash-esp32c6-test
+    cd tests/interop && uv run python esp32c6_py_data_interop.py \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 request/response test (Topology A)
+test-esp32c6-request: flash-esp32c6-test
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python esp32c6_request_interop.py \
+        --rust-binary ../../target/debug/rete-linux \
+        --serial-port {{serial_port}} --timeout 30
+
+# ESP32 link teardown + slot reuse test (Topology A)
+test-esp32c6-teardown: flash-esp32c6-test
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python esp32c6_teardown_interop.py \
+        --rust-binary ../../target/debug/rete-linux \
+        --serial-port {{serial_port}} --timeout 30
+
+# Flash once, run all ESP32-C6 hardware tests (Topology A + B)
+test-esp32c6-all: flash-esp32c6-test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p rete-example-linux
+    echo "Waiting for ESP32 to boot..."
+    sleep 3
+    # Topology A tests (rete-linux <-> ESP32 serial): no-link first, then link tests with cleanup
+    TOPO_A=(proof link resource request teardown link_initiate)
+    # Topology B tests (Python RNS <-> ESP32 via serial bridge): no --rust-binary
+    TOPO_B=(py_announce py_data py_link py_channel)
+    PASS=0; FAIL=0
+    for t in "${TOPO_A[@]}"; do
+        echo ""
+        echo "=== esp32c6_${t}_interop (Topology A) ==="
+        if cd tests/interop && uv run python "esp32c6_${t}_interop.py" \
+            --rust-binary ../../target/debug/rete-linux \
+            --serial-port {{serial_port}} --timeout 30; then
+            PASS=$((PASS+1))
+        else
+            FAIL=$((FAIL+1))
+        fi
+        sleep 2
+        cd ../..
+    done
+    for t in "${TOPO_B[@]}"; do
+        echo ""
+        echo "=== esp32c6_${t}_interop (Topology B) ==="
+        if cd tests/interop && uv run python "esp32c6_${t}_interop.py" \
+            --serial-port {{serial_port}} --timeout 30; then
+            PASS=$((PASS+1))
+        else
+            FAIL=$((FAIL+1))
+        fi
+        sleep 2
+        cd ../..
+    done
+    echo ""
+    echo "=== ESP32 RESULTS: $PASS passed, $FAIL failed (${#TOPO_A[@]} Topology A + ${#TOPO_B[@]} Topology B) ==="
+    [ "$FAIL" -eq 0 ]
 
 # --------------------------------------------------------------------------
 # End-to-end test: ESP32-C6 <-> Python RNS reference over serial
