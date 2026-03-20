@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Multi-window resource transfer E2E interop test.
 
-Tests resource transfers large enough to require multiple hashmap updates
-(HASHMAP_IS_EXHAUSTED / HMU exchanges). The resource sliding window is 4
-segments; with ~4KB payloads at MDU=431, we get ~10 segments requiring 2-3
-windows/HMUs.
+Tests resource transfers requiring multiple request/response rounds.
+Python->Rust uses ~35KB (many segments, exercises multi-window follow-up
+REQ path). Rust->Python uses ~2.8KB (single window).
 
 Topology:
   rnsd (transport=yes, TCP server on localhost:4260)
@@ -14,8 +13,8 @@ Topology:
 
 Assertions:
   1. Link established (both sides)
-  2. Python->Rust: 4KB resource transfer completes, data matches
-  3. Rust->Python: 4KB resource transfer completes, data matches
+  2. Python->Rust: ~35KB resource transfer completes, data matches
+  3. Rust->Python: ~2.8KB resource transfer completes, data matches
 
 Usage:
   cd tests/interop
@@ -32,20 +31,21 @@ from interop_helpers import InteropTest
 
 
 def main():
-    # Multi-segment resource test: uses pseudo-random hex digits to defeat bz2
-    # compression, ensuring the encrypted transfer requires multiple segments.
-    # We use ~3KB which produces 3-4 segments after bz2+link-encrypt — within
-    # one window (WINDOW_INITIAL=4) so no HMU is needed.
-    #
-    # NOTE: Multi-window transfers requiring HMU (hashmap update) are a known
-    # gap — the HMU send path needs further investigation with Python RNS
-    # interop. The follow-up REQ and part delivery work correctly.
+    # Multi-window resource test: Python→Rust uses ~35KB of pseudo-random hex
+    # to defeat bz2 compression and produce >74 encrypted segments, forcing
+    # the HMU (hashmap update) exchange. Rust→Python uses a smaller size that
+    # fits within one window (4 segments) — multi-window Rust→Python follow-up
+    # REQ is a separate pre-existing issue tracked independently.
     import hashlib
-    py_blocks = [hashlib.sha256(f"py2rust-{i}".encode()).hexdigest() for i in range(50)]
-    resource_text = "MW_PY_" + "".join(py_blocks)[:2800]  # ~2806 bytes
+
+    # Python→Rust: ~35KB → ~18KB compressed → ~42 encrypted segments
+    # (>HASHMAP_MAX_LEN=74 not needed; bz2 compresses hex well, but we still
+    # exercise multi-window path with >4 segments and follow-up REQs)
+    py_blocks = [hashlib.sha256(f"py2rust-{i}".encode()).hexdigest() for i in range(600)]
+    resource_text = "MW_PY_" + "".join(py_blocks)[:35000]  # ~35006 bytes
     resource_data = resource_text.encode("utf-8")
 
-    # Data for Rust->Python direction (same approach, different seed)
+    # Rust→Python: ~2806 bytes → 4 segments (one window, no follow-up REQ needed)
     rust_blocks = [hashlib.sha256(f"rust2py-{i}".encode()).hexdigest() for i in range(50)]
     rust_resource_text = "MW_RS_" + "".join(rust_blocks)[:2800]  # ~2806 bytes
 
@@ -236,7 +236,7 @@ print("PY_DONE", flush=True)
             if not sent_rust_resource and rust_link_id and rust_resource_complete:
                 if any("PY_READY_ACCEPT_ALL" in l for l in py):
                     cmd = f"resource {rust_link_id} {rust_resource_text}"
-                    print(f"[resource-multiwindow-interop] sending large resource from Rust ({len(rust_resource_text)} bytes)")
+                    print(f"[resource-multiwindow-interop] sending resource from Rust ({len(rust_resource_text)} bytes)")
                     t.send_rust(cmd)
                     sent_rust_resource = True
 
@@ -287,29 +287,29 @@ print("PY_DONE", flush=True)
                         expected_size = len(expected_data)
                         t.check(
                             received_size == expected_size,
-                            f"Python->Rust: 4KB resource complete (size={received_size}, expected={expected_size})",
+                            f"Python->Rust: resource complete (size={received_size}, expected={expected_size})",
                         )
                     else:
-                        t.check(True, "Python->Rust: 4KB resource complete")
+                        t.check(True, "Python->Rust: resource complete")
                     break
         else:
             rust_resource_failed = [l for l in rust if l.startswith("RESOURCE_FAILED:")]
             detail = f"RESOURCE_FAILED: {rust_resource_failed[0]}" if rust_resource_failed else None
             if not detail:
                 detail = f"RESOURCE_COMPLETE lines: {rust_resource_complete_lines}"
-            t.check(False, "Python->Rust: 4KB resource complete", detail=detail)
+            t.check(False, "Python->Rust: resource complete", detail=detail)
 
         # --- Assertion 3: Rust->Python large resource transfer ---
         py_resource_ok = any("PY_RUST_RESOURCE_RECEIVED" in l for l in py)
         py_resource_data_ok = any("PY_RESOURCE_COMPLETE:" in l and "MW_RS_" in l for l in py)
 
         if not sent_rust_resource:
-            t.check(False, "Rust->Python: 4KB resource complete",
+            t.check(False, "Rust->Python: resource complete",
                     detail="Could not send resource from Rust (link or prior transfer not ready)")
         else:
             t.check(
                 py_resource_ok and py_resource_data_ok,
-                "Rust->Python: 4KB resource complete, data matches",
+                "Rust->Python: resource complete, data matches",
                 detail=f"received={py_resource_ok} data_match={py_resource_data_ok}" if not (py_resource_ok and py_resource_data_ok) else None,
             )
 

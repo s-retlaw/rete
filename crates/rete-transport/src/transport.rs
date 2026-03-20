@@ -423,12 +423,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 if let Some(lru_key) = self
                     .known_identities
                     .keys()
-                    .min_by_key(|k| {
-                        self.paths
-                            .get(*k)
-                            .map(|p| p.last_accessed)
-                            .unwrap_or(0)
-                    })
+                    .min_by_key(|k| self.paths.get(*k).map(|p| p.last_accessed).unwrap_or(0))
                     .copied()
                 {
                     self.known_identities.remove(&lru_key);
@@ -1347,7 +1342,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 // Send link-encrypted HMU so receiver gets hashes for next window.
                 if let Some(payload) = hmu_payload {
                     if let Some(link) = self.links.get(link_id) {
-                        if let Some(pkt) = Self::build_hmu_packet(link, link_id, &payload, rng) {
+                        if let Some(pkt) = Self::build_link_packet(
+                            link,
+                            link_id,
+                            &payload,
+                            CONTEXT_RESOURCE_HMU,
+                            rng,
+                        ) {
                             self.resource_outbound.push(pkt);
                         }
                     }
@@ -2003,56 +2004,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         Some(pkt_buf[..pkt_len].to_vec())
     }
 
-    /// Build a link-encrypted CONTEXT_RESOURCE_HMU packet.
-    fn build_hmu_packet<R: RngCore + CryptoRng>(
-        link: &crate::link::Link,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
-        payload: &[u8],
-        rng: &mut R,
-    ) -> Option<alloc::vec::Vec<u8>> {
-        let mut ct_buf = [0u8; rete_core::MTU];
-        let ct_len = link.encrypt(payload, rng, &mut ct_buf).ok()?;
-        let mut pkt_buf = [0u8; rete_core::MTU];
-        let pkt_len = PacketBuilder::new(&mut pkt_buf)
-            .packet_type(PacketType::Data)
-            .dest_type(DestType::Link)
-            .destination_hash(link_id)
-            .context(CONTEXT_RESOURCE_HMU)
-            .payload(&ct_buf[..ct_len])
-            .build()
-            .ok()?;
-        Some(pkt_buf[..pkt_len].to_vec())
-    }
-
-    /// Periodic resource maintenance: send HMU for sender resources that
-    /// still have unsent hashmap entries.
+    /// Periodic resource maintenance.
     ///
-    /// Only acts on resources in the `Transferring` state to avoid sending
-    /// HMUs for resources that are queued, awaiting proof, or complete.
-    pub fn tick_resources<R: RngCore + CryptoRng>(&mut self, rng: &mut R) {
-        if self.resources.is_empty() {
-            return;
-        }
-        // Collect pending HMU payloads to avoid borrow conflicts with self.links.
-        let mut pending = alloc::vec::Vec::new();
-        for res in self.resources.iter_mut() {
-            if res.is_sender
-                && res.state == crate::resource::ResourceState::Transferring
-                && res.has_pending_hashmap_entries()
-            {
-                if let Some(hmu_payload) = res.build_hashmap_update() {
-                    pending.push((res.link_id, hmu_payload));
-                }
-            }
-        }
-        // Build link-encrypted HMU packets.
-        for (link_id, payload) in pending {
-            if let Some(link) = self.links.get(&link_id) {
-                if let Some(pkt) = Self::build_hmu_packet(link, &link_id, &payload, rng) {
-                    self.resource_outbound.push(pkt);
-                }
-            }
-        }
+    /// Python doesn't proactively send HMU — it only sends in response to
+    /// RESOURCE_REQ with HASHMAP_IS_EXHAUSTED. The receiver retries via its
+    /// watchdog/timeout. Matching that behavior: no proactive HMU sending.
+    pub fn tick_resources<R: RngCore + CryptoRng>(&mut self, _rng: &mut R) {
+        // No-op: HMU is sent reactively in handle_resource_context() when
+        // the receiver's REQ signals HASHMAP_IS_EXHAUSTED.
     }
 
     /// Drain pending resource outbound packets.

@@ -585,9 +585,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             None => (Cow::Borrowed(data), false),
         };
 
-        let pkt =
-            self.transport
-                .start_resource(link_id, &send_data, data, is_compressed, rng)?;
+        let pkt = self
+            .transport
+            .start_resource(link_id, &send_data, data, is_compressed, rng)?;
         Some(OutboundPacket::broadcast(pkt))
     }
 
@@ -986,9 +986,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 }
                 // Bug A fix: Build follow-up RESOURCE_REQ if not all parts received
                 if current < total {
-                    if let Some(req_pkt) = self.transport.build_followup_request(
-                        &link_id, &resource_hash, rng,
-                    ) {
+                    if let Some(req_pkt) =
+                        self.transport
+                            .build_followup_request(&link_id, &resource_hash, rng)
+                    {
                         packets.push(OutboundPacket::broadcast(req_pkt));
                     }
                 }

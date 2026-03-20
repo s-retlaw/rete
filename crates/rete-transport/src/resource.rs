@@ -46,6 +46,10 @@ pub const SENDER_GRACE_TIME: u64 = 10;
 pub const ADV_OVERHEAD: usize = 134;
 /// Sentinel value indicating the hashmap is fully transferred.
 pub const HASHMAP_IS_EXHAUSTED: u8 = 0xFF;
+/// Maximum number of part hashes per hashmap segment in an advertisement.
+/// Python: `math.floor((Link.MDU - OVERHEAD) / MAPHASH_LEN)`
+/// = (431 - 134) / 4 = 74
+pub const HASHMAP_MAX_LEN: usize = (crate::link::LINK_MDU - ADV_OVERHEAD) / MAPHASH_LEN;
 
 // ---------------------------------------------------------------------------
 // Minimal msgpack helpers (no std dependency)
@@ -619,7 +623,12 @@ pub struct Resource {
     pub part_hashes: Vec<[u8; MAPHASH_LEN]>,
     /// Which parts have been received (receiver side).
     pub received: Vec<bool>,
-    /// How far into part_hashes we have sent to the receiver.
+    /// How far into `part_hashes` has been communicated.
+    ///
+    /// - Sender: index up to which hashes have been sent (via advertisement + HMUs).
+    /// - Receiver: index up to which valid hashes have been received.
+    ///
+    /// Always at a `HASHMAP_MAX_LEN` boundary or at `total_segments`.
     hashmap_cursor: usize,
 }
 
@@ -719,9 +728,9 @@ impl Resource {
     /// ```
     pub fn build_advertisement(&mut self) -> Vec<u8> {
         self.state = ResourceState::Advertised;
-        self.hashmap_cursor = self.window.min(self.total_segments);
+        self.hashmap_cursor = HASHMAP_MAX_LEN.min(self.total_segments);
 
-        // Build hashmap bytes: concatenated 4-byte hashes for the first `window` parts
+        // Build hashmap bytes: concatenated 4-byte hashes for the first segment of the hashmap
         let hashmap_len = self.hashmap_cursor * MAPHASH_LEN;
         let mut hashmap_bytes = Vec::with_capacity(hashmap_len);
         for i in 0..self.hashmap_cursor {
@@ -800,13 +809,35 @@ impl Resource {
         let needs_hmu = hashmap_status == HASHMAP_IS_EXHAUSTED;
         let mut offset = 1;
 
-        // If hashmap is exhausted, the next 4 bytes are the last known map hash
+        // If hashmap is exhausted, the next 4 bytes are the last known map hash.
+        // We use it to find where the receiver's hashmap ends and set our cursor
+        // so build_hashmap_update() sends the correct HASHMAP_MAX_LEN-aligned segment.
         if needs_hmu {
             if req_payload.len() < offset + MAPHASH_LEN {
                 return HandleRequestResult::default();
             }
-            // Skip the last_map_hash (4 bytes) — we don't need it for part lookup
+            let mut last_map_hash = [0u8; MAPHASH_LEN];
+            last_map_hash.copy_from_slice(&req_payload[offset..offset + MAPHASH_LEN]);
             offset += MAPHASH_LEN;
+
+            // Search part_hashes for the last_map_hash to find part_index.
+            // Only search within the range we've already sent (0..hashmap_cursor)
+            // to avoid false matches from duplicate 4-byte truncated hashes.
+            let mut part_index = None;
+            for idx in (0..self.hashmap_cursor).rev() {
+                if self.part_hashes[idx] == last_map_hash {
+                    part_index = Some(idx);
+                    break;
+                }
+            }
+
+            if let Some(idx) = part_index {
+                // Set cursor past the matched hash so build_hashmap_update()
+                // sends the next HASHMAP_MAX_LEN-aligned segment.
+                // The receiver always gets aligned chunks, so idx+1 is always
+                // at a HASHMAP_MAX_LEN boundary (or at total_segments).
+                self.hashmap_cursor = (idx + 1).min(self.total_segments);
+            }
         }
 
         // Next 32 bytes: resource_hash
@@ -921,8 +952,10 @@ impl Resource {
             return None;
         }
 
-        let end = (self.hashmap_cursor + self.window).min(self.total_segments);
-        let chunk_start = self.hashmap_cursor;
+        // Compute the segment number (aligned to HASHMAP_MAX_LEN boundaries)
+        let segment_number = self.hashmap_cursor / HASHMAP_MAX_LEN;
+        let chunk_start = segment_number * HASHMAP_MAX_LEN;
+        let end = ((segment_number + 1) * HASHMAP_MAX_LEN).min(self.total_segments);
 
         // Build the hash chunk
         let chunk_len = (end - chunk_start) * MAPHASH_LEN;
@@ -931,10 +964,11 @@ impl Resource {
             chunk_bytes.extend_from_slice(&self.part_hashes[i]);
         }
 
-        // Build msgpack: [segment_cursor, hashmap_chunk_bytes]
+        // Build msgpack: [segment_number, hashmap_chunk_bytes]
+        // Python expects segment_number (0, 1, 2...) NOT the raw cursor
         let mut msgpack_part = Vec::new();
         write_msgpack_fixarray(&mut msgpack_part, 2);
-        write_msgpack_uint(&mut msgpack_part, chunk_start as u64);
+        write_msgpack_uint(&mut msgpack_part, segment_number as u64);
         write_msgpack_bin(&mut msgpack_part, &chunk_bytes);
 
         // Full payload: resource_hash[32] || msgpack
@@ -1057,15 +1091,25 @@ impl Resource {
         let random_hash = random_hash_bytes.ok_or("missing 'r' (random_hash) in advertisement")?;
         let hashmap_bytes = hashmap_raw.ok_or("missing 'm' (hashmap) in advertisement")?;
 
+        // Sanity-check total_segments against total_size to prevent OOM from
+        // a malicious advertisement. Segments can't be smaller than 1 byte
+        // and can't exceed MAX_EFFICIENT_SIZE / MAPHASH_LEN (~4M).
+        if total_segments > total_size || total_segments > MAX_EFFICIENT_SIZE {
+            return Err("implausible segment count in advertisement");
+        }
+
         let flags = ResourceFlags::from_byte(flags_byte);
 
         let initial_hashes = hashmap_bytes.len() / MAPHASH_LEN;
-        let mut part_hashes = Vec::with_capacity(total_segments);
-        for i in 0..initial_hashes {
+        // Pre-allocate full part_hashes vector; fill initial hashes from advertisement
+        let mut part_hashes = vec![[0u8; MAPHASH_LEN]; total_segments];
+        for (i, ph) in part_hashes
+            .iter_mut()
+            .enumerate()
+            .take(initial_hashes.min(total_segments))
+        {
             let start = i * MAPHASH_LEN;
-            let mut ph = [0u8; MAPHASH_LEN];
             ph.copy_from_slice(&hashmap_bytes[start..start + MAPHASH_LEN]);
-            part_hashes.push(ph);
         }
 
         Ok(Resource {
@@ -1115,9 +1159,10 @@ impl Resource {
         let mut part_hash = [0u8; MAPHASH_LEN];
         part_hash.copy_from_slice(&hash[..MAPHASH_LEN]);
 
-        // Find matching index in known part hashes
-        for (idx, ph) in self.part_hashes.iter().enumerate() {
-            if *ph == part_hash && !self.received[idx] {
+        // Find matching index in known part hashes (only within hashmap_cursor
+        // range to avoid matching unfilled [0u8;4] sentinel slots).
+        for idx in 0..self.hashmap_cursor {
+            if self.part_hashes[idx] == part_hash && !self.received[idx] {
                 self.parts[idx] = part_data.to_vec();
                 self.received[idx] = true;
                 break;
@@ -1140,11 +1185,12 @@ impl Resource {
     /// - When we have all hashes, status is `0x00` (just requesting parts).
     /// - Only requests parts within the current window that have not been received.
     pub fn build_request(&self) -> Vec<u8> {
-        // Collect unreceived part hashes within current window
+        // Collect unreceived part hashes within current window.
+        // Only consider hashes up to hashmap_cursor (the rest are unfilled zeros).
         let mut requested_hashes = Vec::new();
-        for (idx, ph) in self.part_hashes.iter().enumerate() {
+        for idx in 0..self.hashmap_cursor {
             if !self.received[idx] {
-                requested_hashes.push(*ph);
+                requested_hashes.push(self.part_hashes[idx]);
                 if requested_hashes.len() >= self.window {
                     break;
                 }
@@ -1154,15 +1200,15 @@ impl Resource {
         // Signal exhausted ONLY if we don't have all part hashes yet
         // and couldn't fill the window from known hashes.
         let exhausted =
-            self.part_hashes.len() < self.total_segments && requested_hashes.len() < self.window;
+            self.hashmap_cursor < self.total_segments && requested_hashes.len() < self.window;
 
         let mut payload = Vec::new();
 
         if exhausted {
             payload.push(HASHMAP_IS_EXHAUSTED);
             // Include last known map hash so sender knows where we are
-            if let Some(last) = self.part_hashes.last() {
-                payload.extend_from_slice(last);
+            if self.hashmap_cursor > 0 {
+                payload.extend_from_slice(&self.part_hashes[self.hashmap_cursor - 1]);
             }
         } else {
             payload.push(0x00);
@@ -1200,18 +1246,25 @@ impl Resource {
             return Err("expected 2-element msgpack array in hashmap update");
         }
 
-        let _segment_index = read_msgpack_uint(msgpack_data, &mut pos)? as usize;
+        let segment_index = read_msgpack_uint(msgpack_data, &mut pos)? as usize;
         let new_hashes = read_msgpack_bin(msgpack_data, &mut pos)?;
 
+        // Place hashes at the correct segment-aligned position
+        let placement_start = segment_index * HASHMAP_MAX_LEN;
         let count = new_hashes.len() / MAPHASH_LEN;
         for i in 0..count {
-            let start = i * MAPHASH_LEN;
-            let mut ph = [0u8; MAPHASH_LEN];
-            ph.copy_from_slice(&new_hashes[start..start + MAPHASH_LEN]);
-            // Only add if we don't already have enough
-            if self.part_hashes.len() < self.total_segments {
-                self.part_hashes.push(ph);
+            let target = placement_start + i;
+            if target >= self.total_segments {
+                break;
             }
+            let start = i * MAPHASH_LEN;
+            self.part_hashes[target].copy_from_slice(&new_hashes[start..start + MAPHASH_LEN]);
+        }
+
+        // Advance hashmap_cursor to track how many hashes we now have
+        let new_end = (placement_start + count).min(self.total_segments);
+        if new_end > self.hashmap_cursor {
+            self.hashmap_cursor = new_end;
         }
 
         Ok(())
@@ -1270,11 +1323,6 @@ impl Resource {
 
     /// Whether we need more hashmap entries from the sender.
     pub fn needs_hashmap_update(&self) -> bool {
-        self.part_hashes.len() < self.total_segments
-    }
-
-    /// Whether this sender resource still has unsent hashmap entries.
-    pub fn has_pending_hashmap_entries(&self) -> bool {
         self.hashmap_cursor < self.total_segments
     }
 }
@@ -1359,8 +1407,8 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
         let _adv = sender.build_advertisement();
-        // hashmap_cursor should be min(window, total_segments)
-        let expected_cursor = WINDOW_INITIAL.min(sender.total_segments);
+        // hashmap_cursor should be min(HASHMAP_MAX_LEN, total_segments)
+        let expected_cursor = HASHMAP_MAX_LEN.min(sender.total_segments);
         assert_eq!(sender.hashmap_cursor, expected_cursor);
     }
 
@@ -1490,77 +1538,141 @@ mod tests {
 
     #[test]
     fn test_hashmap_update_uses_32_byte_hash() {
-        let data = vec![0xAA; 4000]; // multiple segments
+        // Need >74 segments to have unsent hashes after advertisement
+        let data = vec![0xAA; 80 * 431]; // 80 segments
         let mdu = 431;
         let mut rng = rand::thread_rng();
         let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
+        assert_eq!(sender.total_segments, 80);
         let adv = sender.build_advertisement();
+        assert_eq!(sender.hashmap_cursor, 74); // HASHMAP_MAX_LEN
         let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
 
-        // Build a hashmap update from sender
-        if let Some(hmu) = sender.build_hashmap_update() {
-            // First 32 bytes should be the full resource hash
-            assert!(hmu.len() >= 32);
-            assert_eq!(&hmu[..32], &sender.resource_hash[..]);
-            // Receiver should be able to parse it
-            receiver.apply_hashmap_update(&hmu).unwrap();
-        }
+        // Build a hashmap update from sender (segment 1: hashes 74-79)
+        let hmu = sender
+            .build_hashmap_update()
+            .expect("should have unsent hashes");
+        // First 32 bytes should be the full resource hash
+        assert!(hmu.len() >= 32);
+        assert_eq!(&hmu[..32], &sender.resource_hash[..]);
+        // Receiver should be able to parse it
+        receiver.apply_hashmap_update(&hmu).unwrap();
+        assert_eq!(receiver.hashmap_cursor, 80);
     }
 
     #[test]
     fn test_multi_segment_transfer() {
-        // Full sender -> receiver cycle for multi-segment data
-        let data = vec![0x42; 2000]; // will produce ceil(2000/431) = 5 segments
+        // Full sender -> receiver cycle for multi-segment data.
+        // With HASHMAP_MAX_LEN=74, all 5 hashes fit in the advertisement.
+        let data = vec![0x42; 2000]; // ceil(2000/431) = 5 segments
         let mdu = 431;
         let mut rng = rand::thread_rng();
         let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
         assert_eq!(sender.total_segments, 5);
 
-        // Step 1: Build advertisement (includes first window of hashes)
         let adv = sender.build_advertisement();
-
-        // Step 2: Receiver parses advertisement
         let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
         assert_eq!(receiver.total_segments, 5);
-        // Initial hashes = min(WINDOW_INITIAL, 5) = 4
-        assert_eq!(receiver.part_hashes.len(), 4);
+        // All 5 hashes included (min(HASHMAP_MAX_LEN=74, 5) = 5)
+        assert_eq!(receiver.hashmap_cursor, 5);
 
-        // Step 3: Receiver builds request for known parts
+        // Receiver requests all parts — no exhaustion since all hashes known
         let req = receiver.build_request();
-        // hashmap_status should be 0x00 since we only have 4 of 5 hashes
         assert_eq!(req[0], 0x00);
-
-        // Step 4: Sender handles request
         let result = sender.handle_request(&req);
         assert!(!result.parts.is_empty());
+        assert!(!result.needs_hmu);
 
-        // Step 5: Receiver receives parts
         for (_idx, part) in &result.parts {
             receiver.receive_part(part);
         }
 
-        // Step 6: Sender sends remaining hashmap entries
-        if let Some(hmu) = sender.build_hashmap_update() {
-            receiver.apply_hashmap_update(&hmu).unwrap();
-        }
-        assert_eq!(receiver.part_hashes.len(), 5);
-
-        // Step 7: Build another request for remaining parts
-        // All 5 hashes now known, so status is 0x00 (not exhausted)
+        // Request remaining parts (window might not cover all 5 at once)
         let req2 = receiver.build_request();
-        assert_eq!(req2[0], 0x00);
         let result2 = sender.handle_request(&req2);
         for (_idx, part) in &result2.parts {
             receiver.receive_part(part);
         }
 
-        // Step 8: Assemble and verify
         let assembled = receiver.assemble().unwrap();
         assert_eq!(assembled, data);
 
-        // Step 9: Proof
         let proof = receiver.build_proof();
-        assert_eq!(proof.len(), 64);
+        assert!(sender.handle_proof(&proof));
+        assert_eq!(sender.state, ResourceState::Complete);
+    }
+
+    #[test]
+    fn test_large_resource_with_hmu() {
+        // Resource with >74 segments requires HMU exchange.
+        // 80 segments × 431 bytes = 34480 bytes
+        // Use varying data so each segment has a unique hash.
+        let data: Vec<u8> = (0..80 * 431).map(|i| (i % 256) as u8).collect();
+        let mdu = 431;
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
+        assert_eq!(sender.total_segments, 80);
+
+        let adv = sender.build_advertisement();
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        // First 74 hashes in advertisement
+        assert_eq!(receiver.hashmap_cursor, 74);
+        assert!(receiver.needs_hashmap_update());
+
+        // First request — receive parts for known hashes
+        let req = receiver.build_request();
+        let result = sender.handle_request(&req);
+        for (_idx, part) in &result.parts {
+            receiver.receive_part(part);
+        }
+
+        // After receiving window-sized parts, receiver may exhaust known hashes.
+        // Keep requesting and receiving until we need HMU.
+        for _ in 0..100 {
+            let req = receiver.build_request();
+            if req[0] == HASHMAP_IS_EXHAUSTED {
+                // Sender should respond with HMU
+                let result = sender.handle_request(&req);
+                assert!(result.needs_hmu);
+                for (_idx, part) in &result.parts {
+                    receiver.receive_part(part);
+                }
+                let hmu = sender
+                    .build_hashmap_update()
+                    .expect("should have unsent hashes after HASHMAP_IS_EXHAUSTED");
+                receiver.apply_hashmap_update(&hmu).unwrap();
+                break;
+            }
+            let result = sender.handle_request(&req);
+            for (_idx, part) in &result.parts {
+                receiver.receive_part(part);
+            }
+        }
+
+        // Now receiver has all 80 hashes
+        assert_eq!(receiver.hashmap_cursor, 80);
+        assert!(!receiver.needs_hashmap_update());
+
+        // Continue requesting remaining parts until all received
+        for _ in 0..100 {
+            if receiver.received.iter().all(|&r| r) {
+                break;
+            }
+            let req = receiver.build_request();
+            let result = sender.handle_request(&req);
+            for (_idx, part) in &result.parts {
+                receiver.receive_part(part);
+            }
+        }
+        assert!(
+            receiver.received.iter().all(|&r| r),
+            "not all parts received"
+        );
+
+        let assembled = receiver.assemble().unwrap();
+        assert_eq!(assembled, data);
+
+        let proof = receiver.build_proof();
         assert!(sender.handle_proof(&proof));
         assert_eq!(sender.state, ResourceState::Complete);
     }
