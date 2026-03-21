@@ -903,6 +903,7 @@ version = "0.1.0"
 dependencies = [
  "bzip2",
  "hex",
+ "hkdf",
  "rand",
  "rand_core",
  "rete-core",

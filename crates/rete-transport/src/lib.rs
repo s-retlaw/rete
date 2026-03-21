@@ -24,7 +24,9 @@ pub mod resource;
 pub mod snapshot;
 pub mod transport;
 
-pub use announce::{validate_announce, AnnounceError, AnnounceInfo, PendingAnnounce};
+pub use announce::{
+    validate_announce, AnnounceError, AnnounceInfo, PendingAnnounce, RATCHET_KEY_LEN,
+};
 pub use buffer::{StreamBuffer, StreamDataMessage};
 pub use channel::{
     Channel, ChannelEnvelope, DEFAULT_WINDOW, ENVELOPE_HEADER_SIZE, MSG_TYPE_STREAM,
@@ -34,7 +36,7 @@ pub use link::{
     compute_link_id, signalling_bytes, Link, LinkRole, LinkState, TeardownReason, LINK_MDU,
     LINK_MTU_SIZE,
 };
-pub use path::Path;
+pub use path::{InterfaceMode, Path, PATH_EXPIRES_AP, PATH_EXPIRES_ROAMING};
 pub use receipt::{PacketReceipt, ReceiptStatus, ReceiptTable};
 pub use request::{
     build_request, build_response, parse_request, parse_response, path_hash, request_id,

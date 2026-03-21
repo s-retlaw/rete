@@ -1474,6 +1474,17 @@ fn on_node_event(event: NodeEvent) {
                 eprintln!("[rete] tick: expired {expired_paths} paths");
             }
         }
+        NodeEvent::LinkIdentified {
+            link_id,
+            identity_hash,
+            ..
+        } => {
+            eprintln!(
+                "[rete] link {} identified: peer {}",
+                hex::encode(&link_id[..4]),
+                hex::encode(&identity_hash[..4])
+            );
+        }
     }
     // Flush stdout so piped readers (test harnesses) see output immediately.
     use std::io::Write;

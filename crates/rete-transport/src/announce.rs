@@ -6,8 +6,14 @@ use alloc::vec::Vec;
 use rete_core::{NAME_HASH_LEN, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
 
-/// Minimum announce payload: pub_key(64) + name_hash(10) + random_hash(10) + signature(64) = 148.
+/// Minimum announce payload without ratchet: pub_key(64) + name_hash(10) + random_hash(10) + signature(64) = 148.
 pub const MIN_ANNOUNCE_PAYLOAD: usize = 148;
+
+/// Minimum announce payload with ratchet (context_flag=1): pub_key(64) + name_hash(10) + random_hash(10) + ratchet(32) + signature(64) = 180.
+pub const MIN_RATCHET_ANNOUNCE_PAYLOAD: usize = 180;
+
+/// Size of an X25519 ratchet public key in bytes.
+pub const RATCHET_KEY_LEN: usize = 32;
 
 /// Validated announce information extracted from a packet payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,19 +28,22 @@ pub struct AnnounceInfo<'a> {
     pub random_hash: &'a [u8],
     /// 64-byte Ed25519 signature.
     pub signature: &'a [u8],
+    /// Optional 32-byte X25519 ratchet public key (present when context_flag=1).
+    pub ratchet: Option<&'a [u8]>,
     /// Optional application data (after signature in payload).
     pub app_data: Option<&'a [u8]>,
 }
 
 /// Validate an announce packet's payload.
 ///
-/// Extracts the public key, name hash, random hash, and signature from the
-/// announce payload. Verifies the Ed25519 signature and recomputes the
-/// destination hash to ensure consistency.
+/// Extracts the public key, name hash, random hash, optional ratchet key,
+/// and signature from the announce payload. Verifies the Ed25519 signature
+/// and recomputes the destination hash to ensure consistency.
 ///
 /// # Arguments
 /// - `dest_hash` — the 16-byte destination hash from the packet header
 /// - `payload` — the announce payload bytes (starting after the context byte)
+/// - `context_flag` — when true, a 32-byte ratchet key is present at payload[84..116]
 ///
 /// # Returns
 /// `Ok(AnnounceInfo)` if the announce is cryptographically valid.
@@ -46,17 +55,36 @@ pub struct AnnounceInfo<'a> {
 pub fn validate_announce<'a>(
     dest_hash: &[u8],
     payload: &'a [u8],
+    context_flag: bool,
 ) -> Result<AnnounceInfo<'a>, AnnounceError> {
-    if payload.len() < MIN_ANNOUNCE_PAYLOAD {
+    // When context_flag is set, 32 ratchet bytes are present after random_hash
+    let min_len = if context_flag {
+        MIN_RATCHET_ANNOUNCE_PAYLOAD
+    } else {
+        MIN_ANNOUNCE_PAYLOAD
+    };
+    if payload.len() < min_len {
         return Err(AnnounceError::PayloadTooShort);
     }
 
     let pub_key = &payload[0..64];
     let name_hash = &payload[64..74];
     let random_hash = &payload[74..84];
-    let signature = &payload[84..148];
-    let app_data = if payload.len() > 148 {
-        Some(&payload[148..])
+
+    let (ratchet, signature, app_data_start) = if context_flag {
+        // Ratchet at [84..116], signature at [116..180], app_data at [180..]
+        (
+            Some(&payload[84..116]),
+            &payload[116..180],
+            180usize,
+        )
+    } else {
+        // No ratchet, signature at [84..148], app_data at [148..]
+        (None, &payload[84..148], 148usize)
+    };
+
+    let app_data = if payload.len() > app_data_start {
+        Some(&payload[app_data_start..])
     } else {
         None
     };
@@ -77,8 +105,7 @@ pub fn validate_announce<'a>(
         return Err(AnnounceError::DestHashMismatch);
     }
 
-    // Build signed_data: dest_hash || pub_key || name_hash || random_hash [|| app_data]
-    // Max: 16 + 64 + 10 + 10 + (MTU - 148) ≈ 452
+    // Build signed_data: dest_hash || pub_key || name_hash || random_hash [|| ratchet] [|| app_data]
     let mut signed_data = [0u8; rete_core::MTU];
     let mut pos = 0;
     signed_data[pos..pos + TRUNCATED_HASH_LEN].copy_from_slice(&computed_dest);
@@ -89,6 +116,10 @@ pub fn validate_announce<'a>(
     pos += NAME_HASH_LEN;
     signed_data[pos..pos + 10].copy_from_slice(random_hash);
     pos += 10;
+    if let Some(r) = ratchet {
+        signed_data[pos..pos + RATCHET_KEY_LEN].copy_from_slice(r);
+        pos += RATCHET_KEY_LEN;
+    }
     if let Some(ad) = app_data {
         signed_data[pos..pos + ad.len()].copy_from_slice(ad);
         pos += ad.len();
@@ -107,6 +138,7 @@ pub fn validate_announce<'a>(
         name_hash,
         random_hash,
         signature,
+        ratchet,
         app_data,
     })
 }
@@ -142,12 +174,18 @@ pub struct PendingAnnounce {
     pub dest_hash: [u8; TRUNCATED_HASH_LEN],
     /// Complete raw packet bytes (header + payload).
     pub raw: Vec<u8>,
-    /// Number of times transmitted so far.
+    /// Number of times transmitted so far (retries).
     pub tx_count: u8,
-    /// Timestamp of last transmission (monotonic seconds).
-    pub last_tx_at: u64,
+    /// Timestamp when retransmission is due (monotonic seconds).
+    pub retransmit_timeout: u64,
     /// Whether this is a local announce (not a retransmission).
     pub local: bool,
+    /// Number of times we've heard our own rebroadcast at the same hop count.
+    pub local_rebroadcasts: u8,
+    /// If true, suppress further retransmissions (path response or local rebroadcast limit reached).
+    pub block_rebroadcasts: bool,
+    /// Hop count at which this announce was received (for rebroadcast detection).
+    pub received_hops: u8,
 }
 
 #[cfg(test)]
@@ -168,7 +206,7 @@ mod tests {
         let dest_hash = unhex("2b7fa6842783252974dc5fcaff22b808");
         let payload = unhex("80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f10050fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205");
 
-        let info = validate_announce(&dest_hash, &payload).unwrap();
+        let info = validate_announce(&dest_hash, &payload, false).unwrap();
         assert_eq!(
             info.identity_hash,
             unhex("fd9f121e293bf4a415dd74366ff75f69").as_slice()
@@ -181,7 +219,7 @@ mod tests {
         let dest_hash = unhex("2b7fa6842783252974dc5fcaff22b808");
         let payload = unhex("80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f1006950faa92732c50c127e4101ee07eff43657b7a0f72d5841c53eb146d1c2b79ed287fbdd16b0f80549e86777fe1a971109c8137492519c63a6f22803e91bfb096e6f64653a73656e736f723a6f7574646f6f723a7631");
 
-        let info = validate_announce(&dest_hash, &payload).unwrap();
+        let info = validate_announce(&dest_hash, &payload, false).unwrap();
         assert_eq!(info.app_data.unwrap(), b"node:sensor:outdoor:v1");
     }
 
@@ -190,7 +228,7 @@ mod tests {
         let dest_hash = unhex("22da01f03d8c743d2483fce46f093bf5");
         let payload = unhex("9c5ea4c9ed8f7f3559c32f8e563507724748e3d1c3eafd6ce1752920eeb325711abf893af86c64a5e23b9cd3904ef689ac228b31f272941367a4ac9c93410416fca709a4818d4e0c78a00000000000006553f100311fcc6eaa3af38005714bfad1d792aed129f9cb9ad1a798116a7db2c6d432610ea238ccc170deee66f84de7c9692c36bffdf5649e48aae01c00b41a41c7d60c");
 
-        let info = validate_announce(&dest_hash, &payload).unwrap();
+        let info = validate_announce(&dest_hash, &payload, false).unwrap();
         assert_eq!(
             info.identity_hash,
             unhex("236d5c3f7d7a9ca0388ca355cb71080b").as_slice()
@@ -204,7 +242,7 @@ mod tests {
         let mut payload = unhex("80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f10050fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205");
         payload[84] ^= 0xFF; // corrupt signature
         assert_eq!(
-            validate_announce(&dest_hash, &payload),
+            validate_announce(&dest_hash, &payload, false),
             Err(AnnounceError::InvalidSignature)
         );
     }
@@ -214,7 +252,7 @@ mod tests {
         let dest_hash = unhex("0000000000000000000000000000dead");
         let payload = unhex("80ffd69d6399c09c790748a2783b9bd5198652b2e14d496eaf4d29ce06a0ea0fa175c596dc0558fd271c185e89f2c85f8bc490c0e7dd25da0b0142246da9628ffca709a4818d4e0c78a00000000000006553f10050fe696f35b4fc3c4e43e2269372ae2b603ac90dd64757c8ac224bb80f0cabd4e2863f7bc593cd3a785d360ba48485fad67a39617880214dd16086c6e53d8205");
         assert_eq!(
-            validate_announce(&dest_hash, &payload),
+            validate_announce(&dest_hash, &payload, false),
             Err(AnnounceError::DestHashMismatch)
         );
     }
@@ -223,7 +261,7 @@ mod tests {
     fn validate_announce_too_short() {
         let dest_hash = unhex("2b7fa6842783252974dc5fcaff22b808");
         assert_eq!(
-            validate_announce(&dest_hash, &[0u8; 100]),
+            validate_announce(&dest_hash, &[0u8; 100], false),
             Err(AnnounceError::PayloadTooShort)
         );
     }

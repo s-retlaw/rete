@@ -422,6 +422,21 @@ test-all:
     run_e2e KEEPALIVE keepalive_interop.py
     run_e2e STABILITY stability_interop.py
 
+    # Hardening (10)
+    run_e2e LINKSTALE link_stale_interop.py
+    run_e2e LINKCYCLE link_cycle_interop.py
+    run_e2e DATAINTEG data_integrity_interop.py
+    run_e2e MTUBOUND mtu_boundary_interop.py
+    run_e2e MALANN malformed_announce_interop.py
+    run_e2e ANNFLOOD announce_flood_interop.py
+    run_e2e CHANORDER channel_ordering_interop.py
+    run_e2e CONCTRAF concurrent_traffic_interop.py
+    run_e2e PATHEXP path_expiry_interop.py
+    run_e2e RESCANCEL resource_cancel_interop.py
+    run_e2e RESLARGE resource_large_interop.py
+    run_e2e MIXSTRESS mixed_stress_interop.py
+    run_e2e PROOFCHAIN proof_chain_interop.py
+
     # --- Combined summary ---
     echo ""
     echo "═══════════════════════════════════════════════════"
@@ -490,6 +505,20 @@ test-all:
     echo "    Long-running:"
     printf "  %-30s %s passed, %s failed\n" "keepalive-interop" "$KEEPALIVE_PASS" "$KEEPALIVE_FAIL"
     printf "  %-30s %s passed, %s failed\n" "stability-interop" "$STABILITY_PASS" "$STABILITY_FAIL"
+    echo "    Hardening:"
+    printf "  %-30s %s passed, %s failed\n" "link-stale-interop" "$LINKSTALE_PASS" "$LINKSTALE_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "link-cycle-interop" "$LINKCYCLE_PASS" "$LINKCYCLE_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "data-integrity-interop" "$DATAINTEG_PASS" "$DATAINTEG_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "mtu-boundary-interop" "$MTUBOUND_PASS" "$MTUBOUND_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "malformed-announce-interop" "$MALANN_PASS" "$MALANN_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "announce-flood-interop" "$ANNFLOOD_PASS" "$ANNFLOOD_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "channel-ordering-interop" "$CHANORDER_PASS" "$CHANORDER_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "concurrent-traffic-interop" "$CONCTRAF_PASS" "$CONCTRAF_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "path-expiry-interop" "$PATHEXP_PASS" "$PATHEXP_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "resource-cancel-interop" "$RESCANCEL_PASS" "$RESCANCEL_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "resource-large-interop" "$RESLARGE_PASS" "$RESLARGE_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "mixed-stress-interop" "$MIXSTRESS_PASS" "$MIXSTRESS_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "proof-chain-interop" "$PROOFCHAIN_PASS" "$PROOFCHAIN_FAIL"
     E2E_PASS=$((LIVE_PASS + LINK_PASS + CHANNEL_PASS + RELAY_PASS + PATHREQ_PASS + PROOF_PASS + ROBUSTNESS_PASS \
         + LINKINIT_PASS + LINKRELAY_PASS + LINKRUSTRELAY_PASS + LINKINITRELAY_PASS + LINKBURST_PASS + CONCURRENT_PASS + TEARDOWN_PASS \
         + IFAC_PASS + IFACMISMATCH_PASS + IFACRELAY_PASS + IFACLINK_PASS + IFACLARGE_PASS \
@@ -500,7 +529,10 @@ test-all:
         + LXMFOPP_PASS + LXMFDIR_PASS + LXMFBIDI_PASS + LXMFPROP_PASS + LXMFSF_PASS + LXMFAF_PASS + LXMFRET_PASS \
         + TCPDISC_PASS + HDLC_PASS \
         + RESOURCE_PASS + RESCONCUR_PASS + RESMULTI_PASS \
-        + KEEPALIVE_PASS + STABILITY_PASS))
+        + KEEPALIVE_PASS + STABILITY_PASS \
+        + LINKSTALE_PASS + LINKCYCLE_PASS + DATAINTEG_PASS + MTUBOUND_PASS + MALANN_PASS + ANNFLOOD_PASS \
+        + CHANORDER_PASS + CONCTRAF_PASS + PATHEXP_PASS + RESCANCEL_PASS \
+        + RESLARGE_PASS + MIXSTRESS_PASS + PROOFCHAIN_PASS))
     E2E_FAIL=$((LIVE_FAIL + LINK_FAIL + CHANNEL_FAIL + RELAY_FAIL + PATHREQ_FAIL + PROOF_FAIL + ROBUSTNESS_FAIL \
         + LINKINIT_FAIL + LINKRELAY_FAIL + LINKRUSTRELAY_FAIL + LINKINITRELAY_FAIL + LINKBURST_FAIL + CONCURRENT_FAIL + TEARDOWN_FAIL \
         + IFAC_FAIL + IFACMISMATCH_FAIL + IFACRELAY_FAIL + IFACLINK_FAIL + IFACLARGE_FAIL \
@@ -511,9 +543,12 @@ test-all:
         + LXMFOPP_FAIL + LXMFDIR_FAIL + LXMFBIDI_FAIL + LXMFPROP_FAIL + LXMFSF_FAIL + LXMFAF_FAIL + LXMFRET_FAIL \
         + TCPDISC_FAIL + HDLC_FAIL \
         + RESOURCE_FAIL + RESCONCUR_FAIL + RESMULTI_FAIL \
-        + KEEPALIVE_FAIL + STABILITY_FAIL))
+        + KEEPALIVE_FAIL + STABILITY_FAIL \
+        + LINKSTALE_FAIL + LINKCYCLE_FAIL + DATAINTEG_FAIL + MTUBOUND_FAIL + MALANN_FAIL + ANNFLOOD_FAIL \
+        + CHANORDER_FAIL + CONCTRAF_FAIL + PATHEXP_FAIL + RESCANCEL_FAIL \
+        + RESLARGE_FAIL + MIXSTRESS_FAIL + PROOFCHAIN_FAIL))
     echo ""
-    printf "  %-30s %s passed, %s failed\n" "e2e total (45 suites)" "$E2E_PASS" "$E2E_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "e2e total (58 suites)" "$E2E_PASS" "$E2E_FAIL"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))

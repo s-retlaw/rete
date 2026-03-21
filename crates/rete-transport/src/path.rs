@@ -5,6 +5,22 @@ extern crate alloc;
 use alloc::vec::Vec;
 use rete_core::TRUNCATED_HASH_LEN;
 
+/// Interface mode — determines path expiry timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterfaceMode {
+    /// Default mode: 7-day path expiry.
+    Default,
+    /// Access Point mode: 1-day path expiry.
+    AccessPoint,
+    /// Roaming mode: 6-hour path expiry.
+    Roaming,
+}
+
+/// Path expiry time for AccessPoint mode (1 day).
+pub const PATH_EXPIRES_AP: u64 = 86400;
+/// Path expiry time for Roaming mode (6 hours).
+pub const PATH_EXPIRES_ROAMING: u64 = 21600;
+
 /// A learned path to a destination.
 #[derive(Debug, Clone)]
 pub struct Path {
@@ -20,6 +36,8 @@ pub struct Path {
     pub hops: u8,
     /// Cached raw announce packet (for path request responses).
     pub announce_raw: Option<Vec<u8>>,
+    /// Interface mode this path was learned on.
+    pub interface_mode: InterfaceMode,
 }
 
 impl Path {
@@ -32,6 +50,7 @@ impl Path {
             last_snr: 0,
             hops: 1,
             announce_raw: None,
+            interface_mode: InterfaceMode::Default,
         }
     }
 
@@ -44,6 +63,16 @@ impl Path {
             last_snr: 0,
             hops,
             announce_raw: None,
+            interface_mode: InterfaceMode::Default,
+        }
+    }
+
+    /// Get the path expiry duration based on interface mode.
+    pub fn expiry_time(&self) -> u64 {
+        match self.interface_mode {
+            InterfaceMode::Default => super::transport::PATH_EXPIRES,
+            InterfaceMode::AccessPoint => PATH_EXPIRES_AP,
+            InterfaceMode::Roaming => PATH_EXPIRES_ROAMING,
         }
     }
 }

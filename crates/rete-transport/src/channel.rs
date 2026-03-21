@@ -24,6 +24,18 @@ pub const MSG_TYPE_STREAM: u16 = 0xFF00;
 /// Default channel window size.
 pub const DEFAULT_WINDOW: u16 = 4;
 
+/// Minimum channel window size.
+pub const WINDOW_MIN: u16 = 2;
+
+/// Maximum channel window size (Python: 48 for fast links).
+pub const WINDOW_MAX: u16 = 48;
+
+/// Fast RTT threshold in milliseconds (< 25ms = fast link).
+pub const FAST_RTT_MS: u64 = 25;
+
+/// Medium RTT threshold in milliseconds (< 250ms = medium link).
+pub const MEDIUM_RTT_MS: u64 = 250;
+
 /// Maximum retries before teardown.
 pub const MAX_RETRIES: u8 = 5;
 
@@ -99,6 +111,8 @@ pub struct Channel {
     retry_timeout: u64,
     /// Whether the channel should be torn down.
     pub teardown: bool,
+    /// Smoothed RTT in milliseconds (0 = not measured yet).
+    rtt_ms: u64,
 }
 
 impl Default for Channel {
@@ -119,7 +133,39 @@ impl Channel {
             window: DEFAULT_WINDOW,
             retry_timeout: 15,
             teardown: false,
+            rtt_ms: 0,
         }
+    }
+
+    /// Update the RTT estimate and adapt window size accordingly.
+    ///
+    /// Matches Python's RTT classification: fast (<25ms → window 48),
+    /// medium (<250ms → window 16), slow (→ window 4).
+    pub fn update_rtt(&mut self, rtt_ms: u64) {
+        // Exponential moving average
+        if self.rtt_ms == 0 {
+            self.rtt_ms = rtt_ms;
+        } else {
+            self.rtt_ms = (self.rtt_ms * 7 + rtt_ms) / 8;
+        }
+
+        // Adapt window based on RTT classification
+        self.window = if self.rtt_ms < FAST_RTT_MS {
+            WINDOW_MAX
+        } else if self.rtt_ms < MEDIUM_RTT_MS {
+            16
+        } else {
+            DEFAULT_WINDOW
+        };
+
+        // Adapt retry timeout: max(rtt * 2.5, 25ms) converted to seconds, minimum 2s
+        let timeout_ms = core::cmp::max(self.rtt_ms * 5 / 2, 25);
+        self.retry_timeout = core::cmp::max(timeout_ms / 1000, 2);
+    }
+
+    /// Get the current smoothed RTT in milliseconds.
+    pub fn rtt_ms(&self) -> u64 {
+        self.rtt_ms
     }
 
     /// Queue a message for sending. Returns the packed envelope bytes,

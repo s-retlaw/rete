@@ -65,8 +65,9 @@ pub enum TeardownReason {
 
 /// Default keepalive interval in seconds (6 minutes, matches Python RNS).
 pub const KEEPALIVE_INTERVAL_SECS: u64 = 360;
-/// Default stale timeout in seconds (2x keepalive, matches Python RNS).
-pub const STALE_TIMEOUT_SECS: u64 = KEEPALIVE_INTERVAL_SECS * 2;
+/// Default stale timeout in seconds (1.6x keepalive = 576s, matches Python RNS).
+/// Python: `STALE_TIME = int(round(KEEPALIVE * 1.6))`.
+pub const STALE_TIMEOUT_SECS: u64 = 576;
 
 /// Maximum RTT that produces the maximum keepalive interval.
 /// Python: `Link.KEEPALIVE_TIMEOUT_FACTOR = 4` → `360 / (4/1.75*1) = 1.75` effectively.

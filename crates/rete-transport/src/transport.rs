@@ -46,8 +46,36 @@ pub const PATHFINDER_G: u64 = 5;
 /// Maximum retransmission count per announce.
 pub const PATHFINDER_R: u8 = 1;
 
+/// Announce retransmission random window (milliseconds, 0-500ms).
+/// Python: `PATHFINDER_RW = 0.5` — we use millis for integer math.
+pub const PATHFINDER_RW_MS: u64 = 500;
+
 /// Maximum hop count for announce retransmission.
 pub const PATHFINDER_M: u8 = 128;
+
+/// Maximum local rebroadcasts heard before stopping retransmission.
+/// Python: `LOCAL_REBROADCASTS_MAX = 2`
+pub const LOCAL_REBROADCASTS_MAX: u8 = 2;
+
+/// Grace period (seconds) before sending a path response.
+/// Python: `PATH_REQUEST_GRACE = 0.4` — we use 1s since we work in integer seconds.
+pub const PATH_REQUEST_GRACE: u64 = 1;
+
+/// Minimum interval (seconds) between path requests for the same destination.
+/// Python: `PATH_REQUEST_MI = 20`
+pub const PATH_REQUEST_MI: u64 = 20;
+
+/// Default announce rate target (seconds between announces per destination).
+/// Python: interface-configurable, typically 3600s.
+pub const ANNOUNCE_RATE_TARGET: u64 = 3600;
+
+/// Number of rate violations allowed before blocking.
+/// Python: interface-configurable, typically 10.
+pub const ANNOUNCE_RATE_GRACE: u8 = 10;
+
+/// Penalty duration (seconds) added when rate limit is exceeded.
+/// Python: interface-configurable, typically 7200s.
+pub const ANNOUNCE_RATE_PENALTY: u64 = 7200;
 
 /// Path expiry time in seconds (7 days).
 pub const PATH_EXPIRES: u64 = 604800;
@@ -251,6 +279,11 @@ pub enum IngestResult<'a> {
         /// The link_id (used to build a link-destination proof).
         link_id: [u8; TRUNCATED_HASH_LEN],
     },
+    /// A path request for an unknown destination should be forwarded to other interfaces.
+    PathRequestForward {
+        /// The raw path request payload to forward.
+        payload: alloc::vec::Vec<u8>,
+    },
     /// Packet was malformed or invalid.
     Invalid,
 }
@@ -299,11 +332,11 @@ pub struct Transport<
     /// Active link sessions, keyed by link_id.
     links: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], Link, MAX_LINKS>,
     /// Receipts for sent packets, awaiting delivery proofs.
-    /// Fixed at 64 entries — receipts are short-lived, not proportional to path count.
-    receipts: ReceiptTable<64>,
+    /// Sized by MAX_PATHS: 64 on embedded, 1024 on hosted (matching Python).
+    receipts: ReceiptTable<MAX_PATHS>,
     /// Receipts for channel messages: truncated packet hash → ChannelReceipt.
     /// Used to match incoming PROOFs to channel sequences and call mark_delivered().
-    channel_receipts: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ChannelReceipt, 64>,
+    channel_receipts: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ChannelReceipt, MAX_LINKS>,
     /// Active resource transfers.
     resources: alloc::vec::Vec<Resource>,
     /// Pending outbound resource packets (parts, HMU, etc.) built during ingest.
@@ -311,6 +344,18 @@ pub struct Transport<
     /// Link routing table: link_id → entry (for bidirectional relay of link traffic).
     /// Entries persist for the lifetime of the relayed link.
     link_table: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], LinkTableEntry, MAX_LINKS>,
+    /// Announce rate limiting: dest_hash → (last_announce_time, violations, blocked_until).
+    announce_rate: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], AnnounceRateEntry, MAX_PATHS>,
+    /// Path request throttling: dest_hash → last_request_time.
+    path_request_times: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], u64, MAX_PATHS>,
+}
+
+/// Per-destination announce rate tracking entry.
+#[derive(Debug, Clone, Copy)]
+struct AnnounceRateEntry {
+    last: u64,
+    violations: u8,
+    blocked_until: u64,
 }
 
 impl<const P: usize, const A: usize, const D: usize, const L: usize> Default
@@ -339,6 +384,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             resources: alloc::vec::Vec::new(),
             resource_outbound: alloc::vec::Vec::new(),
             link_table: FnvIndexMap::new(),
+            announce_rate: FnvIndexMap::new(),
+            path_request_times: FnvIndexMap::new(),
         }
     }
 
@@ -539,6 +586,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 last_snr: pe.last_snr,
                 hops: pe.hops,
                 announce_raw: pe.announce_raw.clone(),
+                interface_mode: crate::path::InterfaceMode::Default,
             };
             self.insert_path(pe.dest_hash, path);
         }
@@ -905,17 +953,24 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     // bidirectionally through this relay.
                     if self.local_identity_hash.is_some() {
                         if let Some(lte) = self.link_table.get_mut(&dh) {
-                            lte.timestamp = now; // refresh for expiry
-                            relay_log!(
-                                "[relay] link_table FORWARD lid={} ctx={:#04x} iface={}",
-                                hex_short(&dh),
-                                pkt.context,
-                                iface,
-                            );
-                            return IngestResult::Forward {
-                                raw,
-                                source_iface: iface,
-                            };
+                            // Validate hop count before forwarding (Python Transport.py:1512-1549)
+                            let max_hops = lte
+                                .inbound_hops
+                                .saturating_add(lte.outbound_hops)
+                                .saturating_add(2);
+                            if pkt.hops <= max_hops {
+                                lte.timestamp = now; // refresh for expiry
+                                relay_log!(
+                                    "[relay] link_table FORWARD lid={} ctx={:#04x} iface={}",
+                                    hex_short(&dh),
+                                    pkt.context,
+                                    iface,
+                                );
+                                return IngestResult::Forward {
+                                    raw,
+                                    source_iface: iface,
+                                };
+                            }
                         }
                         relay_log!(
                             "[relay] link_table MISS lid={} ctx={:#04x} (no entry)",
@@ -1643,7 +1698,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             return IngestResult::Duplicate;
         }
 
-        match validate_announce(pkt.destination_hash, pkt.payload) {
+        match validate_announce(pkt.destination_hash, pkt.payload, pkt.context_flag) {
             Ok(info) => {
                 // Announce replay detection
                 let mut replay_key = [0u8; 32];
@@ -1652,16 +1707,62 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     .copy_from_slice(info.random_hash);
                 let replay_hash: [u8; 32] = Sha256::digest(replay_key).into();
                 if self.announce_dedup.check_and_insert(&replay_hash) {
+                    // Track local rebroadcasts: if we have this announce
+                    // pending, note that we heard it echoed back.
+                    let mut dh_dup = [0u8; TRUNCATED_HASH_LEN];
+                    dh_dup.copy_from_slice(pkt.destination_hash);
+                    self.note_local_rebroadcast(&dh_dup, pkt.hops);
                     return IngestResult::Duplicate;
                 }
                 let mut dh = [0u8; TRUNCATED_HASH_LEN];
                 dh.copy_from_slice(pkt.destination_hash);
 
+                // Announce rate limiting
+                let rate_blocked = {
+                    let entry = self.announce_rate.get_mut(&dh);
+                    match entry {
+                        Some(re) => {
+                            if now < re.blocked_until {
+                                true
+                            } else {
+                                let interval = now.saturating_sub(re.last);
+                                if interval < ANNOUNCE_RATE_TARGET {
+                                    re.violations = re.violations.saturating_add(1);
+                                } else {
+                                    re.violations = re.violations.saturating_sub(1);
+                                }
+                                if re.violations > ANNOUNCE_RATE_GRACE {
+                                    re.blocked_until =
+                                        re.last + ANNOUNCE_RATE_TARGET + ANNOUNCE_RATE_PENALTY;
+                                    true
+                                } else {
+                                    re.last = now;
+                                    false
+                                }
+                            }
+                        }
+                        None => {
+                            let _ = self.announce_rate.insert(
+                                dh,
+                                AnnounceRateEntry {
+                                    last: now,
+                                    violations: 0,
+                                    blocked_until: 0,
+                                },
+                            );
+                            false
+                        }
+                    }
+                };
+                if rate_blocked {
+                    return IngestResult::Duplicate;
+                }
+
                 let should_update = match self.paths.get(&dh) {
                     None => true,
                     Some(existing) => {
                         pkt.hops <= existing.hops
-                            || now.saturating_sub(existing.learned_at) > PATH_EXPIRES
+                            || now.saturating_sub(existing.learned_at) > existing.expiry_time()
                     }
                 };
 
@@ -1717,8 +1818,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             dest_hash: dh,
                             raw: ann_raw,
                             tx_count: 0,
-                            last_tx_at: 0,
+                            retransmit_timeout: now + PATHFINDER_G,
                             local: false,
+                            local_rebroadcasts: 0,
+                            block_rebroadcasts: false,
+                            received_hops: pkt.hops,
                         };
                         let _ = self.queue_announce(pending);
                     }
@@ -1735,27 +1839,69 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         }
     }
 
-    fn handle_path_request<'a>(&mut self, payload: &[u8], _now: u64) -> IngestResult<'a> {
+    fn handle_path_request<'a>(&mut self, payload: &[u8], now: u64) -> IngestResult<'a> {
         if payload.len() < TRUNCATED_HASH_LEN {
             return IngestResult::Invalid;
         }
         let mut requested = [0u8; TRUNCATED_HASH_LEN];
         requested.copy_from_slice(&payload[..TRUNCATED_HASH_LEN]);
 
+        // Path request throttling: minimum interval between requests for same dest
+        if let Some(&last_time) = self.path_request_times.get(&requested) {
+            if now.saturating_sub(last_time) < PATH_REQUEST_MI {
+                return IngestResult::Duplicate;
+            }
+        }
+        let _ = self.path_request_times.insert(requested, now);
+
+        // Check if we have a local destination for this hash
+        if self.is_local_destination(&requested) {
+            // Local destination — handled by NodeCore (it will announce in response)
+            return IngestResult::PathRequestForward {
+                payload: payload.to_vec(),
+            };
+        }
+
+        // Check if we know a path (have a cached announce)
         if let Some(path) = self.paths.get(&requested) {
             if let Some(ref cached) = path.announce_raw {
                 let pending = PendingAnnounce {
                     dest_hash: requested,
                     raw: cached.clone(),
                     tx_count: 0,
-                    last_tx_at: 0,
-                    local: true,
+                    retransmit_timeout: now + PATH_REQUEST_GRACE,
+                    local: false,
+                    local_rebroadcasts: 0,
+                    block_rebroadcasts: true,
+                    received_hops: 0,
                 };
                 let _ = self.queue_announce(pending);
+                return IngestResult::Duplicate;
             }
         }
 
-        IngestResult::Duplicate
+        // Unknown path — forward to all interfaces if transport is enabled
+        if self.local_identity_hash.is_some() {
+            // Dedup: check if we've recently seen this exact path request
+            let mut pr_key = [0u8; 32];
+            pr_key[..TRUNCATED_HASH_LEN].copy_from_slice(&requested);
+            // Include tag bytes in dedup if present
+            if payload.len() > TRUNCATED_HASH_LEN {
+                let tag_end = core::cmp::min(payload.len(), 32);
+                let tag_start = TRUNCATED_HASH_LEN;
+                pr_key[tag_start..tag_end].copy_from_slice(&payload[tag_start..tag_end]);
+            }
+            let pr_hash: [u8; 32] = Sha256::digest(pr_key).into();
+            if self.announce_dedup.check_and_insert(&pr_hash) {
+                return IngestResult::Duplicate;
+            }
+
+            IngestResult::PathRequestForward {
+                payload: payload.to_vec(),
+            }
+        } else {
+            IngestResult::Duplicate
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2264,7 +2410,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // Expire old paths
         let mut expired = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
         for (dest, path) in self.paths.iter() {
-            if now.saturating_sub(path.learned_at) > PATH_EXPIRES {
+            if now.saturating_sub(path.learned_at) > path.expiry_time() {
                 let _ = expired.push(*dest);
             }
         }
@@ -2335,13 +2481,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         let mut keep: heapless::Deque<PendingAnnounce, A> = heapless::Deque::new();
 
         while let Some(mut ann) = self.announces.pop_front() {
-            let delay = PATHFINDER_G * (1u64 << ann.tx_count.min(8));
-            if ann.local || now >= ann.last_tx_at + delay {
+            // Skip if blocked by local rebroadcast detection
+            if ann.block_rebroadcasts && !ann.local {
+                continue;
+            }
+            if ann.local || now >= ann.retransmit_timeout {
                 to_send.push(ann.raw.clone());
                 ann.tx_count += 1;
-                ann.last_tx_at = now;
+                // Next retransmission: PATHFINDER_G after now (matching Python)
+                ann.retransmit_timeout = now + PATHFINDER_G;
                 ann.local = false;
-                if ann.tx_count <= PATHFINDER_R {
+                if ann.tx_count <= PATHFINDER_R && !ann.block_rebroadcasts {
                     let _ = keep.push_back(ann);
                 }
             } else {
@@ -2351,6 +2501,32 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         self.announces = keep;
         to_send
+    }
+
+    /// Called when we hear a duplicate announce — tracks local rebroadcasts
+    /// and suppresses retransmission if the announce has been locally rebroadcast
+    /// enough times (LOCAL_REBROADCASTS_MAX).
+    pub fn note_local_rebroadcast(&mut self, dest_hash: &[u8; TRUNCATED_HASH_LEN], heard_hops: u8) {
+        for ann in self.announces.iter_mut() {
+            if ann.dest_hash == *dest_hash {
+                // Same hop count means a peer rebroadcast at our level
+                if heard_hops.saturating_sub(1) == ann.received_hops {
+                    ann.local_rebroadcasts += 1;
+                    if ann.tx_count > 0
+                        && ann.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX
+                    {
+                        ann.block_rebroadcasts = true;
+                    }
+                }
+                // If we hear at one hop further, our rebroadcast was picked up
+                if heard_hops.saturating_sub(1) == ann.received_hops + 1
+                    && ann.tx_count > 0
+                {
+                    ann.block_rebroadcasts = true;
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -2395,8 +2571,11 @@ mod tests {
                 dest_hash: [i; TRUNCATED_HASH_LEN],
                 raw: alloc::vec![i],
                 tx_count: 0,
-                last_tx_at: 0,
+                retransmit_timeout: 0,
                 local: false,
+                local_rebroadcasts: 0,
+                block_rebroadcasts: false,
+                received_hops: 0,
             };
             assert!(
                 transport.queue_announce(ann),
@@ -2411,8 +2590,11 @@ mod tests {
             dest_hash: [0xFF; TRUNCATED_HASH_LEN],
             raw: alloc::vec![0xFF],
             tx_count: 0,
-            last_tx_at: 0,
+            retransmit_timeout: 0,
             local: false,
+            local_rebroadcasts: 0,
+            block_rebroadcasts: false,
+            received_hops: 0,
         };
         assert!(
             !transport.queue_announce(overflow),

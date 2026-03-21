@@ -12,13 +12,50 @@ use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{DestType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN};
-use rete_transport::{IngestResult, PendingAnnounce, Transport, RECEIPT_TIMEOUT};
+use rete_transport::{IngestResult, PendingAnnounce, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT};
 
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::{NodeEvent, ProofStrategy};
 
 /// Callback type for data compression/decompression functions.
 pub type TransformFn = fn(&[u8]) -> Option<Vec<u8>>;
+
+/// Callback type for ProveApp per-packet proof decisions.
+///
+/// Arguments: (dest_hash, packet_hash, payload_data)
+/// Return `true` to generate a proof, `false` to skip.
+pub type ProveAppFn = fn(&[u8; TRUNCATED_HASH_LEN], &[u8; 32], &[u8]) -> bool;
+
+/// Callback type for request handlers.
+///
+/// Arguments: (path, data, request_id, link_id)
+/// Return `Some(response_data)` to send a response, or `None` to send no response.
+pub type RequestHandlerFn = fn(
+    &str,                           // path
+    &[u8],                          // request data
+    &[u8; TRUNCATED_HASH_LEN],      // request_id
+    &[u8; TRUNCATED_HASH_LEN],      // link_id
+) -> Option<Vec<u8>>;
+
+/// Request access policy (matches Python ALLOW_NONE/ALL/LIST).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestPolicy {
+    /// Reject all requests (default).
+    AllowNone,
+    /// Allow requests from any identity.
+    AllowAll,
+}
+
+/// A registered request handler entry.
+#[derive(Clone)]
+pub struct RequestHandler {
+    /// The path string this handler responds to.
+    pub path: alloc::string::String,
+    /// The handler function.
+    pub handler: RequestHandlerFn,
+    /// Access control policy.
+    pub policy: RequestPolicy,
+}
 
 // ---------------------------------------------------------------------------
 // OutboundPacket + PacketRouting
@@ -111,6 +148,8 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     /// Called with (raw_bytes, direction, iface_idx) on every inbound packet.
     /// direction is "IN".
     packet_log_fn: Option<fn(&[u8], &str, u8)>,
+    /// Optional ProveApp callback for per-packet proof decisions.
+    prove_app_fn: Option<ProveAppFn>,
 }
 
 /// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
@@ -162,7 +201,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             decompress_fn: None,
             compress_fn: None,
             packet_log_fn: None,
+            prove_app_fn: None,
         }
+    }
+
+    /// Set the ProveApp callback for per-packet proof decisions.
+    pub fn set_prove_app_fn(&mut self, f: Option<ProveAppFn>) {
+        self.prove_app_fn = f;
     }
 
     /// Enable transport mode: forward HEADER_2 packets for other nodes.
@@ -198,6 +243,41 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     /// Set the compression function for outbound resource data.
     pub fn set_compress_fn(&mut self, f: Option<TransformFn>) {
         self.compress_fn = f;
+    }
+
+    /// Register a request handler on a destination.
+    ///
+    /// The handler will be auto-invoked when a matching request arrives on a link
+    /// to the specified destination.
+    pub fn register_request_handler(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        handler: RequestHandler,
+    ) -> bool {
+        if let Some(dest) = self.get_destination_mut(dest_hash) {
+            dest.register_request_handler(handler);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Look up a request handler across all destinations.
+    fn find_request_handler(
+        &self,
+        path_hash: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<(alloc::string::String, RequestHandlerFn, RequestPolicy)> {
+        // Search primary destination
+        if let Some(h) = self.primary_dest.lookup_request_handler(path_hash) {
+            return Some((h.path.clone(), h.handler, h.policy));
+        }
+        // Search additional destinations
+        for dest in &self.additional_dests {
+            if let Some(h) = dest.lookup_request_handler(path_hash) {
+                return Some((h.path.clone(), h.handler, h.policy));
+            }
+        }
+        None
     }
 
     /// Set a packet logging callback for diagnostics.
@@ -268,6 +348,52 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         );
 
         self.transport.add_local_destination(dest_hash);
+        self.additional_dests.push(dest);
+
+        dest_hash
+    }
+
+    /// Register an additional destination with specified type and direction.
+    ///
+    /// Supports GROUP, PLAIN, and OUT destinations in addition to the default
+    /// Single/In. For PLAIN destinations, identity is not used in hashing.
+    /// For OUT destinations, transport does NOT register them as local
+    /// (they are for sending, not receiving).
+    pub fn register_destination_typed(
+        &mut self,
+        app_name: &str,
+        aspects: &[&str],
+        dest_type: DestinationType,
+        direction: Direction,
+    ) -> [u8; TRUNCATED_HASH_LEN] {
+        let id_hash = if dest_type == DestinationType::Plain {
+            None
+        } else {
+            Some(self.identity.hash())
+        };
+
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
+            .expect("app_name + aspects too long");
+        let dest_hash = rete_core::destination_hash(expanded, id_hash.as_ref());
+
+        let name_hash_full = <sha2::Sha256 as sha2::Digest>::digest(expanded.as_bytes());
+        let mut name_hash = [0u8; rete_core::NAME_HASH_LEN];
+        name_hash.copy_from_slice(&name_hash_full[..rete_core::NAME_HASH_LEN]);
+
+        let dest = Destination::from_hashes(
+            dest_type,
+            direction,
+            app_name,
+            aspects,
+            dest_hash,
+            name_hash,
+        );
+
+        // Only register as local if direction is In (we receive packets for it)
+        if direction == Direction::In {
+            self.transport.add_local_destination(dest_hash);
+        }
         self.additional_dests.push(dest);
 
         dest_hash
@@ -409,8 +535,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             dest_hash: peer_dest_hash,
             raw: buf[..n].to_vec(),
             tx_count: 0,
-            last_tx_at: 0,
+            retransmit_timeout: 0,
             local: true,
+            local_rebroadcasts: 0,
+            block_rebroadcasts: false,
+            received_hops: 0,
         })
     }
 
@@ -501,8 +630,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             dest_hash: *dest_hash,
             raw: buf[..n].to_vec(),
             tx_count: 0,
-            last_tx_at: 0,
+            retransmit_timeout: 0,
             local: true,
+            local_rebroadcasts: 0,
+            block_rebroadcasts: false,
+            received_hops: 0,
         })
     }
 
@@ -604,6 +736,32 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             None
         };
         (pkt.map(OutboundPacket::broadcast), event)
+    }
+
+    /// Send a LINKIDENTIFY packet on an established link.
+    ///
+    /// This reveals the initiator's identity to the responder by sending the
+    /// identity public key signed with Ed25519, encrypted via the link session.
+    /// Matches Python `Link.identify()`.
+    pub fn link_identify<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        rng: &mut R,
+    ) -> Option<OutboundPacket> {
+        // Build identify payload: pub_key[64] || Ed25519_sig[64]
+        let pub_key = self.identity.public_key();
+        let sig = self.identity.sign(&pub_key).ok()?;
+        let mut payload = [0u8; 128];
+        payload[..64].copy_from_slice(&pub_key);
+        payload[64..128].copy_from_slice(&sig);
+
+        let pkt = self.transport.build_link_data_packet(
+            link_id,
+            &payload,
+            rete_core::CONTEXT_LINKIDENTIFY,
+            rng,
+        )?;
+        Some(OutboundPacket::broadcast(pkt))
     }
 
     /// Send plain data over an established link.
@@ -814,7 +972,18 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
                 let mut packets = Vec::new();
 
-                if proof_strategy == ProofStrategy::ProveAll {
+                let should_prove = match proof_strategy {
+                    ProofStrategy::ProveAll => true,
+                    ProofStrategy::ProveApp => {
+                        if let Some(f) = self.prove_app_fn {
+                            f(&dest_hash, &packet_hash, &decrypted)
+                        } else {
+                            false
+                        }
+                    }
+                    ProofStrategy::ProveNone => false,
+                };
+                if should_prove {
                     packets.extend(self.proof_outbound(&packet_hash));
                 }
 
@@ -887,6 +1056,25 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         packets.push(OutboundPacket::broadcast(pkt));
                     }
                 }
+                // Handle LINKIDENTIFY: validate and emit LinkIdentified event
+                if context == rete_core::CONTEXT_LINKIDENTIFY && data.len() >= 128 {
+                    let mut pub_key = [0u8; 64];
+                    pub_key.copy_from_slice(&data[..64]);
+                    let sig = &data[64..128];
+                    if let Ok(peer_id) = Identity::from_public_key(&pub_key) {
+                        if peer_id.verify(&pub_key, sig).is_ok() {
+                            let id_hash = peer_id.hash();
+                            return IngestOutcome {
+                                event: Some(NodeEvent::LinkIdentified {
+                                    link_id,
+                                    identity_hash: id_hash,
+                                    public_key: pub_key,
+                                }),
+                                packets,
+                            };
+                        }
+                    }
+                }
                 IngestOutcome {
                     event: Some(NodeEvent::LinkData {
                         link_id,
@@ -919,15 +1107,33 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 request_id,
                 path_hash,
                 data,
-            } => IngestOutcome {
-                event: Some(NodeEvent::RequestReceived {
-                    link_id,
-                    request_id,
-                    path_hash,
-                    data,
-                }),
-                packets: Vec::new(),
-            },
+            } => {
+                // Try auto-dispatch to a registered request handler
+                let mut response_packets = Vec::new();
+                let handler_result = self.find_request_handler(&path_hash);
+                if let Some((path_str, handler_fn, policy)) = handler_result {
+                    if policy != RequestPolicy::AllowNone {
+                        if let Some(response_data) =
+                            handler_fn(&path_str, &data, &request_id, &link_id)
+                        {
+                            if let Some(pkt) =
+                                self.send_response(&link_id, &request_id, &response_data, rng)
+                            {
+                                response_packets.push(pkt);
+                            }
+                        }
+                    }
+                }
+                IngestOutcome {
+                    event: Some(NodeEvent::RequestReceived {
+                        link_id,
+                        request_id,
+                        path_hash,
+                        data,
+                    }),
+                    packets: response_packets,
+                }
+            }
             IngestResult::ResponseReceived {
                 link_id,
                 request_id,
@@ -1150,6 +1356,25 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         resource_hash,
                     }),
                     packets,
+                }
+            }
+            IngestResult::PathRequestForward { payload } => {
+                // Forward path request to all interfaces as a broadcast
+                // Build a path request packet from the payload
+                let mut buf = [0u8; MTU];
+                let result = PacketBuilder::new(&mut buf)
+                    .packet_type(PacketType::Data)
+                    .dest_type(DestType::Plain)
+                    .destination_hash(&PATH_REQUEST_DEST)
+                    .context(rete_core::CONTEXT_NONE)
+                    .payload(&payload)
+                    .build();
+                match result {
+                    Ok(n) => IngestOutcome {
+                        event: None,
+                        packets: vec![OutboundPacket::broadcast(buf[..n].to_vec())],
+                    },
+                    Err(_) => IngestOutcome::empty(),
                 }
             }
             IngestResult::Duplicate | IngestResult::Invalid => {
@@ -1888,12 +2113,12 @@ mod tests {
         // Still in queue (tx_count=1, PATHFINDER_R=1)
         assert_eq!(core.transport.announce_count(), 1);
 
-        // Too early for retransmit (delay = 5 * 2^1 = 10s)
-        let p2 = core.transport.pending_outbound(1005);
+        // Too early for retransmit (delay = PATHFINDER_G = 5s, timeout at 1005)
+        let p2 = core.transport.pending_outbound(1004);
         assert_eq!(p2.len(), 0);
 
-        // After delay: retransmit
-        let p3 = core.transport.pending_outbound(1011);
+        // At timeout: retransmit
+        let p3 = core.transport.pending_outbound(1005);
         assert_eq!(p3.len(), 1);
 
         // Now tx_count=2 > PATHFINDER_R=1, so dropped from queue

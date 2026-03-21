@@ -7,6 +7,10 @@
 //! wiring LXMF delivery through [`rete_stack::NodeCore`].
 
 pub mod message;
+pub mod stamp;
+
+#[cfg(feature = "router")]
+pub mod peer;
 
 #[cfg(feature = "router")]
 pub mod propagation;

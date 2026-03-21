@@ -259,6 +259,49 @@ impl Identity {
         Ok(32 + token_len)
     }
 
+    /// Encrypt `plaintext` using a ratchet public key for ECDH instead of the
+    /// identity's X25519 public key.
+    ///
+    /// The ciphertext layout is identical to `encrypt()`. The only difference is
+    /// that the ECDH is performed with `ratchet_pub` (32 bytes) instead of the
+    /// identity's X25519 public key.
+    pub fn encrypt_with_ratchet<R>(
+        &self,
+        plaintext: &[u8],
+        ratchet_pub: &[u8; 32],
+        rng: &mut R,
+        out: &mut [u8],
+    ) -> Result<usize, Error>
+    where
+        R: rand_core::RngCore + rand_core::CryptoRng,
+    {
+        let pad_len = 16 - (plaintext.len() % 16);
+        let padded_len = plaintext.len() + pad_len;
+        let total_len = 32 + TOKEN_OVERHEAD + padded_len;
+        if out.len() < total_len {
+            return Err(Error::BufferTooSmall);
+        }
+
+        let ephemeral_secret = x25519_dalek::EphemeralSecret::random_from_rng(&mut *rng);
+        let ephemeral_pub = x25519_dalek::PublicKey::from(&ephemeral_secret);
+
+        let target_pub = x25519_dalek::PublicKey::from(*ratchet_pub);
+        let shared = ephemeral_secret.diffie_hellman(&target_pub);
+
+        let salt = self.hash();
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+        let mut derived = [0u8; 64];
+        hk.expand(b"", &mut derived)
+            .map_err(|_| Error::CryptoError)?;
+
+        out[..32].copy_from_slice(ephemeral_pub.as_bytes());
+
+        let token = Token::new(&derived)?;
+        let token_len = token.encrypt(plaintext, rng, &mut out[32..])?;
+
+        Ok(32 + token_len)
+    }
+
     /// Decrypt `ciphertext` using this identity's X25519 private key.
     ///
     /// Writes plaintext into `out`. Returns number of bytes written.
@@ -291,11 +334,86 @@ impl Identity {
         let token = Token::new(&derived)?;
         token.decrypt(token_bytes, out)
     }
+
+    /// Decrypt `ciphertext` trying ratchet private keys first, then falling back
+    /// to the identity's X25519 private key.
+    ///
+    /// `ratchet_privkeys` is a slice of 32-byte X25519 private keys (most recent first).
+    /// Returns `(plaintext_len, ratchet_index)` where `ratchet_index` is `Some(i)` if
+    /// ratchet `i` worked, or `None` if the identity key was used.
+    ///
+    /// If `enforce_ratchets` is true, falls back to identity key is skipped.
+    pub fn decrypt_with_ratchets(
+        &self,
+        ciphertext: &[u8],
+        ratchet_privkeys: &[[u8; 32]],
+        enforce_ratchets: bool,
+        out: &mut [u8],
+    ) -> Result<(usize, Option<usize>), Error> {
+        if ciphertext.len() < 96 {
+            return Err(Error::CryptoError);
+        }
+
+        let ephemeral_pub_bytes = &ciphertext[0..32];
+        let token_bytes = &ciphertext[32..];
+        let ephemeral_pub =
+            x25519_dalek::PublicKey::from(<[u8; 32]>::try_from(ephemeral_pub_bytes).unwrap());
+        let salt = self.hash();
+
+        // Try each ratchet private key
+        for (i, ratchet_prv) in ratchet_privkeys.iter().enumerate() {
+            let secret = x25519_dalek::StaticSecret::from(*ratchet_prv);
+            let shared = secret.diffie_hellman(&ephemeral_pub);
+
+            let hk = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+            let mut derived = [0u8; 64];
+            if hk.expand(b"", &mut derived).is_err() {
+                continue;
+            }
+
+            if let Ok(token) = Token::new(&derived) {
+                if let Ok(len) = token.decrypt(token_bytes, out) {
+                    return Ok((len, Some(i)));
+                }
+            }
+        }
+
+        if enforce_ratchets {
+            return Err(Error::CryptoError);
+        }
+
+        // Fallback to identity key
+        let len = self.decrypt(ciphertext, out)?;
+        Ok((len, None))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Destination hash utilities
 // ---------------------------------------------------------------------------
+
+/// Generate a new ratchet keypair (X25519).
+///
+/// Returns `(private_key, public_key)` as 32-byte arrays.
+pub fn generate_ratchet<R: rand_core::RngCore + rand_core::CryptoRng>(
+    rng: &mut R,
+) -> ([u8; 32], [u8; 32]) {
+    let secret = x25519_dalek::StaticSecret::random_from_rng(rng);
+    let public = x25519_dalek::PublicKey::from(&secret);
+    let mut prv = [0u8; 32];
+    prv.copy_from_slice(secret.as_bytes());
+    (prv, *public.as_bytes())
+}
+
+/// Compute a ratchet ID from a ratchet public key.
+///
+/// Returns `SHA-256(ratchet_pub)[0:10]` — same as Python `Identity._get_ratchet_id()`.
+pub fn ratchet_id(ratchet_pub: &[u8; 32]) -> [u8; NAME_HASH_LEN] {
+    let digest = Sha256::digest(ratchet_pub);
+    let mut id = [0u8; NAME_HASH_LEN];
+    id.copy_from_slice(&digest[..NAME_HASH_LEN]);
+    id
+}
 
 /// Compute a 16-byte destination hash.
 ///

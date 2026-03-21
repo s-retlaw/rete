@@ -117,6 +117,15 @@ pub enum NodeEvent {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
     },
+    /// The remote peer identified themselves on a link (LINKIDENTIFY).
+    LinkIdentified {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The 16-byte identity hash of the remote peer.
+        identity_hash: [u8; TRUNCATED_HASH_LEN],
+        /// The 64-byte public key of the remote peer.
+        public_key: [u8; 64],
+    },
     /// A resource was offered on a link.
     ResourceOffered {
         /// The link_id.
@@ -174,4 +183,5 @@ pub use destination::{Destination, DestinationType, Direction};
 #[cfg(feature = "alloc")]
 pub use node_core::{
     EmbeddedNodeCore, HostedNodeCore, IngestOutcome, NodeCore, OutboundPacket, PacketRouting,
+    ProveAppFn, RequestHandler, RequestHandlerFn, RequestPolicy,
 };

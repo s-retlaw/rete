@@ -668,6 +668,10 @@ pub struct Resource {
     /// Last activity timestamp (monotonic seconds).
     pub last_activity: u64,
 
+    /// Optional metadata (filename, MIME type, etc.) — msgpack-encoded.
+    /// Prepended to first segment when `flags.has_metadata` is set.
+    pub metadata: Option<Vec<u8>>,
+
     // -- Data storage --
     /// Full data (sender has it upfront, receiver assembles).
     pub data: Vec<u8>,
@@ -756,6 +760,7 @@ impl Resource {
             mdu,
             retries: 0,
             last_activity: 0,
+            metadata: None,
             data: data.to_vec(),
             parts,
             part_hashes,
@@ -1181,6 +1186,7 @@ impl Resource {
             mdu: 0, // receiver doesn't need to know the MDU
             retries: 0,
             last_activity: 0,
+            metadata: None,
             data: Vec::new(),
             parts: vec![Vec::new(); total_segments],
             part_hashes,
@@ -1227,6 +1233,36 @@ impl Resource {
         self.received.iter().all(|&r| r)
     }
 
+    /// Count of consecutively received parts from the start.
+    ///
+    /// Matches Python's `consecutive_completed_height` — the index of the
+    /// first unreceived part. This determines where to start scanning for
+    /// the next request.
+    pub fn consecutive_completed(&self) -> usize {
+        for (i, &r) in self.received.iter().enumerate() {
+            if !r {
+                return i;
+            }
+        }
+        self.received.len()
+    }
+
+    /// Grow the sliding window based on transfer performance.
+    ///
+    /// Call after successfully receiving a batch of parts.
+    /// Window grows by 1 per call, capped at WINDOW_MAX_FAST (75) for fast links
+    /// or WINDOW_MAX_SLOW (10) for slow links.
+    pub fn grow_window(&mut self, fast_link: bool) {
+        let max = if fast_link {
+            WINDOW_MAX_FAST
+        } else {
+            WINDOW_MAX_SLOW
+        };
+        if self.window < max {
+            self.window += 1;
+        }
+    }
+
     /// Build a RESOURCE_REQ payload requesting needed parts.
     ///
     /// Format:
@@ -1239,22 +1275,34 @@ impl Resource {
     /// - When we have all hashes, status is `0x00` (just requesting parts).
     /// - Only requests parts within the current window that have not been received.
     pub fn build_request(&self) -> Vec<u8> {
-        // Collect unreceived part hashes within current window.
-        // Only consider hashes up to hashmap_cursor (the rest are unfilled zeros).
+        // Match Python's consecutive_completed_height scanning:
+        // Start from the first unreceived part and scan forward within the window.
+        let consecutive_completed = self.consecutive_completed();
+        let search_start = consecutive_completed;
+
         let mut requested_hashes = Vec::new();
-        for idx in 0..self.hashmap_cursor {
+        let mut hashmap_exhausted = false;
+
+        for idx in search_start..self.total_segments {
+            if requested_hashes.len() >= self.window {
+                break;
+            }
             if !self.received[idx] {
-                requested_hashes.push(self.part_hashes[idx]);
-                if requested_hashes.len() >= self.window {
+                if idx < self.hashmap_cursor {
+                    // We have the hash — request it
+                    requested_hashes.push(self.part_hashes[idx]);
+                } else {
+                    // Hash not yet received — signal exhausted
+                    hashmap_exhausted = true;
                     break;
                 }
             }
         }
 
-        // Signal exhausted ONLY if we don't have all part hashes yet
-        // and couldn't fill the window from known hashes.
-        let exhausted =
-            self.hashmap_cursor < self.total_segments && requested_hashes.len() < self.window;
+        // Also signal exhausted if we couldn't fill the window and more hashes exist
+        let exhausted = hashmap_exhausted
+            || (self.hashmap_cursor < self.total_segments
+                && requested_hashes.len() < self.window);
 
         let mut payload = Vec::new();
 

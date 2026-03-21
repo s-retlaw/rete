@@ -53,8 +53,8 @@ fn path_request_known_dest_queues_announce() {
     match t.ingest(&mut ann, 1000, &mut rng, &identity) {
         IngestResult::AnnounceReceived { dest_hash, .. } => {
             // Drain the retransmit announce from normal announce processing
-            // First call sends (tx_count 0→1) and re-queues (tx_count ≤ PATHFINDER_R)
-            let _ = t.pending_outbound(1000);
+            // First call sends (tx_count 0→1) at retransmit_timeout (1000+5=1005)
+            let _ = t.pending_outbound(1005);
             // Second call sends (tx_count 1→2) and drops (tx_count > PATHFINDER_R)
             let _ = t.pending_outbound(1010);
             let count_before = t.announce_count();

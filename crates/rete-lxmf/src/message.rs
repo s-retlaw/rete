@@ -29,7 +29,19 @@ pub enum DeliveryMethod {
     Opportunistic,
     /// Propagation via LXMF propagation node.
     Propagation,
+    /// Paper message: encoded as `lxm://` URI for QR codes / offline transport.
+    Paper,
 }
+
+/// URI schema for paper messages.
+pub const URI_SCHEMA: &str = "lxm";
+
+/// Maximum bytes in a QR code (Version 40, Error Correction Level L).
+pub const QR_MAX_STORAGE: usize = 2953;
+
+/// Maximum data unit for paper messages after base64 encoding overhead.
+/// `((QR_MAX_STORAGE - len("lxm://")) * 6) / 8 = 2210 bytes`
+pub const PAPER_MDU: usize = ((QR_MAX_STORAGE - 6) * 6) / 8;
 
 /// LXMF message state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +186,56 @@ impl LXMessage {
     pub fn hash(&self) -> [u8; 32] {
         let packed = self.pack();
         Sha256::digest(&packed).into()
+    }
+
+    /// Encode this message as an `lxm://` URI for paper/QR transport.
+    ///
+    /// The packed message is encrypted using the recipient's identity and
+    /// encoded as URL-safe base64 (no padding).
+    ///
+    /// Returns `None` if the encrypted message exceeds `PAPER_MDU`.
+    pub fn as_uri<R: rand_core::RngCore + rand_core::CryptoRng>(
+        &self,
+        recipient: &Identity,
+        rng: &mut R,
+    ) -> Option<String> {
+        let packed = self.pack();
+        // Paper format: dest_hash[16] || encrypted(rest)
+        let plaintext = &packed[16..]; // skip dest_hash, already in header
+        let mut ct_buf = [0u8; 2048]; // MTU-ish buffer
+        let ct_len = recipient.encrypt(plaintext, rng, &mut ct_buf).ok()?;
+
+        let mut paper_packed = Vec::with_capacity(16 + ct_len);
+        paper_packed.extend_from_slice(&self.destination_hash);
+        paper_packed.extend_from_slice(&ct_buf[..ct_len]);
+
+        if paper_packed.len() > PAPER_MDU {
+            return None;
+        }
+
+        let encoded = base64url_encode(&paper_packed);
+        Some(format!("{}://{}", URI_SCHEMA, encoded))
+    }
+
+    /// Decode an `lxm://` URI back into message components.
+    ///
+    /// Returns `(destination_hash, encrypted_payload)` — the caller must
+    /// decrypt the payload using their identity's private key and then
+    /// call `LXMessage::unpack` on the decrypted data.
+    pub fn from_uri(uri: &str) -> Option<([u8; 16], Vec<u8>)> {
+        let prefix = format!("{}://", URI_SCHEMA);
+        let encoded = uri.strip_prefix(&prefix)?;
+        let data = base64url_decode(encoded)?;
+
+        if data.len() < 16 {
+            return None;
+        }
+
+        let mut dest_hash = [0u8; 16];
+        dest_hash.copy_from_slice(&data[..16]);
+        let encrypted = data[16..].to_vec();
+
+        Some((dest_hash, encrypted))
     }
 }
 
@@ -499,6 +561,68 @@ fn read_map(data: &[u8], pos: &mut usize) -> Result<BTreeMap<u8, Vec<u8>>, &'sta
     Ok(map)
 }
 
+// ---------------------------------------------------------------------------
+// Base64url encode/decode (URL-safe, no padding)
+// ---------------------------------------------------------------------------
+
+const B64URL_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn base64url_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity((data.len() * 4 + 2) / 3);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(B64URL_CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(B64URL_CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64URL_CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(B64URL_CHARS[(triple & 0x3F) as usize] as char);
+        }
+    }
+    out
+}
+
+fn base64url_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let a = b64url_val(bytes[i])?;
+        let b = if i + 1 < bytes.len() { b64url_val(bytes[i + 1])? } else { 0 };
+        let c = if i + 2 < bytes.len() { b64url_val(bytes[i + 2])? } else { 0 };
+        let d = if i + 3 < bytes.len() { b64url_val(bytes[i + 3])? } else { 0 };
+
+        let triple = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
+
+        out.push((triple >> 16) as u8);
+        if i + 2 < bytes.len() {
+            out.push((triple >> 8) as u8);
+        }
+        if i + 3 < bytes.len() {
+            out.push(triple as u8);
+        }
+
+        i += 4;
+    }
+    Some(out)
+}
+
+fn b64url_val(c: u8) -> Option<u8> {
+    match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +788,32 @@ mod tests {
         let hash2 = msg.hash();
         assert_eq!(hash1, hash2); // deterministic
         assert_eq!(hash1.len(), 32);
+    }
+
+    #[test]
+    fn test_paper_uri_roundtrip() {
+        let identity = Identity::from_seed(b"paper-test-sender").unwrap();
+        let recipient = Identity::from_seed(b"paper-test-recipient").unwrap();
+        let dest_hash = rete_core::destination_hash("testapp.aspect1", Some(&recipient.hash()));
+
+        let msg = LXMessage::new(
+            dest_hash,
+            identity.hash(),
+            &identity,
+            b"Hello",
+            b"Paper world!",
+            BTreeMap::new(),
+            1700000000.0,
+        )
+        .unwrap();
+
+        let mut rng = rand::thread_rng();
+        let uri = msg.as_uri(&recipient, &mut rng).unwrap();
+        assert!(uri.starts_with("lxm://"));
+
+        let (parsed_dest, encrypted) = LXMessage::from_uri(&uri).unwrap();
+        assert_eq!(parsed_dest, dest_hash);
+        assert!(!encrypted.is_empty());
     }
 
     #[test]

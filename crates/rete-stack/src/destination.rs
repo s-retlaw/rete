@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use rete_core::{Identity, Token, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
 
+use crate::node_core::RequestHandler;
 use crate::ProofStrategy;
 
 /// Destination type matching Python RNS.
@@ -61,6 +62,8 @@ pub struct Destination {
     /// Default application data included in announces.
     pub default_app_data: Option<Vec<u8>>,
     group_token: Option<Token>,
+    /// Registered request handlers, keyed by path_hash.
+    request_handlers: Vec<([u8; TRUNCATED_HASH_LEN], RequestHandler)>,
 }
 
 impl Destination {
@@ -121,6 +124,7 @@ impl Destination {
             accepts_links: true,
             default_app_data: None,
             group_token: None,
+            request_handlers: Vec::new(),
         }
     }
 
@@ -149,6 +153,7 @@ impl Destination {
             accepts_links: true,
             default_app_data: None,
             group_token: None,
+            request_handlers: Vec::new(),
         }
     }
 
@@ -175,6 +180,39 @@ impl Destination {
     /// Set default app data for announces.
     pub fn set_default_app_data(&mut self, data: Option<Vec<u8>>) {
         self.default_app_data = data;
+    }
+
+    /// Register a request handler for a given path.
+    ///
+    /// The `path_hash` is `SHA-256(path.as_bytes())[0:16]` — matching Python's
+    /// `Identity.truncated_hash(path.encode("utf-8"))`.
+    pub fn register_request_handler(&mut self, handler: RequestHandler) {
+        let ph = rete_transport::path_hash(&handler.path);
+        // Replace existing handler for same path
+        if let Some(entry) = self.request_handlers.iter_mut().find(|(h, _)| *h == ph) {
+            entry.1 = handler;
+        } else {
+            self.request_handlers.push((ph, handler));
+        }
+    }
+
+    /// Deregister a request handler by path string.
+    pub fn deregister_request_handler(&mut self, path: &str) -> bool {
+        let ph = rete_transport::path_hash(path);
+        let before = self.request_handlers.len();
+        self.request_handlers.retain(|(h, _)| *h != ph);
+        self.request_handlers.len() < before
+    }
+
+    /// Look up a request handler by path_hash.
+    pub fn lookup_request_handler(
+        &self,
+        path_hash: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<&RequestHandler> {
+        self.request_handlers
+            .iter()
+            .find(|(h, _)| h == path_hash)
+            .map(|(_, handler)| handler)
     }
 
     /// Encrypt plaintext for this destination.
