@@ -1302,8 +1302,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 for pkt in self.transport.drain_resource_outbound() {
                     packets.push(OutboundPacket::broadcast(pkt));
                 }
-                // Bug A fix: Build follow-up RESOURCE_REQ if not all parts received
+                // Grow window and send follow-up REQ if not all parts received
                 if current < total {
+                    // Grow the sliding window for faster throughput
+                    if let Some(res) =
+                        self.transport.get_resource_mut(&link_id, &resource_hash)
+                    {
+                        res.grow_window(true); // assume fast link (localhost/TCP)
+                    }
                     if let Some(req_pkt) =
                         self.transport
                             .build_followup_request(&link_id, &resource_hash, rng)

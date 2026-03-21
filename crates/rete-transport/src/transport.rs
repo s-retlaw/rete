@@ -1372,7 +1372,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 return self.handle_resource_data(link_id, context, ciphertext, now, rng);
             }
 
-            let mut dec_buf = [0u8; rete_core::MTU];
+            // Use heap buffer for resource contexts — TCP links can carry
+            // payloads much larger than the 500-byte radio MTU.
+            let mut dec_buf = alloc::vec![0u8; ciphertext.len()];
             let dec_len = {
                 let link = match self.links.get_mut(link_id) {
                     Some(l) => l,
@@ -1396,8 +1398,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             None => return IngestResult::Invalid,
         };
 
-        // Decrypt payload into stack buffer (heap alloc deferred to branches that need it)
-        let mut dec_buf = [0u8; rete_core::MTU];
+        // Decrypt payload — use heap if ciphertext exceeds radio MTU
+        let mut dec_buf = alloc::vec![0u8; core::cmp::max(ciphertext.len(), rete_core::MTU)];
         let dec_len = match link.decrypt(ciphertext, &mut dec_buf) {
             Ok(n) => n,
             Err(_) => return IngestResult::Invalid,
@@ -2357,9 +2359,33 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     /// Python doesn't proactively send HMU — it only sends in response to
     /// RESOURCE_REQ with HASHMAP_IS_EXHAUSTED. The receiver retries via its
     /// watchdog/timeout. Matching that behavior: no proactive HMU sending.
-    pub fn tick_resources<R: RngCore + CryptoRng>(&mut self, _rng: &mut R) {
-        // No-op: HMU is sent reactively in handle_resource_context() when
-        // the receiver's REQ signals HASHMAP_IS_EXHAUSTED.
+    pub fn tick_resources<R: RngCore + CryptoRng>(&mut self, rng: &mut R) {
+        // Retry follow-up requests for stalled receiver resources.
+        // This prevents deadlocks where a REQ was lost or the sender
+        // is waiting for a REQ that was never sent.
+        let mut req_packets = alloc::vec::Vec::new();
+        for res in &self.resources {
+            if !res.is_sender && !res.received.iter().all(|&r| r) {
+                // Resource has unreceived parts — build a follow-up request
+                let req_payload = res.build_request();
+                let mut link_id = [0u8; TRUNCATED_HASH_LEN];
+                link_id.copy_from_slice(&res.link_id);
+                if let Some(pkt) = self.build_resource_req_packet(&link_id, &req_payload, rng) {
+                    req_packets.push(pkt);
+                }
+            }
+        }
+        // Also send HMU for sender resources with unsent hashes
+        for res in &mut self.resources {
+            if res.is_sender && res.needs_hashmap_update() {
+                if let Some(hmu) = res.build_hashmap_update() {
+                    self.resource_outbound.push(hmu);
+                }
+            }
+        }
+        for pkt in req_packets {
+            self.resource_outbound.push(pkt);
+        }
     }
 
     /// Drain pending resource outbound packets.

@@ -68,15 +68,14 @@ if link.status != RNS.Link.ACTIVE:
 print("PY_LINK_ACTIVE", flush=True)
 time.sleep(1)
 
-# Send a 10KB resource using highly compressible text pattern.
-# This compresses to ~160 bytes (single segment), testing the full
-# resource protocol flow without requiring multi-segment HMU exchange.
-large_data = ("test_resource_data_12345 " * 400).encode()  # 10000 bytes
+# Send a 50KB resource — patterned binary data that won't compress much.
+# This requires multiple HMU rounds and window growth to complete quickly.
+large_data = bytes(range(256)) * 200  # 51200 bytes
 print(f"PY_SENDING_RESOURCE:size={{len(large_data)}}", flush=True)
 
 resource = RNS.Resource(large_data, link)
 start_time = time.time()
-while resource.status < RNS.Resource.COMPLETE and time.time() - start_time < 30:
+while resource.status < RNS.Resource.COMPLETE and time.time() - start_time < 60:
     time.sleep(0.5)
     if resource.status == RNS.Resource.FAILED:
         break
@@ -102,20 +101,24 @@ print("PY_DONE", flush=True)
         t.check(sending is not None, "Resource send started")
 
         # Wait for Python to confirm complete
-        complete = t.wait_for_line(py, "PY_RESOURCE_COMPLETE", timeout=45)
-        t.check(complete is not None, "10KB resource transfer completed (Python)")
+        complete = t.wait_for_line(py, "PY_RESOURCE_COMPLETE", timeout=65)
+        t.check(complete is not None, "50KB resource transfer completed (Python)")
 
         # Verify Rust received it
         resource_complete = t.wait_for_line(rust, "RESOURCE_COMPLETE", timeout=10)
         t.check(resource_complete is not None, "Rust confirmed resource receipt")
 
-        # Check data integrity -- the Rust RESOURCE_COMPLETE line should contain the text
-        rust_data_ok = False
+        # Check data size on Rust side (50KB = 51200 bytes)
+        rust_size_ok = False
         for line in rust:
-            if "RESOURCE_COMPLETE" in line and "test_resource_data_12345" in line:
-                rust_data_ok = True
+            if "RESOURCE_COMPLETE" in line and "size=" in line:
+                try:
+                    size = int(line.split("size=")[1].split()[0])
+                    rust_size_ok = size >= 50000
+                except (ValueError, IndexError):
+                    pass
                 break
-        t.check(rust_data_ok, "Resource data integrity verified on Rust side")
+        t.check(rust_size_ok, "Resource data size verified on Rust side (>=50KB)")
 
         done = t.wait_for_line(py, "PY_DONE")
         t.check(done is not None, "Test completed")

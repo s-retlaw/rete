@@ -1417,6 +1417,8 @@ fn on_node_event(event: NodeEvent) {
                 hex::encode(resource_hash),
                 total_size
             );
+            // Debug: log how many outbound packets the ingest generated
+            eprintln!("[rete] RESOURCE_OFFERED event processed");
         }
         NodeEvent::ResourceProgress {
             link_id,

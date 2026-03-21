@@ -13,11 +13,18 @@ use rete_stack::ReteInterface;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Maximum frame size for TCP interfaces.
+///
+/// TCP links can negotiate MTU up to 8192 bytes via signalling. The HDLC
+/// decoder buffer must be large enough to hold the largest possible frame:
+/// `link_mtu(8192) + header(20) + ifac(16) + margin(64) = 8292`.
+const TCP_MAX_FRAME: usize = 8292;
+
 /// TCP interface for Reticulum — HDLC-framed packets over a TCP stream.
 pub struct TcpInterface {
     stream: TcpStream,
-    decoder: HdlcDecoder<{ rete_core::MTU + rete_core::DEFAULT_IFAC_SIZE }>,
-    read_buf: [u8; 1024],
+    decoder: HdlcDecoder<TCP_MAX_FRAME>,
+    read_buf: [u8; 4096],
     read_pos: usize,
     read_len: usize,
     ifac: Option<IfacKey>,
@@ -60,7 +67,7 @@ impl TcpInterface {
         Ok(TcpInterface {
             stream,
             decoder: HdlcDecoder::new(),
-            read_buf: [0u8; 1024],
+            read_buf: [0u8; 4096],
             read_pos: 0,
             read_len: 0,
             ifac: None,
@@ -72,7 +79,7 @@ impl TcpInterface {
         TcpInterface {
             stream,
             decoder: HdlcDecoder::new(),
-            read_buf: [0u8; 1024],
+            read_buf: [0u8; 4096],
             read_pos: 0,
             read_len: 0,
             ifac: None,
@@ -95,7 +102,7 @@ impl ReteInterface for TcpInterface {
     async fn send(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
         // If IFAC is enabled, protect (sign + mask) before HDLC encoding
         let to_encode: &[u8];
-        let mut ifac_buf = [0u8; 600]; // MTU + max IFAC tag size
+        let mut ifac_buf = [0u8; TCP_MAX_FRAME];
         let ifac_len;
 
         if let Some(ref ifac) = self.ifac {
@@ -105,7 +112,7 @@ impl ReteInterface for TcpInterface {
             to_encode = frame;
         }
 
-        let mut encoded = [0u8; MAX_ENCODED];
+        let mut encoded = [0u8; TCP_MAX_FRAME * 2 + 2];
         let n = hdlc::encode(to_encode, &mut encoded).map_err(TcpError::Encode)?;
         self.stream.write_all(&encoded[..n]).await?;
         self.stream.flush().await?;

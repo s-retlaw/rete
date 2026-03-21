@@ -214,15 +214,13 @@ impl<'a> Packet<'a> {
     ///
     /// # Errors
     /// - [`Error::PacketTooShort`] if `raw` is below the minimum header size
-    /// - [`Error::PacketTooLong`] if `raw` exceeds the MTU (500 bytes)
     /// - [`Error::UnknownPacketType`] / [`Error::UnknownDestType`] for invalid flags
     pub fn parse(raw: &'a [u8]) -> Result<Self, Error> {
         if raw.len() < HEADER_1_OVERHEAD {
             return Err(Error::PacketTooShort);
         }
-        if raw.len() > MTU {
-            return Err(Error::PacketTooLong);
-        }
+        // Note: no upper bound check — TCP interfaces can carry packets
+        // larger than the 500-byte radio MTU via link MTU signalling.
 
         let flags = raw[0];
         let hops = raw[1];
@@ -451,9 +449,8 @@ impl<'a> PacketBuilder<'a> {
         };
         let total = overhead + payload.len();
 
-        if total > MTU {
-            return Err(Error::PacketTooLong);
-        }
+        // The caller's buffer size is the effective limit.
+        // TCP interfaces can carry packets larger than the 500-byte radio MTU.
         if self.buf.len() < total {
             return Err(Error::BufferTooSmall);
         }
@@ -666,20 +663,26 @@ mod tests {
     }
 
     #[test]
-    fn test_mtu_plus_one_returns_packet_too_long() {
-        // A packet of exactly MTU+1 (501) bytes must return PacketTooLong.
-        let raw = [0u8; MTU + 1];
-        assert_eq!(Packet::parse(&raw), Err(Error::PacketTooLong));
+    fn test_large_packet_parses_ok() {
+        // TCP interfaces can carry packets larger than radio MTU.
+        // Packet::parse() should accept them (no upper bound check).
+        let mut raw = [0u8; MTU + 100];
+        // Set valid flags byte (HEADER_1, Data, Single)
+        raw[0] = 0x00;
+        assert!(Packet::parse(&raw).is_ok());
+    }
 
-        // Also verify the builder rejects it:
+    #[test]
+    fn test_builder_rejects_buffer_too_small() {
+        // Builder should reject when buffer is smaller than the packet.
         let dest = [0xAAu8; TRUNCATED_HASH_LEN];
-        let payload = [0xBBu8; MTU - HEADER_1_OVERHEAD + 1]; // 1 byte too many
-        let mut buf = [0u8; MTU + 16];
+        let payload = [0xBBu8; 100];
+        let mut buf = [0u8; 50]; // way too small
         let err = PacketBuilder::new(&mut buf)
             .dest_type(DestType::Plain)
             .destination_hash(&dest)
             .payload(&payload)
             .build();
-        assert_eq!(err, Err(Error::PacketTooLong));
+        assert_eq!(err, Err(Error::BufferTooSmall));
     }
 }

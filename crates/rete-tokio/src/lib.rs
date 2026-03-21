@@ -375,7 +375,7 @@ impl TokioNode {
         announce_timer.tick().await;
         tick_timer.tick().await;
 
-        let mut recv_buf = [0u8; MTU];
+        let mut recv_buf = [0u8; 8292];
 
         loop {
             tokio::select! {
@@ -612,7 +612,7 @@ where
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
     let driver = async move {
-        let mut recv_buf = [0u8; MTU];
+        let mut recv_buf = [0u8; 8292];
         loop {
             tokio::select! {
                 result = iface.recv(&mut recv_buf) => {
