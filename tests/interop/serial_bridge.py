@@ -73,7 +73,7 @@ def main():
     ser.dtr = False
     print(f"[bridge] serial: {args.serial_port} @ {args.baud}")
 
-    # Drain any pending boot output
+    # Drain any pending boot output / stale HDLC data
     time.sleep(0.5)
     while ser.read(1024):
         pass

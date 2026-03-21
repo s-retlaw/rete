@@ -267,6 +267,29 @@ test-e2e-stability:
     cargo build -p rete-example-linux
     cd tests/interop && uv run python stability_interop.py
 
+# Python-to-Python baseline: channel messages through rnsd relay (no Rust)
+test-e2e-py-channel-baseline:
+    cd tests/interop && uv run python py_channel_relay_baseline.py
+
+# Python-to-Python baseline: resource transfer through rnsd relay (no Rust)
+test-e2e-py-resource-baseline:
+    cd tests/interop && uv run python py_resource_relay_baseline.py
+
+# E2E channel messages through rnsd relay (Python -> rnsd -> Rust)
+test-e2e-channel-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python channel_relay_interop.py
+
+# E2E resource transfer through rnsd relay (Python -> rnsd -> Rust)
+test-e2e-resource-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python resource_relay_interop.py
+
+# E2E Rust-initiates resource through rnsd relay (Rust -> rnsd -> Python)
+test-e2e-resource-initiate-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python resource_initiate_relay_interop.py
+
 # All software tests (unit + E2E, no hardware)
 test-all:
     #!/usr/bin/env bash
@@ -357,10 +380,13 @@ test-all:
     run_e2e IFACLINK ifac_link_interop.py
     run_e2e IFACLARGE ifac_large_packet_interop.py
 
-    # Transport/relay (3)
+    # Transport/relay (6)
     run_e2e TRANSPORT transport_relay_interop.py
     run_e2e DUAL dual_interface_interop.py
     run_e2e MULTIHOP multi_hop_relay_interop.py
+    run_e2e CHANRELAY channel_relay_interop.py
+    run_e2e RESRELAY resource_relay_interop.py
+    run_e2e RESINITRELAY resource_initiate_relay_interop.py
 
     # Auto/mDNS (3)
     run_e2e AUTO auto_interop.py
@@ -434,6 +460,9 @@ test-all:
     printf "  %-30s %s passed, %s failed\n" "transport-relay-interop" "$TRANSPORT_PASS" "$TRANSPORT_FAIL"
     printf "  %-30s %s passed, %s failed\n" "dual-interface-interop" "$DUAL_PASS" "$DUAL_FAIL"
     printf "  %-30s %s passed, %s failed\n" "multi-hop-relay-interop" "$MULTIHOP_PASS" "$MULTIHOP_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "channel-relay-interop" "$CHANRELAY_PASS" "$CHANRELAY_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "resource-relay-interop" "$RESRELAY_PASS" "$RESRELAY_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "resource-init-relay-interop" "$RESINITRELAY_PASS" "$RESINITRELAY_FAIL"
     echo "    Auto/mDNS:"
     printf "  %-30s %s passed, %s failed\n" "auto-interop" "$AUTO_PASS" "$AUTO_FAIL"
     printf "  %-30s %s passed, %s failed\n" "auto-data-interop" "$AUTODATA_PASS" "$AUTODATA_FAIL"
@@ -464,7 +493,7 @@ test-all:
     E2E_PASS=$((LIVE_PASS + LINK_PASS + CHANNEL_PASS + RELAY_PASS + PATHREQ_PASS + PROOF_PASS + ROBUSTNESS_PASS \
         + LINKINIT_PASS + LINKRELAY_PASS + LINKRUSTRELAY_PASS + LINKINITRELAY_PASS + LINKBURST_PASS + CONCURRENT_PASS + TEARDOWN_PASS \
         + IFAC_PASS + IFACMISMATCH_PASS + IFACRELAY_PASS + IFACLINK_PASS + IFACLARGE_PASS \
-        + TRANSPORT_PASS + DUAL_PASS + MULTIHOP_PASS \
+        + TRANSPORT_PASS + DUAL_PASS + MULTIHOP_PASS + CHANRELAY_PASS + RESRELAY_PASS + RESINITRELAY_PASS \
         + AUTO_PASS + AUTODATA_PASS + AUTOGROUP_PASS \
         + ANNAPPDATA_PASS + ANNDEDUP_PASS \
         + LOCALIPC_PASS \
@@ -475,7 +504,7 @@ test-all:
     E2E_FAIL=$((LIVE_FAIL + LINK_FAIL + CHANNEL_FAIL + RELAY_FAIL + PATHREQ_FAIL + PROOF_FAIL + ROBUSTNESS_FAIL \
         + LINKINIT_FAIL + LINKRELAY_FAIL + LINKRUSTRELAY_FAIL + LINKINITRELAY_FAIL + LINKBURST_FAIL + CONCURRENT_FAIL + TEARDOWN_FAIL \
         + IFAC_FAIL + IFACMISMATCH_FAIL + IFACRELAY_FAIL + IFACLINK_FAIL + IFACLARGE_FAIL \
-        + TRANSPORT_FAIL + DUAL_FAIL + MULTIHOP_FAIL \
+        + TRANSPORT_FAIL + DUAL_FAIL + MULTIHOP_FAIL + CHANRELAY_FAIL + RESRELAY_FAIL + RESINITRELAY_FAIL \
         + AUTO_FAIL + AUTODATA_FAIL + AUTOGROUP_FAIL \
         + ANNAPPDATA_FAIL + ANNDEDUP_FAIL \
         + LOCALIPC_FAIL \
@@ -484,7 +513,7 @@ test-all:
         + RESOURCE_FAIL + RESCONCUR_FAIL + RESMULTI_FAIL \
         + KEEPALIVE_FAIL + STABILITY_FAIL))
     echo ""
-    printf "  %-30s %s passed, %s failed\n" "e2e total (42 suites)" "$E2E_PASS" "$E2E_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "e2e total (45 suites)" "$E2E_PASS" "$E2E_FAIL"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))
@@ -681,7 +710,14 @@ test-esp32c6-teardown: flash-esp32c6-test
         --rust-binary ../../target/debug/rete-linux \
         --serial-port {{serial_port}} --timeout 30
 
-# Flash once, run all ESP32-C6 hardware tests (Topology A + B)
+# 3-node ESP32 relay test (Python <-> rete-linux <-> ESP32)
+test-esp32c6-3node: flash-esp32c6-test
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python esp32c6_3node_relay_interop.py \
+        --rust-binary ../../target/debug/rete-linux \
+        --serial-port {{serial_port}} --timeout 120
+
+# Flash once, run all ESP32-C6 hardware tests (Topology A + B + C)
 test-esp32c6-all: flash-esp32c6-test
     #!/usr/bin/env bash
     set -euo pipefail
@@ -692,35 +728,84 @@ test-esp32c6-all: flash-esp32c6-test
     TOPO_A=(proof link resource request teardown link_initiate)
     # Topology B tests (Python RNS <-> ESP32 via serial bridge): no --rust-binary
     TOPO_B=(py_announce py_data py_link py_channel)
-    PASS=0; FAIL=0
+    # Topology C tests (Python <-> rete-linux relay <-> ESP32): needs --rust-binary + --serial-port, longer timeout
+    TOPO_C=(3node_relay)
+    SUITE_PASS=0; SUITE_FAIL=0
+    TOTAL_CHECKS=0; TOTAL_CHECK_PASS=0
+    SUMMARY_LINES=()
+    run_esp32_test() {
+        local name="$1" topo="$2"
+        shift 2
+        local output rc=0
+        output=$(cd tests/interop && uv run python "esp32c6_${name}_interop.py" "$@" 2>&1) || rc=$?
+        echo "$output"
+        # Parse "Results: X/Y passed, Z/Y failed" from output
+        local result_line checks_str p_str t_str
+        result_line=$(echo "$output" | grep "Results:" | tail -1)
+        p_str=$(echo "$result_line" | grep -oP '\d+(?=/\d+ passed)' || echo "0")
+        t_str=$(echo "$result_line" | grep -oP '(?<=Results: )\d+/\d+' | head -1 | cut -d/ -f2)
+        t_str=${t_str:-0}; p_str=${p_str:-0}
+        local f_str=$((t_str - p_str))
+        TOTAL_CHECKS=$((TOTAL_CHECKS + t_str))
+        TOTAL_CHECK_PASS=$((TOTAL_CHECK_PASS + p_str))
+        if [ "$rc" -eq 0 ]; then
+            SUITE_PASS=$((SUITE_PASS+1))
+            SUMMARY_LINES+=("$(printf '  PASS  %-40s %s/%s checks' "esp32c6_${name} (${topo})" "$p_str" "$t_str")")
+        else
+            SUITE_FAIL=$((SUITE_FAIL+1))
+            SUMMARY_LINES+=("$(printf '  FAIL  %-40s %s/%s checks' "esp32c6_${name} (${topo})" "$p_str" "$t_str")")
+        fi
+        sleep 2
+    }
     for t in "${TOPO_A[@]}"; do
         echo ""
         echo "=== esp32c6_${t}_interop (Topology A) ==="
-        if cd tests/interop && uv run python "esp32c6_${t}_interop.py" \
+        run_esp32_test "$t" "Topo A" \
             --rust-binary ../../target/debug/rete-linux \
-            --serial-port {{serial_port}} --timeout 30; then
-            PASS=$((PASS+1))
-        else
-            FAIL=$((FAIL+1))
-        fi
-        sleep 2
-        cd ../..
+            --serial-port {{serial_port}} --timeout 30
     done
     for t in "${TOPO_B[@]}"; do
         echo ""
         echo "=== esp32c6_${t}_interop (Topology B) ==="
-        if cd tests/interop && uv run python "esp32c6_${t}_interop.py" \
-            --serial-port {{serial_port}} --timeout 30; then
-            PASS=$((PASS+1))
-        else
-            FAIL=$((FAIL+1))
-        fi
-        sleep 2
-        cd ../..
+        run_esp32_test "$t" "Topo B" \
+            --serial-port {{serial_port}} --timeout 30
+    done
+    for t in "${TOPO_C[@]}"; do
+        echo ""
+        echo "=== esp32c6_${t}_interop (Topology C) ==="
+        run_esp32_test "$t" "Topo C" \
+            --rust-binary ../../target/debug/rete-linux \
+            --serial-port {{serial_port}} --timeout 120
     done
     echo ""
-    echo "=== ESP32 RESULTS: $PASS passed, $FAIL failed (${#TOPO_A[@]} Topology A + ${#TOPO_B[@]} Topology B) ==="
-    [ "$FAIL" -eq 0 ]
+    echo "═══════════════════════════════════════════════════"
+    echo "  ESP32-C6 Hardware Test Summary"
+    echo "───────────────────────────────────────────────────"
+    echo "  Topology A (rete-linux <-> ESP32 serial):"
+    for line in "${SUMMARY_LINES[@]}"; do
+        if echo "$line" | grep -q "Topo A"; then echo "$line"; fi
+    done
+    echo ""
+    echo "  Topology B (Python RNS <-> ESP32 serial bridge):"
+    for line in "${SUMMARY_LINES[@]}"; do
+        if echo "$line" | grep -q "Topo B"; then echo "$line"; fi
+    done
+    echo ""
+    echo "  Topology C (Python <-> rete-linux relay <-> ESP32):"
+    for line in "${SUMMARY_LINES[@]}"; do
+        if echo "$line" | grep -q "Topo C"; then echo "$line"; fi
+    done
+    echo "───────────────────────────────────────────────────"
+    TOTAL_CHECK_FAIL=$((TOTAL_CHECKS - TOTAL_CHECK_PASS))
+    printf "  Suites: %s passed, %s failed (%s total)\n" "$SUITE_PASS" "$SUITE_FAIL" "$((SUITE_PASS + SUITE_FAIL))"
+    printf "  Checks: %s passed, %s failed (%s total)\n" "$TOTAL_CHECK_PASS" "$TOTAL_CHECK_FAIL" "$TOTAL_CHECKS"
+    if [ "$SUITE_FAIL" -eq 0 ]; then
+        echo "  ALL SUITES PASSED ✓"
+    else
+        echo "  SOME SUITES FAILED ✗"
+    fi
+    echo "═══════════════════════════════════════════════════"
+    [ "$SUITE_FAIL" -eq 0 ]
 
 # --------------------------------------------------------------------------
 # End-to-end test: ESP32-C6 <-> Python RNS reference over serial

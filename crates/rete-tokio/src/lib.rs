@@ -101,6 +101,34 @@ impl TokioNode {
         self.core.register_peer(peer, app_name, aspects, now);
     }
 
+    /// Queue an announce on behalf of a peer identity.
+    ///
+    /// Useful when we know a peer's full keypair (from a seed) and want to
+    /// inject their announce into the network before they re-announce themselves.
+    pub fn queue_peer_announce(&mut self, peer: &Identity, app_name: &str, aspects: &[&str]) {
+        let mut rng = rand::thread_rng();
+        let now = current_time_secs();
+        self.core
+            .queue_peer_announce(peer, app_name, aspects, &mut rng, now);
+    }
+
+    /// Register a peer and build a cached announce for flush-on-connect.
+    ///
+    /// Stores the peer's identity+path AND a synthetic announce_raw in the
+    /// path table, so `cached_announces()` includes it when new interfaces
+    /// connect at startup.
+    pub fn register_peer_with_announce(
+        &mut self,
+        peer: &Identity,
+        app_name: &str,
+        aspects: &[&str],
+    ) {
+        let mut rng = rand::thread_rng();
+        let now = current_time_secs();
+        self.core
+            .register_peer_with_announce(peer, app_name, aspects, &mut rng, now);
+    }
+
     /// Build and return a raw announce packet for this node.
     pub fn build_announce(&self, app_data: Option<&[u8]>) -> Vec<u8> {
         let mut rng = rand::thread_rng();
@@ -108,12 +136,14 @@ impl TokioNode {
         self.core.build_announce(app_data, &mut rng, now)
     }
 
-    /// Dispatch a single command, returning outbound packets and whether to continue.
+    /// Dispatch a single command, returning outbound packets, whether to
+    /// continue, and an optional [`NodeEvent`] that the caller should emit
+    /// through the `on_event` callback.
     pub fn handle_command<R>(
         &mut self,
         cmd: NodeCommand,
         rng: &mut R,
-    ) -> (Vec<OutboundPacket>, bool)
+    ) -> (Vec<OutboundPacket>, bool, Option<NodeEvent>)
     where
         R: rand_core::RngCore + rand_core::CryptoRng,
     {
@@ -122,10 +152,10 @@ impl TokioNode {
             NodeCommand::SendData { dest_hash, payload } => {
                 if let Some(pkt) = self.core.build_data_packet(&dest_hash, &payload, rng, now) {
                     eprintln!("[rete] cmd: sent DATA to {}", hex(&dest_hash));
-                    (vec![OutboundPacket::broadcast(pkt)], true)
+                    (vec![OutboundPacket::broadcast(pkt)], true, None)
                 } else {
                     eprintln!("[rete] cmd: send failed (unknown dest {})", hex(&dest_hash));
-                    (vec![], true)
+                    (vec![], true, None)
                 }
             }
             NodeCommand::InitiateLink { dest_hash } => {
@@ -135,10 +165,10 @@ impl TokioNode {
                         hex(&link_id),
                         hex(&dest_hash)
                     );
-                    (vec![outbound], true)
+                    (vec![outbound], true, None)
                 } else {
                     eprintln!("[rete] cmd: link initiation failed");
-                    (vec![], true)
+                    (vec![], true, None)
                 }
             }
             NodeCommand::SendChannelMessage {
@@ -150,23 +180,23 @@ impl TokioNode {
                     self.core
                         .send_channel_message(&link_id, message_type, &payload, now, rng)
                 {
-                    (vec![outbound], true)
+                    (vec![outbound], true, None)
                 } else {
                     eprintln!("[rete] cmd: channel send failed");
-                    (vec![], true)
+                    (vec![], true, None)
                 }
             }
             NodeCommand::RequestPath { dest_hash } => {
                 eprintln!("[rete] cmd: requesting path to {}", hex(&dest_hash));
-                (vec![self.core.request_path(&dest_hash)], true)
+                (vec![self.core.request_path(&dest_hash)], true, None)
             }
             NodeCommand::SendLinkData { link_id, payload } => {
                 if let Some(outbound) = self.core.send_link_data(&link_id, &payload, rng) {
                     eprintln!("[rete] cmd: sent link data on {}", hex(&link_id));
-                    (vec![outbound], true)
+                    (vec![outbound], true, None)
                 } else {
                     eprintln!("[rete] cmd: link data send failed (link {})", hex(&link_id));
-                    (vec![], true)
+                    (vec![], true, None)
                 }
             }
             NodeCommand::SendResource { link_id, data } => {
@@ -175,20 +205,21 @@ impl TokioNode {
                         "[rete] cmd: started resource transfer on link {}",
                         hex(&link_id)
                     );
-                    (vec![pkt], true)
+                    (vec![pkt], true, None)
                 } else {
                     eprintln!("[rete] cmd: resource send failed (link {})", hex(&link_id));
-                    (vec![], true)
+                    (vec![], true, None)
                 }
             }
             NodeCommand::CloseLink { link_id } => {
-                if let Some(outbound) = self.core.close_link(&link_id, rng) {
+                let (pkt, event) = self.core.close_link(&link_id, rng);
+                let packets = pkt.into_iter().collect();
+                if event.is_some() {
                     eprintln!("[rete] cmd: closed link {}", hex(&link_id));
-                    (vec![outbound], true)
                 } else {
                     eprintln!("[rete] cmd: close failed (link {})", hex(&link_id));
-                    (vec![], true)
                 }
+                (packets, true, event)
             }
             NodeCommand::SendRequest {
                 link_id,
@@ -203,26 +234,26 @@ impl TokioNode {
                         hex(&link_id),
                         hex(&request_id)
                     );
-                    (vec![outbound], true)
+                    (vec![outbound], true, None)
                 } else {
                     eprintln!("[rete] cmd: request send failed");
-                    (vec![], true)
+                    (vec![], true, None)
                 }
             }
             NodeCommand::Announce { app_data } => {
                 self.core.queue_announce(app_data.as_deref(), rng, now);
                 eprintln!("[rete] cmd: queued announce");
-                (self.core.flush_announces(now), true)
+                (self.core.flush_announces(now), true, None)
             }
             NodeCommand::AppCommand { name, .. } => {
                 eprintln!(
                     "[rete] cmd: app command '{name}' not handled (no app handler installed)"
                 );
-                (vec![], true)
+                (vec![], true, None)
             }
             NodeCommand::Shutdown => {
                 eprintln!("[rete] cmd: shutdown requested");
-                (vec![], false)
+                (vec![], false, None)
             }
         }
     }
@@ -303,6 +334,17 @@ impl TokioNode {
             hex(self.core.dest_hash())
         );
 
+        // Flush cached announces from path table to the new interface so it
+        // immediately learns about destinations we already know (e.g. from
+        // a previous announce that arrived on a different interface).
+        {
+            let cached = self.core.cached_announces();
+            if !cached.is_empty() {
+                eprintln!("[rete] flushing {} cached announces to new interface", cached.len());
+                dispatch_single(iface, &cached).await;
+            }
+        }
+
         // Send initial data to pre-registered peer (if configured)
         if let Some((data, dest)) = self.initial_send.take() {
             let now = current_time_secs();
@@ -361,8 +403,12 @@ impl TokioNode {
                                 dispatch_single(iface, &pkts).await;
                             }
                         } else {
-                            let (packets, cont) = self.handle_command(cmd, &mut rng);
+                            let (packets, cont, event) = self.handle_command(cmd, &mut rng);
                             dispatch_single(iface, &packets).await;
+                            if let Some(e) = event {
+                                let extra = on_event(e, &mut self.core, &mut rng);
+                                dispatch_single(iface, &extra).await;
+                            }
                             if !cont { break; }
                         }
                     }
@@ -454,6 +500,15 @@ impl TokioNode {
         }
         eprintln!("[rete] sent announce on {} interfaces", iface_senders.len());
 
+        // Flush cached announces from path table to all interfaces
+        {
+            let cached = self.core.cached_announces();
+            if !cached.is_empty() {
+                eprintln!("[rete] flushing {} cached announces to interfaces", cached.len());
+                dispatch_multi(&iface_senders, &cached, 0).await;
+            }
+        }
+
         // Send initial data to pre-registered peer (if configured)
         if let Some((data, dest)) = self.initial_send.take() {
             let now = current_time_secs();
@@ -485,8 +540,12 @@ impl TokioNode {
                 }
                 cmd = cmd_rx.recv() => {
                     if let Some(cmd) = cmd {
-                        let (packets, cont) = self.handle_command(cmd, &mut rng);
+                        let (packets, cont, event) = self.handle_command(cmd, &mut rng);
                         dispatch_multi(&iface_senders, &packets, 0).await;
+                        if let Some(e) = event {
+                            let extra = on_event(e, &mut self.core, &mut rng);
+                            dispatch_multi(&iface_senders, &extra, 0).await;
+                        }
                         if !cont { break; }
                     }
                 }

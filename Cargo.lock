@@ -853,6 +853,7 @@ dependencies = [
  "rete-transport",
  "serde_json",
  "tokio",
+ "tokio-serial",
 ]
 
 [[package]]

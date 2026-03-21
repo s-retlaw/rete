@@ -283,6 +283,9 @@ fn read_msgpack_bin_or_str<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u
 }
 
 /// Read a msgpack unsigned integer. Advances `pos`.
+///
+/// Also accepts booleans (false→0, true→1) and signed integers (as unsigned)
+/// for compatibility with Python msgpack encoding variants.
 fn read_msgpack_uint(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> {
     if *pos >= data.len() {
         return Err("unexpected end of msgpack data");
@@ -292,6 +295,10 @@ fn read_msgpack_uint(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> 
     match b {
         // positive fixint
         0x00..=0x7f => Ok(b as u64),
+        // false → 0
+        0xc2 => Ok(0),
+        // true → 1
+        0xc3 => Ok(1),
         // uint8
         0xcc => {
             if *pos >= data.len() {
@@ -338,6 +345,53 @@ fn read_msgpack_uint(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> 
             *pos += 8;
             Ok(v)
         }
+        // int8 (signed, treat as unsigned for non-negative values)
+        0xd0 => {
+            if *pos >= data.len() {
+                return Err("truncated int8");
+            }
+            let v = data[*pos] as i8;
+            *pos += 1;
+            Ok(v as u64)
+        }
+        // int16
+        0xd1 => {
+            if *pos + 2 > data.len() {
+                return Err("truncated int16");
+            }
+            let v = i16::from_be_bytes([data[*pos], data[*pos + 1]]);
+            *pos += 2;
+            Ok(v as u64)
+        }
+        // int32
+        0xd2 => {
+            if *pos + 4 > data.len() {
+                return Err("truncated int32");
+            }
+            let v = i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            Ok(v as u64)
+        }
+        // int64
+        0xd3 => {
+            if *pos + 8 > data.len() {
+                return Err("truncated int64");
+            }
+            let v = i64::from_be_bytes([
+                data[*pos],
+                data[*pos + 1],
+                data[*pos + 2],
+                data[*pos + 3],
+                data[*pos + 4],
+                data[*pos + 5],
+                data[*pos + 6],
+                data[*pos + 7],
+            ]);
+            *pos += 8;
+            Ok(v as u64)
+        }
+        // negative fixint (-32 to -1)
+        0xe0..=0xff => Ok(b as i8 as u64),
         _ => Err("expected msgpack uint"),
     }
 }
@@ -1008,8 +1062,8 @@ impl Resource {
         let mut hashmap_raw: Option<&[u8]> = None;
 
         for _ in 0..map_len {
-            // Read key (should be a 1-char string)
-            let key_bytes = read_msgpack_str(adv_payload, &mut pos)?;
+            // Read key (should be a 1-char string; accept bin for compat)
+            let key_bytes = read_msgpack_bin_or_str(adv_payload, &mut pos)?;
             if key_bytes.len() != 1 {
                 // Skip unknown key
                 skip_msgpack_value(adv_payload, &mut pos)?;

@@ -8,6 +8,8 @@
 
 #![no_std]
 
+#[cfg(feature = "std")]
+extern crate std;
 extern crate alloc;
 
 pub mod announce;
@@ -28,7 +30,10 @@ pub use channel::{
     Channel, ChannelEnvelope, DEFAULT_WINDOW, ENVELOPE_HEADER_SIZE, MSG_TYPE_STREAM,
 };
 pub use dedup::DedupWindow;
-pub use link::{compute_link_id, Link, LinkRole, LinkState, TeardownReason, LINK_MDU};
+pub use link::{
+    compute_link_id, signalling_bytes, Link, LinkRole, LinkState, TeardownReason, LINK_MDU,
+    LINK_MTU_SIZE,
+};
 pub use path::Path;
 pub use receipt::{PacketReceipt, ReceiptStatus, ReceiptTable};
 pub use request::{

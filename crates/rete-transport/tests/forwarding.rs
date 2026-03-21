@@ -982,3 +982,187 @@ fn rebroadcast_hops_preserved() {
     // Original hops was 0, after ingest it's incremented to 1
     assert_eq!(rpkt.hops, 1, "rebroadcast should preserve hops from ingest");
 }
+
+// ---------------------------------------------------------------------------
+// LRPROOF relay validation (V2)
+// ---------------------------------------------------------------------------
+
+/// Build a valid full link handshake setup for relay testing.
+/// Returns (relay, link_id, dest_hash, proof packet bytes).
+fn setup_relay_with_lrproof() -> (
+    TestTransport,
+    [u8; TRUNCATED_HASH_LEN],
+    [u8; TRUNCATED_HASH_LEN],
+    Vec<u8>,
+) {
+    let mut rng = rand::thread_rng();
+    let (mut relay, relay_hash) = make_relay_transport(b"relay-lrproof");
+
+    // Create identities for initiator and responder
+    let init_id = Identity::from_seed(b"initiator-lrproof-relay").unwrap();
+    let resp_id = Identity::from_seed(b"responder-lrproof-relay").unwrap();
+
+    // Compute destination hash for responder
+    let mut name_buf = [0u8; 128];
+    let expanded = rete_core::expand_name("testapp", &["link"], &mut name_buf).unwrap();
+    let resp_hash = resp_id.hash();
+    let dest_hash = rete_core::destination_hash(expanded, Some(&resp_hash));
+
+    // Register the responder identity so relay can validate LRPROOF
+    relay.register_identity(dest_hash, resp_id.public_key(), 100);
+
+    // Insert path to destination
+    insert_path(&mut relay, dest_hash, None, 1, 100);
+
+    // Build LINKREQUEST as HEADER_2 targeting relay
+    let (_, request_payload) =
+        rete_transport::Link::new_initiator(dest_hash, init_id.ed25519_pub(), &mut rng, 50);
+    let mut lr_buf = [0u8; MTU];
+    let lr_len = PacketBuilder::new(&mut lr_buf)
+        .header_type(HeaderType::Header2)
+        .packet_type(PacketType::LinkRequest)
+        .dest_type(DestType::Single)
+        .transport_type(TRANSPORT_TYPE_TRANSPORT)
+        .transport_id(&relay_hash)
+        .destination_hash(&dest_hash)
+        .context(0x00)
+        .payload(&request_payload)
+        .build()
+        .unwrap();
+
+    // Relay ingests LINKREQUEST → creates link_table entry + forwards
+    let mut lr_raw = lr_buf[..lr_len].to_vec();
+    match relay.ingest(&mut lr_raw, 100, &mut rng, &init_id) {
+        IngestResult::Forward { .. } => {}
+        other => panic!("expected Forward for H2 LINKREQUEST, got {:?}", other),
+    }
+
+    // Compute link_id from the forwarded (H1) packet
+    let link_id = rete_transport::compute_link_id(&lr_buf[..lr_len]).unwrap();
+
+    // Responder builds link + proof
+    let resp_link =
+        rete_transport::Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
+    let proof_payload = resp_link.build_proof(&resp_id).unwrap();
+
+    // Build LRPROOF packet destined for link_id
+    let mut proof_buf = [0u8; MTU];
+    let proof_len = PacketBuilder::new(&mut proof_buf)
+        .packet_type(PacketType::Proof)
+        .dest_type(DestType::Link)
+        .destination_hash(&link_id)
+        .context(rete_core::CONTEXT_LRPROOF)
+        .payload(&proof_payload)
+        .build()
+        .unwrap();
+
+    (relay, link_id, dest_hash, proof_buf[..proof_len].to_vec())
+}
+
+#[test]
+fn lrproof_relay_forwards_valid_signature() {
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
+    let (mut relay, _link_id, _dest_hash, proof_pkt) = setup_relay_with_lrproof();
+
+    let mut proof_raw = proof_pkt;
+    match relay.ingest(&mut proof_raw, 101, &mut rng, &identity) {
+        IngestResult::Forward { .. } => {} // valid LRPROOF forwarded
+        other => panic!("expected Forward for valid LRPROOF, got {:?}", other),
+    }
+}
+
+#[test]
+fn lrproof_relay_rejects_invalid_signature() {
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
+    let (mut relay, link_id, _dest_hash, _valid_proof) = setup_relay_with_lrproof();
+
+    // Build an LRPROOF with a corrupted signature (all zeros)
+    let mut bad_payload = [0u8; 99]; // sig[64] + x25519[32] + signalling[3]
+    // Leave sig as zeros (invalid)
+    bad_payload[64..96].copy_from_slice(&[0xAA; 32]); // random x25519 pub
+    bad_payload[96..99].copy_from_slice(&[0x20, 0x01, 0xF4]); // signalling
+
+    let mut proof_buf = [0u8; MTU];
+    let proof_len = PacketBuilder::new(&mut proof_buf)
+        .packet_type(PacketType::Proof)
+        .dest_type(DestType::Link)
+        .destination_hash(&link_id)
+        .context(rete_core::CONTEXT_LRPROOF)
+        .payload(&bad_payload)
+        .build()
+        .unwrap();
+
+    let mut proof_raw = proof_buf[..proof_len].to_vec();
+    match relay.ingest(&mut proof_raw, 101, &mut rng, &identity) {
+        IngestResult::Invalid => {} // invalid signature rejected
+        other => panic!("expected Invalid for bad LRPROOF, got {:?}", other),
+    }
+}
+
+#[test]
+fn lrproof_relay_forwards_when_identity_unknown() {
+    let mut rng = rand::thread_rng();
+    let identity = Identity::from_seed(b"test-identity").unwrap();
+
+    // Set up relay WITHOUT registering the responder identity
+    let (mut relay, relay_hash) = make_relay_transport(b"relay-no-identity");
+    let init_id = Identity::from_seed(b"initiator-no-id").unwrap();
+    let resp_id = Identity::from_seed(b"responder-no-id").unwrap();
+
+    let mut name_buf = [0u8; 128];
+    let expanded = rete_core::expand_name("testapp", &["link"], &mut name_buf).unwrap();
+    let resp_hash = resp_id.hash();
+    let dest_hash = rete_core::destination_hash(expanded, Some(&resp_hash));
+
+    // DON'T register identity: relay.register_identity(...)
+    insert_path(&mut relay, dest_hash, None, 1, 100);
+
+    // LINKREQUEST
+    let (_, request_payload) =
+        rete_transport::Link::new_initiator(dest_hash, init_id.ed25519_pub(), &mut rng, 50);
+    let mut lr_buf = [0u8; MTU];
+    let lr_len = PacketBuilder::new(&mut lr_buf)
+        .header_type(HeaderType::Header2)
+        .packet_type(PacketType::LinkRequest)
+        .dest_type(DestType::Single)
+        .transport_type(TRANSPORT_TYPE_TRANSPORT)
+        .transport_id(&relay_hash)
+        .destination_hash(&dest_hash)
+        .context(0x00)
+        .payload(&request_payload)
+        .build()
+        .unwrap();
+    let mut lr_raw = lr_buf[..lr_len].to_vec();
+    match relay.ingest(&mut lr_raw, 100, &mut rng, &identity) {
+        IngestResult::Forward { .. } => {}
+        other => panic!("expected Forward, got {:?}", other),
+    }
+
+    let link_id = rete_transport::compute_link_id(&lr_buf[..lr_len]).unwrap();
+
+    // Build valid proof
+    let resp_link =
+        rete_transport::Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
+    let proof_payload = resp_link.build_proof(&resp_id).unwrap();
+    let mut proof_buf = [0u8; MTU];
+    let proof_len = PacketBuilder::new(&mut proof_buf)
+        .packet_type(PacketType::Proof)
+        .dest_type(DestType::Link)
+        .destination_hash(&link_id)
+        .context(rete_core::CONTEXT_LRPROOF)
+        .payload(&proof_payload)
+        .build()
+        .unwrap();
+
+    // Should still forward (identity unknown, can't validate)
+    let mut proof_raw = proof_buf[..proof_len].to_vec();
+    match relay.ingest(&mut proof_raw, 101, &mut rng, &identity) {
+        IngestResult::Forward { .. } => {} // forwarded without validation
+        other => panic!(
+            "expected Forward when identity unknown, got {:?}",
+            other
+        ),
+    }
+}

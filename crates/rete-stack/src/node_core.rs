@@ -107,6 +107,10 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     /// When set, `start_resource` will try to compress data before sending.
     /// Only uses the compressed version if it is actually smaller.
     compress_fn: Option<TransformFn>,
+    /// Optional packet logging callback for diagnostics.
+    /// Called with (raw_bytes, direction, iface_idx) on every inbound packet.
+    /// direction is "IN".
+    packet_log_fn: Option<fn(&[u8], &str, u8)>,
 }
 
 /// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
@@ -157,6 +161,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             last_peer: None,
             decompress_fn: None,
             compress_fn: None,
+            packet_log_fn: None,
         }
     }
 
@@ -193,6 +198,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     /// Set the compression function for outbound resource data.
     pub fn set_compress_fn(&mut self, f: Option<TransformFn>) {
         self.compress_fn = f;
+    }
+
+    /// Set a packet logging callback for diagnostics.
+    /// Called with `(raw_bytes, "IN", iface_idx)` on every inbound packet.
+    pub fn set_packet_log_fn(&mut self, f: Option<fn(&[u8], &str, u8)>) {
+        self.packet_log_fn = f;
     }
 
     /// Number of learned paths in the transport table.
@@ -297,6 +308,37 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         self.last_peer = Some(peer_dest_hash);
     }
 
+    /// Register a peer's identity and build a cached announce for them.
+    ///
+    /// Like `register_peer` but also builds an announce packet and stores it
+    /// as `announce_raw` in the path table. This allows the cached announce
+    /// flush (on new interface connect) to propagate the peer's identity to
+    /// other interfaces — eliminating the need for `queue_peer_announce`.
+    pub fn register_peer_with_announce<R: RngCore + CryptoRng>(
+        &mut self,
+        peer: &Identity,
+        app_name: &str,
+        aspects: &[&str],
+        rng: &mut R,
+        now: u64,
+    ) {
+        self.register_peer(peer, app_name, aspects, now);
+
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
+            .expect("app_name + aspects must fit in 128 bytes");
+        let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer.hash()));
+
+        // Build announce and store in path table for cached flush
+        let aspects_refs: Vec<&str> = aspects.iter().copied().collect();
+        let mut buf = [0u8; MTU];
+        if let Ok(n) = Transport::<P, A, D, L>::create_announce(
+            peer, app_name, &aspects_refs, None, rng, now, &mut buf,
+        ) {
+            self.transport.store_announce_raw(&peer_dest_hash, &buf[..n]);
+        }
+    }
+
     /// Build an encrypted DATA packet addressed to a known destination.
     ///
     /// Also registers a receipt for proof tracking. The `now` timestamp is
@@ -333,6 +375,43 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         }
 
         Some(pkt_buf[..pkt_len].to_vec())
+    }
+
+    /// Queue an announce on behalf of a peer identity.
+    ///
+    /// When we know a peer's full identity (e.g., from `--peer-seed`), we can
+    /// fabricate a valid announce and inject it into the transport. This lets
+    /// the announce propagate through the network even if the peer's original
+    /// announce was missed (e.g., ESP32 announced before we connected).
+    pub fn queue_peer_announce<R: RngCore + CryptoRng>(
+        &mut self,
+        peer: &Identity,
+        app_name: &str,
+        aspects: &[&str],
+        rng: &mut R,
+        now: u64,
+    ) -> bool {
+        let mut name_buf = [0u8; 128];
+        let expanded = match rete_core::expand_name(app_name, aspects, &mut name_buf) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer.hash()));
+
+        let mut buf = [0u8; MTU];
+        let n = match Transport::<P, A, D, L>::create_announce(
+            peer, app_name, aspects, None, rng, now, &mut buf,
+        ) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        self.transport.queue_announce(PendingAnnounce {
+            dest_hash: peer_dest_hash,
+            raw: buf[..n].to_vec(),
+            tx_count: 0,
+            last_tx_at: 0,
+            local: true,
+        })
     }
 
     /// Build and return a raw announce packet for this node.
@@ -418,13 +497,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             Ok(n) => n,
             Err(_) => return false,
         };
-        let mut raw = heapless::Vec::new();
-        if raw.extend_from_slice(&buf[..n]).is_err() {
-            return false;
-        }
         self.transport.queue_announce(PendingAnnounce {
             dest_hash: *dest_hash,
-            raw,
+            raw: buf[..n].to_vec(),
             tx_count: 0,
             last_tx_at: 0,
             local: true,
@@ -439,7 +514,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         self.transport
             .pending_outbound(now)
             .into_iter()
-            .map(|raw| OutboundPacket::broadcast(raw.to_vec()))
+            .map(|raw| OutboundPacket::broadcast(raw))
+            .collect()
+    }
+
+    /// Return cached announce packets from the path table as outbound broadcasts.
+    ///
+    /// Used to flush known announces to a newly connected interface so it
+    /// immediately learns about destinations the node has already seen.
+    pub fn cached_announces(&self) -> Vec<OutboundPacket> {
+        self.transport
+            .cached_announces()
+            .into_iter()
+            .map(|raw| OutboundPacket::broadcast(raw))
             .collect()
     }
 
@@ -501,13 +588,22 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     }
 
     /// Close a link, sending a LINKCLOSE packet and removing it from the map.
+    ///
+    /// Returns the outbound LINKCLOSE packet and a [`NodeEvent::LinkClosed`]
+    /// event so the caller can emit it locally (the event would otherwise only
+    /// fire on *receiving* a LINKCLOSE from the remote side).
     pub fn close_link<R: RngCore + CryptoRng>(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
-    ) -> Option<OutboundPacket> {
-        let pkt = self.transport.build_linkclose_packet(link_id, rng)?;
-        Some(OutboundPacket::broadcast(pkt))
+    ) -> (Option<OutboundPacket>, Option<NodeEvent>) {
+        let pkt = self.transport.build_linkclose_packet(link_id, rng);
+        let event = if pkt.is_some() {
+            Some(NodeEvent::LinkClosed { link_id: *link_id })
+        } else {
+            None
+        };
+        (pkt.map(OutboundPacket::broadcast), event)
     }
 
     /// Send plain data over an established link.
@@ -651,6 +747,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         if len > MTU {
             return IngestOutcome::empty();
         }
+
+        // Packet log: inbound
+        if let Some(log_fn) = self.packet_log_fn {
+            log_fn(raw, "IN", iface);
+        }
+
         let mut pkt_buf = [0u8; MTU];
         pkt_buf[..len].copy_from_slice(raw);
 
@@ -2158,5 +2260,365 @@ mod tests {
         // 5th queue attempt should return false (not crash)
         let result = core.queue_announce(None, &mut rng, 1000);
         assert!(!result, "queue should be full, returning false");
+    }
+
+    // -----------------------------------------------------------------------
+    // Channel through relay (3-node) test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_channel_through_relay() {
+        let mut rng = rand::thread_rng();
+
+        // -----------------------------------------------------------------
+        // Step 1: Create 3 NodeCores
+        // A = initiator, B = transport relay, C = responder
+        // -----------------------------------------------------------------
+        let mut node_a = make_core(b"relay-node-a");
+        let mut node_b = make_core(b"relay-node-b");
+        let mut node_c = make_core(b"relay-node-c");
+
+        // -----------------------------------------------------------------
+        // Step 2: Enable transport on B (makes it a relay)
+        // -----------------------------------------------------------------
+        node_b.enable_transport();
+
+        // -----------------------------------------------------------------
+        // Step 3: A knows C's identity (register_peer)
+        // -----------------------------------------------------------------
+        let id_c = Identity::from_seed(b"relay-node-c").unwrap();
+        node_a.register_peer(&id_c, "testapp", &["aspect1"], 100);
+
+        // Override A's direct path to C with a path via B's identity hash.
+        // This causes initiate_link to build a HEADER_2 LINKREQUEST with
+        // transport_id = B's identity hash.
+        let id_b = Identity::from_seed(b"relay-node-b").unwrap();
+        let c_dest = *node_c.dest_hash();
+        node_a
+            .transport
+            .insert_path(c_dest, rete_transport::Path::via_repeater(id_b.hash(), 2, 100));
+
+        // -----------------------------------------------------------------
+        // Step 4: B knows C's identity and has a direct path to C's dest.
+        // This lets B forward the LINKREQUEST and strip the HEADER_2
+        // transport header (converting back to HEADER_1 for C).
+        // -----------------------------------------------------------------
+        node_b.register_peer(&id_c, "testapp", &["aspect1"], 100);
+
+        // -----------------------------------------------------------------
+        // Step 5: Link handshake: A → B → C → B → A
+        // -----------------------------------------------------------------
+
+        // 5a. A initiates link to C's dest hash.
+        // Because A has a path to C via B, this produces a HEADER_2 LINKREQUEST
+        // with transport_id = B's identity hash.
+        let (lr_outbound, link_id) = node_a
+            .initiate_link(c_dest, 100, &mut rng)
+            .expect("A should produce LINKREQUEST");
+        let lr_parsed = Packet::parse(&lr_outbound.data).unwrap();
+        assert_eq!(
+            lr_parsed.header_type,
+            HeaderType::Header2,
+            "LINKREQUEST should be HEADER_2 (routed via relay B)"
+        );
+        assert_eq!(lr_parsed.packet_type, PacketType::LinkRequest);
+
+        // 5b. Feed LINKREQUEST to B (arriving on iface 0 from A's direction).
+        // B's transport sees transport_id == own identity hash, creates a
+        // link_table entry for the link_id, and forwards (stripped to HEADER_1).
+        let b_outcome = node_b.handle_ingest(&lr_outbound.data, 100, 0, &mut rng);
+        assert!(
+            b_outcome.event.is_none(),
+            "relay B should not emit an event for forwarded LINKREQUEST"
+        );
+        assert_eq!(
+            b_outcome.packets.len(),
+            1,
+            "relay B should forward exactly one packet"
+        );
+        assert_eq!(b_outcome.packets[0].routing, PacketRouting::AllExceptSource);
+
+        let forwarded_lr = &b_outcome.packets[0].data;
+
+        // 5c. Feed the forwarded LINKREQUEST to C (arriving on iface 1 from B's direction).
+        // C is the local destination, so it accepts the link and produces LRPROOF.
+        let c_outcome = node_c.handle_ingest(forwarded_lr, 101, 1, &mut rng);
+        assert!(
+            matches!(c_outcome.event, Some(NodeEvent::LinkEstablished { .. })),
+            "C should emit LinkEstablished on receiving LINKREQUEST"
+        );
+        assert!(!c_outcome.packets.is_empty(), "C should produce LRPROOF");
+        let lrproof_pkt = &c_outcome.packets[0].data;
+
+        // 5d. Feed LRPROOF to B (arriving on iface 1 from C's direction).
+        // LRPROOF has dest_type=Link, destination_hash=link_id.
+        // B has link_id in its link_table, so it forwards the proof.
+        let b_proof_outcome = node_b.handle_ingest(lrproof_pkt, 102, 1, &mut rng);
+        assert!(
+            b_proof_outcome.event.is_none(),
+            "relay B should not emit an event for forwarded LRPROOF"
+        );
+        assert_eq!(
+            b_proof_outcome.packets.len(),
+            1,
+            "relay B should forward the LRPROOF"
+        );
+        let forwarded_proof = &b_proof_outcome.packets[0].data;
+
+        // 5e. Feed LRPROOF to A (arriving on iface 0).
+        // A verifies the proof → emits LinkEstablished + auto-sends LRRTT.
+        let a_proof_outcome = node_a.handle_ingest(forwarded_proof, 103, 0, &mut rng);
+        assert!(
+            matches!(
+                a_proof_outcome.event,
+                Some(NodeEvent::LinkEstablished { .. })
+            ),
+            "A should emit LinkEstablished after verifying LRPROOF"
+        );
+
+        // Find the LRRTT packet in A's outcome
+        let lrrtt_pkt = a_proof_outcome
+            .packets
+            .iter()
+            .find(|p| {
+                rete_core::Packet::parse(&p.data)
+                    .map(|pkt| pkt.context == rete_core::CONTEXT_LRRTT)
+                    .unwrap_or(false)
+            })
+            .expect("A should auto-send LRRTT after link establishment");
+
+        // 5f. Feed LRRTT to B → B forwards via link_table.
+        let b_rtt_outcome = node_b.handle_ingest(&lrrtt_pkt.data, 104, 0, &mut rng);
+        assert!(
+            b_rtt_outcome.event.is_none(),
+            "relay B should not emit an event for forwarded LRRTT"
+        );
+        assert_eq!(
+            b_rtt_outcome.packets.len(),
+            1,
+            "relay B should forward the LRRTT"
+        );
+        let forwarded_rtt = &b_rtt_outcome.packets[0].data;
+
+        // 5g. Feed LRRTT to C → C emits LinkEstablished (link activated).
+        let c_rtt_outcome = node_c.handle_ingest(forwarded_rtt, 105, 1, &mut rng);
+        assert!(
+            matches!(
+                c_rtt_outcome.event,
+                Some(NodeEvent::LinkEstablished { .. })
+            ),
+            "C should emit LinkEstablished on receiving LRRTT (link activated)"
+        );
+
+        // Verify both links are now Active
+        let a_link = node_a.transport.get_link(&link_id).unwrap();
+        assert_eq!(
+            a_link.state,
+            rete_transport::LinkState::Active,
+            "A's link should be Active"
+        );
+        let c_link = node_c.transport.get_link(&link_id).unwrap();
+        assert_eq!(
+            c_link.state,
+            rete_transport::LinkState::Active,
+            "C's link should be Active"
+        );
+
+        // -----------------------------------------------------------------
+        // Step 6: A sends channel message → B forwards → C receives
+        // -----------------------------------------------------------------
+        let a_ch_outbound = node_a
+            .send_channel_message(&link_id, 0x42, b"relay-channel-test", 200, &mut rng)
+            .expect("A should send channel message");
+
+        // Feed channel message to B → B forwards via link_table
+        let b_ch_outcome = node_b.handle_ingest(&a_ch_outbound.data, 200, 0, &mut rng);
+        assert!(
+            b_ch_outcome.event.is_none(),
+            "relay B should not emit an event for forwarded channel message"
+        );
+        assert_eq!(
+            b_ch_outcome.packets.len(),
+            1,
+            "relay B should forward channel message"
+        );
+        let forwarded_ch = &b_ch_outcome.packets[0].data;
+
+        // Feed forwarded channel message to C
+        let c_ch_outcome = node_c.handle_ingest(forwarded_ch, 201, 1, &mut rng);
+
+        // -----------------------------------------------------------------
+        // Step 7: Verify C receives the channel message correctly
+        // -----------------------------------------------------------------
+        match c_ch_outcome.event {
+            Some(NodeEvent::ChannelMessages {
+                link_id: lid,
+                messages,
+            }) => {
+                assert_eq!(lid, link_id);
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].0, 0x42, "message_type should be 0x42");
+                assert_eq!(
+                    messages[0].1, b"relay-channel-test",
+                    "payload mismatch"
+                );
+            }
+            other => panic!("C expected ChannelMessages, got {:?}", other),
+        }
+
+        // -----------------------------------------------------------------
+        // Step 8: C sends channel message back → B forwards → A receives
+        // -----------------------------------------------------------------
+        let c_reply_outbound = node_c
+            .send_channel_message(&link_id, 0x43, b"relay-reply", 210, &mut rng)
+            .expect("C should send channel message back");
+
+        // Feed reply to B → B forwards via link_table
+        let b_reply_outcome =
+            node_b.handle_ingest(&c_reply_outbound.data, 210, 1, &mut rng);
+        assert!(
+            b_reply_outcome.event.is_none(),
+            "relay B should not emit an event for forwarded reply"
+        );
+        assert_eq!(
+            b_reply_outcome.packets.len(),
+            1,
+            "relay B should forward reply channel message"
+        );
+        let forwarded_reply = &b_reply_outcome.packets[0].data;
+
+        // Feed forwarded reply to A
+        let a_reply_outcome = node_a.handle_ingest(forwarded_reply, 211, 0, &mut rng);
+
+        // -----------------------------------------------------------------
+        // Step 9: Verify A receives the return channel message
+        // -----------------------------------------------------------------
+        match a_reply_outcome.event {
+            Some(NodeEvent::ChannelMessages {
+                link_id: lid,
+                messages,
+            }) => {
+                assert_eq!(lid, link_id);
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].0, 0x43, "reply message_type should be 0x43");
+                assert_eq!(
+                    messages[0].1, b"relay-reply",
+                    "reply payload mismatch"
+                );
+            }
+            other => panic!("A expected ChannelMessages for reply, got {:?}", other),
+        }
+    }
+
+    /// Reverse direction: C initiates link to A through relay B.
+    /// Verifies both link initiation directions work through a relay.
+    #[test]
+    fn test_channel_through_relay_reverse() {
+        let mut rng = rand::thread_rng();
+
+        // C = initiator, B = transport relay, A = responder
+        let mut node_a = make_core(b"rev-relay-a");
+        let mut node_b = make_core(b"rev-relay-b");
+        let mut node_c = make_core(b"rev-relay-c");
+
+        node_b.enable_transport();
+
+        // C knows A's identity and has a path via B
+        let id_a = Identity::from_seed(b"rev-relay-a").unwrap();
+        let id_b = Identity::from_seed(b"rev-relay-b").unwrap();
+        node_c.register_peer(&id_a, "testapp", &["aspect1"], 100);
+        let a_dest = *node_a.dest_hash();
+        node_c
+            .transport
+            .insert_path(a_dest, rete_transport::Path::via_repeater(id_b.hash(), 2, 100));
+
+        // B knows A's identity (for LINKREQUEST forwarding)
+        node_b.register_peer(&id_a, "testapp", &["aspect1"], 100);
+
+        // --- Handshake: C → B → A → B → C ---
+
+        // C initiates link to A
+        let (lr_outbound, link_id) = node_c
+            .initiate_link(a_dest, 100, &mut rng)
+            .expect("C should produce LINKREQUEST");
+        assert_eq!(
+            Packet::parse(&lr_outbound.data).unwrap().header_type,
+            HeaderType::Header2,
+        );
+
+        // B forwards LINKREQUEST
+        let b_out = node_b.handle_ingest(&lr_outbound.data, 100, 0, &mut rng);
+        assert!(b_out.event.is_none());
+        assert_eq!(b_out.packets.len(), 1);
+
+        // A receives LINKREQUEST → emits LinkEstablished + LRPROOF
+        let a_out = node_a.handle_ingest(&b_out.packets[0].data, 101, 1, &mut rng);
+        assert!(matches!(a_out.event, Some(NodeEvent::LinkEstablished { .. })));
+        assert!(!a_out.packets.is_empty());
+
+        // B forwards LRPROOF
+        let b_proof = node_b.handle_ingest(&a_out.packets[0].data, 102, 1, &mut rng);
+        assert_eq!(b_proof.packets.len(), 1);
+
+        // C receives LRPROOF → LinkEstablished + sends LRRTT
+        let c_proof = node_c.handle_ingest(&b_proof.packets[0].data, 103, 0, &mut rng);
+        assert!(matches!(c_proof.event, Some(NodeEvent::LinkEstablished { .. })));
+        let lrrtt_pkt = c_proof
+            .packets
+            .iter()
+            .find(|p| {
+                rete_core::Packet::parse(&p.data)
+                    .map(|pkt| pkt.context == rete_core::CONTEXT_LRRTT)
+                    .unwrap_or(false)
+            })
+            .expect("C should auto-send LRRTT");
+
+        // B forwards LRRTT
+        let b_rtt = node_b.handle_ingest(&lrrtt_pkt.data, 104, 0, &mut rng);
+        assert_eq!(b_rtt.packets.len(), 1);
+
+        // A receives LRRTT → link activated
+        let a_rtt = node_a.handle_ingest(&b_rtt.packets[0].data, 105, 1, &mut rng);
+        assert!(matches!(a_rtt.event, Some(NodeEvent::LinkEstablished { .. })));
+
+        // Verify both links Active
+        assert_eq!(
+            node_c.transport.get_link(&link_id).unwrap().state,
+            rete_transport::LinkState::Active
+        );
+        assert_eq!(
+            node_a.transport.get_link(&link_id).unwrap().state,
+            rete_transport::LinkState::Active
+        );
+
+        // --- Channel message: C → B → A ---
+        let c_msg = node_c
+            .send_channel_message(&link_id, 0x42, b"reverse-relay-msg", 200, &mut rng)
+            .expect("C should send channel message");
+        let b_fwd = node_b.handle_ingest(&c_msg.data, 200, 0, &mut rng);
+        assert_eq!(b_fwd.packets.len(), 1);
+        let a_recv = node_a.handle_ingest(&b_fwd.packets[0].data, 201, 1, &mut rng);
+        match a_recv.event {
+            Some(NodeEvent::ChannelMessages { messages, .. }) => {
+                assert_eq!(messages[0].0, 0x42);
+                assert_eq!(messages[0].1, b"reverse-relay-msg");
+            }
+            other => panic!("A expected ChannelMessages, got {:?}", other),
+        }
+
+        // --- Channel reply: A → B → C ---
+        let a_reply = node_a
+            .send_channel_message(&link_id, 0x43, b"reverse-reply", 210, &mut rng)
+            .expect("A should reply");
+        let b_fwd2 = node_b.handle_ingest(&a_reply.data, 210, 1, &mut rng);
+        assert_eq!(b_fwd2.packets.len(), 1);
+        let c_recv = node_c.handle_ingest(&b_fwd2.packets[0].data, 211, 0, &mut rng);
+        match c_recv.event {
+            Some(NodeEvent::ChannelMessages { messages, .. }) => {
+                assert_eq!(messages[0].0, 0x43);
+                assert_eq!(messages[0].1, b"reverse-reply");
+            }
+            other => panic!("C expected ChannelMessages for reply, got {:?}", other),
+        }
     }
 }

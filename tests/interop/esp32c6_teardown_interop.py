@@ -33,12 +33,12 @@ def main():
             t.dump_output("Rust stdout", rust_lines)
             return
 
-        # Close the first link
-        t.close_esp32_link(link_id_1)
+        # Close the first link (pass rust_lines for proper polling)
+        t.close_esp32_link(link_id_1, rust_lines=rust_lines, timeout=10)
 
-        # Wait for LINK_CLOSED
-        closed_line = t.wait_for_line(rust_lines, "LINK_CLOSED", timeout=10)
-        t.check(closed_line is not None, "First link closed (LINK_CLOSED received)")
+        # Verify LINK_CLOSED was seen (close_esp32_link already polled for it)
+        closed = t.has_line(rust_lines, "LINK_CLOSED")
+        t.check(closed, "First link closed (LINK_CLOSED received)")
 
         # Give ESP32 time to process the close
         time.sleep(1.0)
@@ -53,18 +53,24 @@ def main():
 
         # Send channel message on new link
         t._log("sending channel message on second link...")
+        echo_start = len(rust_lines)
         t.send_rust(f"channel {link_id_2} 0001 teardown-test-msg")
 
-        # Wait for echo
-        echo_line = t.wait_for_line(rust_lines, "CHANNEL_MSG", timeout=5)
+        # Wait for echo — use wait_for_line_after to skip the greeting CHANNEL_MSG
+        echo_line = t.wait_for_line_after(
+            rust_lines, "CHANNEL_MSG", echo_start, timeout=10,
+        )
         got_echo = echo_line is not None and "echo:teardown-test-msg" in (echo_line or "")
-        # Fallback: check all lines if wait_for_line matched a different CHANNEL_MSG
+        # Fallback: check all lines after the greeting
         if not got_echo:
-            got_echo = t.has_line(rust_lines, "CHANNEL_MSG", contains="echo:teardown-test-msg")
+            for line in rust_lines[echo_start:]:
+                if "CHANNEL_MSG" in line and "echo:teardown-test-msg" in line:
+                    got_echo = True
+                    break
         t.check(got_echo, "Channel echo works on second link")
 
         # Close second link
-        t.close_esp32_link(link_id_2)
+        t.close_esp32_link(link_id_2, rust_lines=rust_lines)
 
         # Dump output
         t.dump_output("Rust stdout", rust_lines)

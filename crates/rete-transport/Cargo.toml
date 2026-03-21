@@ -9,6 +9,8 @@ keywords.workspace   = true
 categories.workspace = true
 
 [features]
+std = []
+relay-debug = ["std"]
 serde = ["dep:serde"]
 
 [dependencies]

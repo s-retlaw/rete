@@ -1,5 +1,24 @@
 //! Core Transport struct — path table, announce queue, packet processing, links.
 
+/// Relay debug logging — only available when the `relay-debug` feature is enabled.
+macro_rules! relay_log {
+    ($($arg:tt)*) => {
+        #[cfg(feature = "relay-debug")]
+        std::eprintln!($($arg)*);
+    };
+}
+
+/// Format first 4 bytes of a hash as hex for compact logging.
+#[cfg(feature = "relay-debug")]
+fn hex_short(h: &[u8]) -> alloc::string::String {
+    use alloc::format;
+    if h.len() >= 4 {
+        format!("{:02x}{:02x}{:02x}{:02x}..", h[0], h[1], h[2], h[3])
+    } else {
+        format!("{:?}", h)
+    }
+}
+
 use crate::announce::validate_announce;
 use crate::link::LINK_MDU;
 use crate::link::{compute_link_id, Link};
@@ -397,6 +416,31 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         self.announces.len()
     }
 
+    /// Return cached raw announce packets from the path table.
+    ///
+    /// When a new interface connects, the node should forward these so the
+    /// new peer learns about destinations we already know. This eliminates
+    /// the need for synthetic announces via `--peer-seed`.
+    pub fn cached_announces(&self) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        let mut out = alloc::vec::Vec::new();
+        for (_dest, path) in self.paths.iter() {
+            if let Some(ref raw) = path.announce_raw {
+                out.push(raw.clone());
+            }
+        }
+        out
+    }
+
+    /// Store a raw announce packet on an existing path entry.
+    ///
+    /// Used by `register_peer_with_announce` to cache a synthetic announce so
+    /// that `cached_announces()` includes it for new-interface flush.
+    pub fn store_announce_raw(&mut self, dest: &[u8; TRUNCATED_HASH_LEN], raw: &[u8]) {
+        if let Some(path) = self.paths.get_mut(dest) {
+            path.announce_raw = Some(raw.to_vec());
+        }
+    }
+
     /// Look up a previously announced identity's public key by destination hash.
     pub fn recall_identity(&self, dest: &[u8; TRUNCATED_HASH_LEN]) -> Option<&[u8; 64]> {
         self.known_identities.get(dest)
@@ -736,6 +780,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         // Dedup check
         if self.is_duplicate(&pkt_hash) {
+            relay_log!(
+                "[relay] DEDUP pkt_hash={} type={:?} dest_type={:?}",
+                hex_short(&pkt_hash),
+                pkt.packet_type,
+                pkt.dest_type,
+            );
             return IngestResult::Duplicate;
         }
 
@@ -773,6 +823,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         if is_link_request {
                             if let Ok(lid) = compute_link_id(raw) {
                                 let remaining = self.paths.get(&dest).map(|p| p.hops).unwrap_or(1);
+                                relay_log!(
+                                    "[relay] H2 LINKREQUEST link_table INSERT lid={} dest={} in_hops={} out_hops={}",
+                                    hex_short(&lid),
+                                    hex_short(&dest),
+                                    inbound_hops,
+                                    remaining,
+                                );
                                 let _ = self.link_table.insert(
                                     lid,
                                     LinkTableEntry {
@@ -849,11 +906,22 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     if self.local_identity_hash.is_some() {
                         if let Some(lte) = self.link_table.get_mut(&dh) {
                             lte.timestamp = now; // refresh for expiry
+                            relay_log!(
+                                "[relay] link_table FORWARD lid={} ctx={:#04x} iface={}",
+                                hex_short(&dh),
+                                pkt.context,
+                                iface,
+                            );
                             return IngestResult::Forward {
                                 raw,
                                 source_iface: iface,
                             };
                         }
+                        relay_log!(
+                            "[relay] link_table MISS lid={} ctx={:#04x} (no entry)",
+                            hex_short(&dh),
+                            pkt.context,
+                        );
                     }
                     // Fall through: non-transport node or no link_table entry.
                     // Try local handling (will return Invalid if link not found).
@@ -865,6 +933,35 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         pkt_hash,
                         rng,
                     );
+                }
+
+                // Transport relay: if we're a transport node and this isn't
+                // our own destination, forward to the next hop.
+                if self.local_identity_hash.is_some()
+                    && !self.is_local_destination(&dh)
+                {
+                    if self.paths.contains_key(&dh) {
+                        // Create reverse_table entry so the proof can route back.
+                        let mut trunc_hash = [0u8; TRUNCATED_HASH_LEN];
+                        trunc_hash.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
+                        let _ = self.reverse_table.insert(
+                            trunc_hash,
+                            ReverseEntry {
+                                timestamp: now,
+                                received_on: iface,
+                                forwarded_to: 0,
+                            },
+                        );
+                        relay_log!(
+                            "[relay] H1 DATA FORWARD dest={} reverse={}",
+                            hex_short(&dh),
+                            hex_short(&trunc_hash),
+                        );
+                        return IngestResult::Forward {
+                            raw: &raw[..len],
+                            source_iface: iface,
+                        };
+                    }
                 }
 
                 IngestResult::LocalData {
@@ -885,6 +982,20 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     && self.links.contains_key(&dh)
                 {
                     return self.handle_lrproof(&dh, pkt.payload, now);
+                }
+
+                // Check for RESOURCE_PRF (resource completion proof from receiver).
+                // Like LRPROOF, handle locally when the link is ours; otherwise
+                // fall through to relay forwarding.  Resource proofs are NOT
+                // link-encrypted (Python: Packet.pack special-cases RESOURCE_PRF).
+                if pkt.context == CONTEXT_RESOURCE_PRF
+                    && pkt.dest_type == DestType::Link
+                    && self.links.contains_key(&dh)
+                {
+                    if let Some(link) = self.links.get_mut(&dh) {
+                        link.touch_inbound(now);
+                    }
+                    return self.handle_resource_data(&dh, pkt.context, pkt.payload, now, rng);
                 }
 
                 // Check receipt table for delivery proof (DATA packets)
@@ -934,6 +1045,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                 if self.local_identity_hash.is_some() {
                     if self.reverse_table.remove(&dh).is_some() {
+                        relay_log!(
+                            "[relay] PROOF reverse_table FORWARD dest={} ctx={:#04x}",
+                            hex_short(&dh),
+                            pkt.context,
+                        );
                         IngestResult::Forward {
                             raw,
                             source_iface: iface,
@@ -942,6 +1058,40 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         // Link-destined proof (LRPROOF or channel proof):
                         // route via the persistent link_table entry.
                         lte.timestamp = now; // refresh for expiry
+
+                        // Validate LRPROOF signature before forwarding (matches Python relay).
+                        // Python Transport.py drops invalid proofs silently.
+                        if pkt.context == CONTEXT_LRPROOF {
+                            let dest_hash_for_link = lte.destination_hash;
+                            if let Some(pub_key) =
+                                self.known_identities.get(&dest_hash_for_link)
+                            {
+                                if let Ok(dest_id) = Identity::from_public_key(pub_key)
+                                {
+                                    if !self.validate_lrproof_relay(
+                                        pkt.payload,
+                                        &dh,
+                                        &dest_id,
+                                    ) {
+                                        relay_log!(
+                                            "[relay] LRPROOF REJECTED lid={} dest={}",
+                                            hex_short(&dh),
+                                            hex_short(&dest_hash_for_link),
+                                        );
+                                        return IngestResult::Invalid;
+                                    }
+                                }
+                                // If identity can't be reconstructed, forward
+                                // anyway (graceful fallback).
+                            }
+                            // If identity not known, forward anyway.
+                        }
+
+                        relay_log!(
+                            "[relay] PROOF link_table FORWARD dest={} ctx={:#04x}",
+                            hex_short(&dh),
+                            pkt.context,
+                        );
                         IngestResult::Forward {
                             raw,
                             source_iface: iface,
@@ -962,6 +1112,30 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 if self.is_local_destination(&dh) {
                     self.handle_link_request(raw, &dh, pkt.payload, now, rng, identity)
                 } else {
+                    // For HEADER_1 LINKREQUEST forwarding on a transport node:
+                    // also create a link_table entry so link traffic can be
+                    // routed bidirectionally (same as HEADER_2 handling above).
+                    if self.local_identity_hash.is_some() {
+                        if let Ok(lid) = compute_link_id(raw) {
+                            let remaining = self.paths.get(&dh).map(|p| p.hops).unwrap_or(1);
+                            relay_log!(
+                                "[relay] H1 LINKREQUEST link_table INSERT lid={} dest={} out_hops={}",
+                                hex_short(&lid),
+                                hex_short(&dh),
+                                remaining,
+                            );
+                            let _ = self.link_table.insert(
+                                lid,
+                                LinkTableEntry {
+                                    timestamp: now,
+                                    received_on: iface,
+                                    inbound_hops: pkt.hops,
+                                    outbound_hops: remaining,
+                                    destination_hash: dh,
+                                },
+                            );
+                        }
+                    }
                     IngestResult::Forward {
                         raw,
                         source_iface: iface,
@@ -1022,6 +1196,45 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             link_id,
             proof_raw: proof_buf[..proof_len].to_vec(),
         }
+    }
+
+    /// Validate an LRPROOF payload at a relay node.
+    ///
+    /// Matches Python `Transport.py` relay behavior: validates the responder's
+    /// signature before forwarding. Returns true if valid or if validation is
+    /// not possible (identity unknown).
+    fn validate_lrproof_relay(
+        &self,
+        proof_payload: &[u8],
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        dest_identity: &Identity,
+    ) -> bool {
+        use crate::link::LINK_MTU_SIZE;
+
+        if proof_payload.len() < 96 {
+            return false;
+        }
+
+        let signature = &proof_payload[..64];
+        let responder_x25519_pub = &proof_payload[64..96];
+        let signalling = &proof_payload[96..];
+
+        // Reject unexpected trailing data
+        if signalling.len() > LINK_MTU_SIZE {
+            return false;
+        }
+
+        // Reconstruct signed_data: link_id || responder_x25519_pub || ed25519_pub [|| signalling]
+        let signed_len = 80 + signalling.len();
+        let mut signed_data = [0u8; 83]; // max: 16+32+32+3
+        signed_data[..16].copy_from_slice(link_id);
+        signed_data[16..48].copy_from_slice(responder_x25519_pub);
+        signed_data[48..80].copy_from_slice(dest_identity.ed25519_pub());
+        signed_data[80..signed_len].copy_from_slice(signalling);
+
+        dest_identity
+            .verify(&signed_data[..signed_len], signature)
+            .is_ok()
     }
 
     fn handle_lrproof<'a>(
@@ -1487,11 +1700,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             .payload(pkt.payload)
                             .build();
                         match result {
-                            Ok(n) => {
-                                let mut v = heapless::Vec::new();
-                                let _ = v.extend_from_slice(&rebuild_buf[..n]);
-                                Some(v)
-                            }
+                            Ok(n) => Some(rebuild_buf[..n].to_vec()),
                             Err(_) => None,
                         }
                     } else {
@@ -1500,11 +1709,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                     let ann_raw = match retransmit_raw {
                         Some(v) => v,
-                        None => {
-                            let mut v = heapless::Vec::new();
-                            let _ = v.extend_from_slice(raw);
-                            v
-                        }
+                        None => raw.to_vec(),
                     };
 
                     if !ann_raw.is_empty() {
@@ -1539,17 +1744,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         if let Some(path) = self.paths.get(&requested) {
             if let Some(ref cached) = path.announce_raw {
-                let mut raw = heapless::Vec::new();
-                if raw.extend_from_slice(cached).is_ok() {
-                    let pending = PendingAnnounce {
-                        dest_hash: requested,
-                        raw,
-                        tx_count: 0,
-                        last_tx_at: 0,
-                        local: true,
-                    };
-                    let _ = self.queue_announce(pending);
-                }
+                let pending = PendingAnnounce {
+                    dest_hash: requested,
+                    raw: cached.clone(),
+                    tx_count: 0,
+                    last_tx_at: 0,
+                    local: true,
+                };
+                let _ = self.queue_announce(pending);
             }
         }
 
@@ -2128,14 +2330,14 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     }
 
     /// Returns announces that are due for retransmission.
-    pub fn pending_outbound(&mut self, now: u64) -> heapless::Vec<heapless::Vec<u8, 500>, 16> {
-        let mut to_send: heapless::Vec<heapless::Vec<u8, 500>, 16> = heapless::Vec::new();
+    pub fn pending_outbound(&mut self, now: u64) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        let mut to_send: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
         let mut keep: heapless::Deque<PendingAnnounce, A> = heapless::Deque::new();
 
         while let Some(mut ann) = self.announces.pop_front() {
             let delay = PATHFINDER_G * (1u64 << ann.tx_count.min(8));
             if ann.local || now >= ann.last_tx_at + delay {
-                let _ = to_send.push(ann.raw.clone());
+                to_send.push(ann.raw.clone());
                 ann.tx_count += 1;
                 ann.last_tx_at = now;
                 ann.local = false;
@@ -2189,11 +2391,9 @@ mod tests {
         let mut transport = TestTransport::new();
 
         for i in 0u8..16 {
-            let mut raw = heapless::Vec::new();
-            let _ = raw.push(i);
             let ann = PendingAnnounce {
                 dest_hash: [i; TRUNCATED_HASH_LEN],
-                raw,
+                raw: alloc::vec![i],
                 tx_count: 0,
                 last_tx_at: 0,
                 local: false,
@@ -2207,11 +2407,9 @@ mod tests {
         assert_eq!(transport.announce_count(), 16);
 
         // 17th announce should fail gracefully (returns false, no panic)
-        let mut raw = heapless::Vec::new();
-        let _ = raw.push(0xFF);
         let overflow = PendingAnnounce {
             dest_hash: [0xFF; TRUNCATED_HASH_LEN],
-            raw,
+            raw: alloc::vec![0xFF],
             tx_count: 0,
             last_tx_at: 0,
             local: false,

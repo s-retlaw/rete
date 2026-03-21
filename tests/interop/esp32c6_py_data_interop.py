@@ -40,7 +40,7 @@ BRIDGE_PORT = 4283
 def main():
     with InteropTest("esp32c6-py-data", default_port=0, default_timeout=30.0) as t:
         # Start serial bridge
-        t.start_serial_bridge(tcp_port=BRIDGE_PORT)
+        t.start_rust_serial_bridge(tcp_port=BRIDGE_PORT)
 
         # Create RNS instance
         tmpdir = tempfile.mkdtemp(prefix="rete_esp32c6_py_data_")

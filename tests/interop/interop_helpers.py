@@ -279,11 +279,21 @@ class InteropTest:
         time.sleep(2.0)  # LRRTT handshake stabilization
         return link_id, True
 
-    def close_esp32_link(self, link_id):
-        """Send close command and wait for cleanup."""
+    def close_esp32_link(self, link_id, rust_lines=None, timeout=5):
+        """Send close command and wait for cleanup.
+
+        If *rust_lines* is provided, polls for LINK_CLOSED confirmation.
+        Otherwise falls back to a fixed 2s sleep.
+        """
         self._log(f"closing link {link_id}...")
         self.send_rust(f"close {link_id}")
-        time.sleep(1.0)
+        if rust_lines is not None:
+            result = self.wait_for_line(rust_lines, "LINK_CLOSED", timeout=timeout)
+            if result is None:
+                self._log("warning: LINK_CLOSED not seen within timeout")
+                time.sleep(1.0)
+        else:
+            time.sleep(2.0)
 
     def has_line(self, lines, prefix, contains=None):
         """Check if any line starts with *prefix* (and optionally contains *contains*)."""
@@ -364,6 +374,41 @@ class InteropTest:
             self._log("ALL TESTS PASSED")
             sys.exit(0)
 
+    def start_rust_dual(self, seed, port=None, serial_port=None, extra_args=None):
+        """Start rete-linux with both --connect (TCP) and --serial (multi-interface).
+
+        Args:
+            seed: Identity seed string (``--identity-seed``).
+            port: TCP port to connect to (defaults to ``self.port``).
+            serial_port: Serial port (defaults to ``--serial-port`` arg).
+            extra_args: Additional CLI args (e.g. ``["--transport"]``).
+
+        Returns:
+            list[str]: A live-updated list of stdout lines.
+        """
+        port = port or self.port
+        serial_port = serial_port or self.args.serial_port
+        cmd = [
+            self.rust_binary,
+            "--connect", f"127.0.0.1:{port}",
+            "--serial", serial_port,
+            "--identity-seed", seed,
+        ]
+        if extra_args:
+            cmd.extend(extra_args)
+
+        self._log(f"starting Rust dual node (TCP:{port} + serial:{serial_port})...")
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self._procs.append(proc)
+        self._rust_proc = proc
+
+        lines = []
+        t = threading.Thread(target=read_stdout_lines, args=(proc, lines, self._stop), daemon=True)
+        t.start()
+        return lines
+
     # -- ESP32 serial helpers --
 
     def start_serial_bridge(self, tcp_port, serial_port=None, baud=115200):
@@ -389,6 +434,41 @@ class InteropTest:
             self._log(f"FAIL: serial bridge did not start on port {tcp_port}")
             sys.exit(1)
         self._log("serial bridge is listening")
+        return proc
+
+    def start_rust_serial_bridge(self, tcp_port, serial_port=None, baud=115200):
+        """Launch the Rust rete-serial-bridge binary and wait for TCP port.
+
+        The binary path is derived from the same target/debug directory as
+        the main rust_binary.
+
+        Returns the bridge process.
+        """
+        serial_port = serial_port or self.args.serial_port
+        bridge_bin = os.path.join(
+            os.path.dirname(self.rust_binary), "rete-serial-bridge",
+        )
+        if not os.path.exists(bridge_bin):
+            self._log(f"FAIL: Rust serial bridge not found at {bridge_bin}")
+            self._log("  Build it with: cargo build -p rete-example-linux")
+            sys.exit(1)
+
+        cmd = [
+            bridge_bin,
+            "--serial-port", serial_port,
+            "--baud", str(baud),
+            "--tcp-port", str(tcp_port),
+        ]
+        self._log(f"starting Rust serial bridge on TCP port {tcp_port}...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self._procs.append(proc)
+
+        if not wait_for_port("127.0.0.1", tcp_port, timeout=10.0):
+            self._log(f"FAIL: Rust serial bridge did not start on port {tcp_port}")
+            sys.exit(1)
+        self._log("Rust serial bridge is listening")
         return proc
 
     def start_rust_serial(self, seed, serial_port=None, extra_args=None):
@@ -422,3 +502,26 @@ class InteropTest:
         t = threading.Thread(target=read_stdout_lines, args=(proc, lines, self._stop), daemon=True)
         t.start()
         return lines
+
+    def start_tcp_proxy(self, listen_port, target_port):
+        """Launch rns_proxy.py between listen_port and target_port.
+
+        Returns the proxy process. Packet logs go to the process's stderr.
+        """
+        proxy_script = os.path.join(os.path.dirname(__file__), "rns_proxy.py")
+        cmd = [
+            sys.executable, proxy_script,
+            "--listen", str(listen_port),
+            "--target", str(target_port),
+        ]
+        self._log(f"starting TCP proxy {listen_port} -> {target_port}...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self._procs.append(proc)
+
+        if not wait_for_port("127.0.0.1", listen_port, timeout=10.0):
+            self._log(f"FAIL: TCP proxy did not start on port {listen_port}")
+            sys.exit(1)
+        self._log(f"TCP proxy listening on {listen_port}")
+        return proc

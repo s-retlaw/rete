@@ -8,9 +8,13 @@ license.workspace = true
 name = "rete-linux"
 path = "src/main.rs"
 
+[[bin]]
+name = "rete-serial-bridge"
+path = "src/bin/serial_bridge.rs"
+
 [dependencies]
 rete-core         = { workspace = true }
-rete-transport    = { workspace = true, features = ["serde"] }
+rete-transport    = { workspace = true, features = ["serde", "relay-debug"] }
 rete-stack        = { workspace = true }
 rete-tokio        = { workspace = true }
 rete-iface-tcp    = { workspace = true }
@@ -22,3 +26,4 @@ serde_json        = { workspace = true }
 rand              = "0.8"
 hex               = "0.4"
 libbz2-rs-sys     = { version = "0.2.2", default-features = false, features = ["rust-allocator"] }
+tokio-serial      = "5.4"

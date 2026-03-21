@@ -14,7 +14,7 @@ from interop_helpers import ESP32C6_DEST, InteropTest
 
 
 def main():
-    with InteropTest("esp32c6-resource", default_port=0, default_timeout=30.0) as t:
+    with InteropTest("esp32c6-resource", default_port=0, default_timeout=60.0) as t:
         # Start rete-linux connected to ESP32 over serial
         rust_lines = t.start_rust_serial(
             seed="esp32c6-resource-test-42",
@@ -36,11 +36,9 @@ def main():
         test_payload = "Hello from rete-linux resource transfer!"
         t.send_rust(f"resource {link_id} {test_payload}")
 
-        # Wait for resource completion event on the receiver (ESP32) side
-        # rete-linux as sender sees the resource was initiated
-        # The receiver (ESP32) will log RESOURCE_COMPLETE but we can't see that
-        # Instead, check if rete-linux shows resource-related output
-        time.sleep(5.0)
+        # Poll for RESOURCE_COMPLETE instead of fixed sleep.
+        # Serial latency (115200 baud + HDLC) needs time for proof roundtrip.
+        complete_line = t.wait_for_line(rust_lines, "RESOURCE_COMPLETE", timeout=45)
 
         # At minimum, verify the link is still alive (no crash on resource)
         link_closed = t.has_line(rust_lines, "LINK_CLOSED")
@@ -53,14 +51,15 @@ def main():
         t.check(got_echo, "Link functional after resource transfer (channel echo works)")
 
         # Check for RESOURCE_COMPLETE on sender side (ESP32 sent proof back)
-        got_complete = t.has_line(rust_lines, "RESOURCE_COMPLETE")
-        t.check(got_complete, "Resource transfer completed (sender received proof)")
+        t.check(complete_line is not None, "Resource transfer completed (sender received proof)")
 
         # Close the link to free ESP32 slot
-        t.close_esp32_link(link_id)
+        t.close_esp32_link(link_id, rust_lines=rust_lines)
 
-        # Dump output
+        # Dump output (including stderr for resource debugging)
+        rust_stderr = t.collect_rust_stderr(last_chars=4000)
         t.dump_output("Rust stdout", rust_lines)
+        t.dump_output("Rust stderr", rust_stderr.strip().split("\n"))
 
 
 if __name__ == "__main__":

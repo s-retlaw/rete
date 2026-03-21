@@ -33,6 +33,48 @@ const ASPECTS: &[&str] = &["example", "v1"];
 /// Default propagation message TTL: 30 days in seconds.
 const PROPAGATION_TTL_SECS: u64 = 2_592_000;
 
+/// Log a raw packet's parsed header to stderr (used as packet_log_fn callback).
+fn log_packet(raw: &[u8], direction: &str, iface_idx: u8) {
+    use rete_core::{HeaderType, Packet};
+
+    let pkt = match Packet::parse(raw) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("[pkt] {} iface={} PARSE_ERROR len={}", direction, iface_idx, raw.len());
+            return;
+        }
+    };
+
+    let hdr = match pkt.header_type { HeaderType::Header1 => "H1", HeaderType::Header2 => "H2" };
+    let ctx_name = match pkt.context {
+        rete_core::CONTEXT_NONE => "NONE",
+        rete_core::CONTEXT_RESOURCE => "RESOURCE",
+        rete_core::CONTEXT_RESOURCE_ADV => "RES_ADV",
+        rete_core::CONTEXT_RESOURCE_REQ => "RES_REQ",
+        rete_core::CONTEXT_RESOURCE_HMU => "RES_HMU",
+        rete_core::CONTEXT_RESOURCE_PRF => "RES_PRF",
+        rete_core::CONTEXT_RESOURCE_ICL => "RES_ICL",
+        rete_core::CONTEXT_RESOURCE_RCL => "RES_RCL",
+        rete_core::CONTEXT_REQUEST => "REQUEST",
+        rete_core::CONTEXT_RESPONSE => "RESPONSE",
+        rete_core::CONTEXT_CHANNEL => "CHANNEL",
+        rete_core::CONTEXT_KEEPALIVE => "KEEPALIVE",
+        rete_core::CONTEXT_LINKIDENTIFY => "LINKIDENT",
+        rete_core::CONTEXT_LINKCLOSE => "LINKCLOSE",
+        rete_core::CONTEXT_LINKPROOF => "LINKPROOF",
+        rete_core::CONTEXT_LRRTT => "LRRTT",
+        rete_core::CONTEXT_LRPROOF => "LRPROOF",
+        _ => "?",
+    };
+
+    eprintln!(
+        "[pkt] {} iface={} {}/{:?}/{:?} hops={} dest={} ctx={:#04x}({}) plen={} raw={}",
+        direction, iface_idx, hdr, pkt.packet_type, pkt.dest_type,
+        pkt.hops, hex::encode(pkt.destination_hash), pkt.context, ctx_name,
+        pkt.payload.len(), hex::encode(&raw[..raw.len().min(64)])
+    );
+}
+
 // ---------------------------------------------------------------------------
 // bz2 compression / decompression for resource data
 // ---------------------------------------------------------------------------
@@ -393,6 +435,7 @@ async fn main() {
     let auto_reply_ping = args.iter().any(|a| a == "--auto-reply-ping");
 
     // Parse --peer-seed <seed> (pre-register peer identity from deterministic seed)
+    // DEPRECATED: use cached announce flush instead. Kept for backward compat.
     let peer_seed = args
         .windows(2)
         .find(|w| w[0] == "--peer-seed")
@@ -424,6 +467,12 @@ async fn main() {
         .windows(2)
         .find(|w| w[0] == "--ifac-netkey")
         .map(|w| w[1].clone());
+
+    // --packet-log: log every inbound/outbound packet header to stderr
+    let packet_log = args.iter().any(|a| a == "--packet-log");
+    if packet_log {
+        eprintln!("[rete] packet logging enabled");
+    }
 
     // --auto: enable AutoInterface (IPv6 link-local multicast peer discovery)
     let auto_enabled = args.iter().any(|a| a == "--auto");
@@ -466,6 +515,9 @@ async fn main() {
     let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
     node.core.set_decompress_fn(Some(bz2_decompress));
     node.core.set_compress_fn(Some(bz2_compress));
+    if packet_log {
+        node.core.set_packet_log_fn(Some(log_packet));
+    }
 
     // Load snapshot from previous run (if any)
     let snapshot_path = default_snapshot_path();
@@ -489,6 +541,10 @@ async fn main() {
         let peer_dest = rete_core::destination_hash(expanded, Some(&peer.hash()));
         eprintln!("[rete] pre-registered peer: {}", hex::encode(peer_dest));
         node.register_peer(&peer, APP_NAME, ASPECTS);
+        // Build a synthetic announce for the peer so it propagates to other
+        // interfaces (e.g., ESP32 announce → relay → rnsd → Python).
+        // Only used in multi-interface mode; harmless in single-interface.
+        node.queue_peer_announce(&peer, APP_NAME, ASPECTS);
 
         // If --auto-reply-ping, send the ping to the pre-registered peer immediately
         if auto_reply_ping {
@@ -646,7 +702,8 @@ async fn main() {
             rand::thread_rng(),
         )
         .await;
-    } else if let Some(path) = serial_path {
+    } else if serial_path.is_some() && addrs.is_empty() && local_server_name.is_none() {
+        let path = serial_path.unwrap();
         eprintln!("[rete] opening serial port {} at {} baud ...", path, baud);
         let mut iface = match SerialInterface::open(path, baud) {
             Ok(i) => i,
@@ -664,7 +721,10 @@ async fn main() {
             rand::thread_rng(),
         )
         .await;
-    } else if local_server_name.is_some() || addrs.len() > 1 || (auto_enabled && !addrs.is_empty())
+    } else if local_server_name.is_some()
+        || addrs.len() > 1
+        || (auto_enabled && !addrs.is_empty())
+        || (serial_path.is_some() && !addrs.is_empty())
     {
         // Multi-interface mode: TCP endpoints + optional local server + optional AutoInterface.
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<InboundMsg>(256);
@@ -726,6 +786,27 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+
+        // Add serial interface (if configured in multi-interface mode)
+        if let Some(path) = serial_path {
+            let serial_idx = next_iface_idx;
+            next_iface_idx += 1;
+            eprintln!(
+                "[rete] opening serial port {} (iface {}) ...",
+                path, serial_idx
+            );
+            let iface = match SerialInterface::open(path, baud) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("[rete] failed to open serial port: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let (tx, driver) = interface_task(iface, serial_idx, inbound_tx.clone());
+            senders.push(tx);
+            tokio::spawn(driver);
+            eprintln!("[rete] serial port open (iface {})", serial_idx);
         }
 
         // Start local server (if configured)
@@ -843,6 +924,15 @@ async fn run_multi_with_local_server<F>(
         iface_senders.len()
     );
 
+    // Flush cached announces to all interfaces + local clients
+    {
+        let cached = node.core.cached_announces();
+        if !cached.is_empty() {
+            eprintln!("[rete] flushing {} cached announces", cached.len());
+            dispatch_with_local(&iface_senders, &cached, 0, &broadcaster, None).await;
+        }
+    }
+
     let mut announce_timer =
         tokio::time::interval(std::time::Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
     let mut tick_timer = tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
@@ -869,8 +959,12 @@ async fn run_multi_with_local_server<F>(
             }
             cmd = cmd_rx.recv() => {
                 if let Some(cmd) = cmd {
-                    let (packets, cont) = node.handle_command(cmd, &mut rng);
+                    let (packets, cont, event) = node.handle_command(cmd, &mut rng);
                     dispatch_with_local(&iface_senders, &packets, 0, &broadcaster, None).await;
+                    if let Some(e) = event {
+                        let extra = on_event(e, &mut node.core, &mut rng);
+                        dispatch_with_local(&iface_senders, &extra, 0, &broadcaster, None).await;
+                    }
                     if !cont { break; }
                 }
             }
@@ -1149,6 +1243,9 @@ fn on_event(
             on_node_event(event);
         }
     }
+    // Flush stdout so piped readers see LXMF output immediately.
+    use std::io::Write;
+    std::io::stdout().flush().ok();
     Vec::new()
 }
 
@@ -1378,6 +1475,9 @@ fn on_node_event(event: NodeEvent) {
             }
         }
     }
+    // Flush stdout so piped readers (test harnesses) see output immediately.
+    use std::io::Write;
+    std::io::stdout().flush().ok();
 }
 
 fn handle_lxmf_command(

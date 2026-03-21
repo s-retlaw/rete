@@ -56,7 +56,7 @@ BRIDGE_PORT = 4282
 def main():
     with InteropTest("esp32c6-py-channel", default_port=0, default_timeout=30.0) as t:
         # Start serial bridge
-        t.start_serial_bridge(tcp_port=BRIDGE_PORT)
+        t.start_rust_serial_bridge(tcp_port=BRIDGE_PORT)
 
         # Create RNS instance
         tmpdir = tempfile.mkdtemp(prefix="rete_esp32c6_py_chan_")
@@ -105,11 +105,16 @@ def main():
         link_established = [False]
         received_messages = []
 
-        def link_established_cb(link):
-            link_established[0] = True
-
         def message_handler(message):
             received_messages.append(message.data)
+
+        def link_established_cb(link):
+            # Register channel handler immediately on establishment
+            # so the ESP32 greeting (sent on link-up) isn't missed.
+            channel = link.get_channel()
+            channel.register_message_type(TestMessage)
+            channel.add_message_handler(message_handler)
+            link_established[0] = True
 
         # Initiate link
         t._log("initiating link to ESP32...")
@@ -124,19 +129,19 @@ def main():
         t.check(link_established[0], "Link established with ESP32")
 
         if link_established[0]:
-            # Register channel message handler
-            channel = link.get_channel()
-            channel.register_message_type(TestMessage)
-            channel.add_message_handler(message_handler)
-
-            # Wait for ESP32 greeting
-            time.sleep(2.0)
+            # Wait for ESP32 greeting (arrives after LRRTT stabilization)
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                if any(b"esp32-hello" in m for m in received_messages):
+                    break
+                time.sleep(0.3)
             got_greeting = any(b"esp32-hello" in m for m in received_messages)
             t.check(got_greeting, "Received ESP32 greeting channel message",
                     detail=f"received {len(received_messages)} messages so far")
 
             # Send channel messages
             t._log("sending channel messages...")
+            channel = link.get_channel()
             msg1 = TestMessage(b"test-msg-one")
             channel.send(msg1)
             time.sleep(0.5)
@@ -145,7 +150,13 @@ def main():
             channel.send(msg2)
 
             # Wait for echoes
-            time.sleep(3.0)
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                msgs = received_messages[:]
+                if (any(b"echo:test-msg-one" in m for m in msgs) and
+                        any(b"echo:test-msg-two" in m for m in msgs)):
+                    break
+                time.sleep(0.3)
 
             got_echo1 = any(b"echo:test-msg-one" in m for m in received_messages)
             got_echo2 = any(b"echo:test-msg-two" in m for m in received_messages)

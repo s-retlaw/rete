@@ -4,20 +4,20 @@
 //! identities. The handshake uses ephemeral X25519 keys for forward secrecy.
 //!
 //! # Handshake (responder perspective)
-//! 1. Receive LINKREQUEST: extract peer's X25519_pub and Ed25519_pub
+//! 1. Receive LINKREQUEST: extract peer's X25519_pub, Ed25519_pub, and signalling[3]
 //! 2. Compute link_id from hashable part of the request
 //! 3. Generate our ephemeral X25519 keypair
 //! 4. ECDH(our_prv, peer_pub) → shared_key
 //! 5. HKDF-SHA256(ikm=shared_key, salt=link_id, info=b"", length=64) → derived_key
 //! 6. Create Token from derived_key
-//! 7. Build LRPROOF: sign(link_id || peer_x25519_pub || peer_ed25519_pub) || our_x25519_pub
+//! 7. Build LRPROOF: sign(link_id || our_x25519_pub || our_ed25519_pub || signalling) || our_x25519_pub || signalling
 //!
 //! # Handshake (initiator perspective)
 //! 1. Generate ephemeral X25519 keypair
-//! 2. Build LINKREQUEST: our_x25519_pub[32] || our_ed25519_pub[32]
+//! 2. Build LINKREQUEST: our_x25519_pub[32] || our_ed25519_pub[32] || signalling[3]
 //! 3. Send LINKREQUEST to destination
-//! 4. Receive LRPROOF: extract signature[64] || responder_x25519_pub[32]
-//! 5. Verify signature over (link_id || our_x25519_pub || our_ed25519_pub)
+//! 4. Receive LRPROOF: extract signature[64] || responder_x25519_pub[32] [|| signalling[3]]
+//! 5. Verify signature over (link_id || responder_x25519_pub || responder_ed25519_pub [|| signalling])
 //! 6. ECDH(our_prv, responder_pub) → shared_key
 //! 7. HKDF-SHA256(ikm=shared_key, salt=link_id, info=b"", length=64) → derived_key
 //! 8. Create Token from derived_key
@@ -112,6 +112,9 @@ pub struct Link {
     pub stale_time: u64,
     /// Destination hash this link is associated with.
     pub destination_hash: [u8; TRUNCATED_HASH_LEN],
+    /// MTU signalling bytes (3 bytes: MTU + encryption mode).
+    /// Included in LINKREQUEST and LRPROOF for protocol completeness.
+    pub signalling: [u8; LINK_MTU_SIZE],
     /// Reliable ordered channel (lazy-initialized on first channel message).
     pub(crate) channel: Option<Channel>,
 }
@@ -142,6 +145,12 @@ impl Link {
         let mut peer_ed25519_pub = [0u8; 32];
         peer_x25519_pub.copy_from_slice(&request_payload[..32]);
         peer_ed25519_pub.copy_from_slice(&request_payload[32..64]);
+
+        // Extract signalling bytes if present (payload >= 67 bytes)
+        let mut peer_signalling = [0u8; LINK_MTU_SIZE];
+        if request_payload.len() >= 64 + LINK_MTU_SIZE {
+            peer_signalling.copy_from_slice(&request_payload[64..64 + LINK_MTU_SIZE]);
+        }
 
         // Generate our ephemeral X25519 keypair
         let our_secret = x25519_dalek::StaticSecret::random_from_rng(&mut *rng);
@@ -182,60 +191,70 @@ impl Link {
             keepalive_interval: KEEPALIVE_INTERVAL_SECS,
             stale_time: STALE_TIMEOUT_SECS,
             destination_hash: [0u8; TRUNCATED_HASH_LEN],
+            signalling: peer_signalling,
             channel: None,
         })
     }
 
     /// Build the LRPROOF payload for the responder.
     ///
-    /// Format: `Ed25519_signature[64] || X25519_responder_pub[32]`
-    /// Signature covers: `link_id || responder_x25519_pub || responder_ed25519_pub`
+    /// Format: `Ed25519_signature[64] || X25519_responder_pub[32] || signalling[3]`
+    /// Signature covers: `link_id || responder_x25519_pub || responder_ed25519_pub || signalling`
     ///
     /// The signed data uses the responder's own keys (not the initiator's peer keys).
     /// This matches the Python reference: `Link.prove()` signs
-    /// `self.link_id + self.pub_bytes + self.sig_pub_bytes`.
+    /// `self.link_id + self.pub_bytes + self.sig_pub_bytes + self.signalling_bytes`.
     ///
-    /// Note: Python also appends 3-byte MTU signalling to the signed data and
-    /// proof payload. We omit signalling (returning 96 bytes instead of 99).
-    /// Python's `validate_proof` handles both 96-byte and 99-byte proofs
-    /// correctly — it checks the length and uses empty signalling for 96-byte
-    /// proofs (Link.py:399-408).
-    pub fn build_proof(&self, owner_identity: &Identity) -> Result<[u8; 96], rete_core::Error> {
-        // Build signed data: link_id || our_x25519_pub || owner_ed25519_pub
-        let mut signed_data = [0u8; 80]; // 16 + 32 + 32
+    /// Returns a 99-byte proof (64 sig + 32 x25519_pub + 3 signalling).
+    /// Python's `validate_proof` handles both 96-byte and 99-byte proofs.
+    pub fn build_proof(
+        &self,
+        owner_identity: &Identity,
+    ) -> Result<[u8; 96 + LINK_MTU_SIZE], rete_core::Error> {
+        // Build signed data: link_id || our_x25519_pub || owner_ed25519_pub || signalling
+        let mut signed_data = [0u8; 80 + LINK_MTU_SIZE]; // 16 + 32 + 32 + 3
         signed_data[..16].copy_from_slice(&self.link_id);
         signed_data[16..48].copy_from_slice(&self.our_x25519_pub);
         signed_data[48..80].copy_from_slice(owner_identity.ed25519_pub());
+        signed_data[80..80 + LINK_MTU_SIZE].copy_from_slice(&self.signalling);
 
         let signature = owner_identity.sign(&signed_data)?;
 
-        // LRPROOF: signature[64] || our_x25519_pub[32]
-        let mut proof = [0u8; 96];
+        // LRPROOF: signature[64] || our_x25519_pub[32] || signalling[3]
+        let mut proof = [0u8; 96 + LINK_MTU_SIZE];
         proof[..64].copy_from_slice(&signature);
         proof[64..96].copy_from_slice(&self.our_x25519_pub);
+        proof[96..96 + LINK_MTU_SIZE].copy_from_slice(&self.signalling);
         Ok(proof)
     }
 
     /// Create a Link as initiator.
     ///
     /// Generates our ephemeral X25519 keypair and returns the LINKREQUEST payload
-    /// as a fixed 64-byte array: `x25519_pub[32] || ed25519_pub[32]`.
+    /// as a 67-byte array: `x25519_pub[32] || ed25519_pub[32] || signalling[3]`.
+    ///
+    /// The 3 signalling bytes encode MTU and encryption mode, matching Python's
+    /// `Link.LINK_MTU_SIZE` format.
     pub fn new_initiator<R: RngCore + CryptoRng>(
         dest_hash: [u8; TRUNCATED_HASH_LEN],
         our_ed25519_pub: &[u8; 32],
         rng: &mut R,
         now: u64,
-    ) -> (Self, [u8; 64]) {
+    ) -> (Self, [u8; 64 + LINK_MTU_SIZE]) {
         // Generate ephemeral X25519
         let our_secret = x25519_dalek::StaticSecret::random_from_rng(&mut *rng);
         let our_public = x25519_dalek::PublicKey::from(&our_secret);
         let our_x25519_prv = our_secret.to_bytes();
         let our_x25519_pub = our_public.to_bytes();
 
-        // Build LINKREQUEST payload: x25519_pub[32] || ed25519_pub[32]
-        let mut payload = [0u8; 64];
+        // Compute signalling bytes: default MTU + AES-CBC mode
+        let sig_bytes = signalling_bytes(rete_core::MTU as u32, MODE_AES_CBC);
+
+        // Build LINKREQUEST payload: x25519_pub[32] || ed25519_pub[32] || signalling[3]
+        let mut payload = [0u8; 64 + LINK_MTU_SIZE];
         payload[..32].copy_from_slice(&our_x25519_pub);
-        payload[32..].copy_from_slice(our_ed25519_pub);
+        payload[32..64].copy_from_slice(our_ed25519_pub);
+        payload[64..64 + LINK_MTU_SIZE].copy_from_slice(&sig_bytes);
 
         let link = Link {
             link_id: [0u8; TRUNCATED_HASH_LEN], // will be computed after send
@@ -253,6 +272,7 @@ impl Link {
             keepalive_interval: KEEPALIVE_INTERVAL_SECS,
             stale_time: STALE_TIMEOUT_SECS,
             destination_hash: dest_hash,
+            signalling: sig_bytes,
             channel: None,
         };
 
@@ -461,6 +481,27 @@ impl Link {
 /// This gives 431 bytes — the largest plaintext that fits in one link packet.
 pub const LINK_MDU: usize = 431;
 
+/// Size of MTU signalling bytes appended to LINKREQUEST and LRPROOF.
+/// Python: `Link.LINK_MTU_SIZE = 3`.
+pub const LINK_MTU_SIZE: usize = 3;
+
+/// Encryption mode: AES-256-CBC (Python: `Link.ENCRYPT_AES = 0x01`).
+const MODE_AES_CBC: u8 = 0x01;
+
+/// Encode MTU and encryption mode into 3 signalling bytes.
+///
+/// Matches Python's encoding:
+/// ```python
+/// struct.pack("!I", (mtu & 0x1FFFFF) | ((mode & 0x07) << 21))[1:]
+/// ```
+/// This packs a 32-bit big-endian integer with MTU in bits 0..20 and mode in
+/// bits 21..23, then drops the leading byte to produce 3 bytes.
+pub fn signalling_bytes(mtu: u32, mode: u8) -> [u8; LINK_MTU_SIZE] {
+    let packed = (mtu & 0x1F_FFFF) | ((mode as u32 & 0x07) << 21);
+    let be = packed.to_be_bytes(); // [0] is MSB, we drop it
+    [be[1], be[2], be[3]]
+}
+
 /// Compute the link_id from a LINKREQUEST packet's raw bytes.
 ///
 /// ```text
@@ -594,25 +635,27 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let owner = Identity::from_seed(b"link-responder-identity").unwrap();
 
-        let peer_x25519 = [0xBBu8; 32];
-        let peer_ed25519 = [0xCCu8; 32];
-        let mut payload = [0u8; 64];
-        payload[..32].copy_from_slice(&peer_x25519);
-        payload[32..].copy_from_slice(&peer_ed25519);
+        // 67-byte payload: x25519[32] || ed25519[32] || signalling[3]
+        let identity = Identity::from_seed(b"peer-for-proof-test").unwrap();
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let (_peer_link, request_payload) =
+            Link::new_initiator(dest_hash, identity.ed25519_pub(), &mut rng, 100);
 
         let link_id = [0x11u8; TRUNCATED_HASH_LEN];
-        let link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
+        let link = Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
 
         let proof = link.build_proof(&owner).unwrap();
-        assert_eq!(proof.len(), 96); // sig[64] + x25519_pub[32]
+        assert_eq!(proof.len(), 99); // sig[64] + x25519_pub[32] + signalling[3]
 
-        // Verify the signature: should cover link_id || responder_x25519_pub || responder_ed25519_pub
+        // Verify the signature: covers link_id || x25519_pub || ed25519_pub || signalling
         let sig = &proof[..64];
         let responder_x25519_pub = &proof[64..96];
-        let mut signed_data = [0u8; 80];
+        let signalling = &proof[96..99];
+        let mut signed_data = [0u8; 83];
         signed_data[..16].copy_from_slice(&link_id);
         signed_data[16..48].copy_from_slice(responder_x25519_pub);
         signed_data[48..80].copy_from_slice(owner.ed25519_pub());
+        signed_data[80..83].copy_from_slice(signalling);
 
         assert!(owner.verify(&signed_data, sig).is_ok());
     }
@@ -728,7 +771,7 @@ mod tests {
 
         assert_eq!(link.state, LinkState::Pending);
         assert_eq!(link.role, LinkRole::Initiator);
-        assert_eq!(payload.len(), 64);
+        assert_eq!(payload.len(), 67); // 64 keys + 3 signalling
         assert_eq!(&payload[..32], &link.our_x25519_pub);
     }
 
@@ -1045,5 +1088,120 @@ mod tests {
         let mut pt = [0u8; 256];
         let pt_len = responder.decrypt(&ct[..ct_len], &mut pt).unwrap();
         assert_eq!(&pt[..pt_len], message);
+    }
+
+    // -----------------------------------------------------------------------
+    // MTU signalling tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn signalling_bytes_encoding() {
+        // Python: struct.pack("!I", (500 & 0x1FFFFF) | ((1 & 0x07) << 21))[1:]
+        // = struct.pack("!I", 500 | (1 << 21))[1:] = struct.pack("!I", 0x2001F4)[1:]
+        // = b'\x20\x01\xf4'
+        let sb = signalling_bytes(500, 0x01);
+        assert_eq!(sb, [0x20, 0x01, 0xF4]);
+
+        // Zero MTU, zero mode
+        let sb0 = signalling_bytes(0, 0);
+        assert_eq!(sb0, [0x00, 0x00, 0x00]);
+
+        // Max MTU (21 bits) = 0x1FFFFF = 2097151
+        let sb_max = signalling_bytes(0x1FFFFF, 0x07);
+        // (0x1FFFFF | (0x07 << 21)) = 0xFFFFFF
+        assert_eq!(sb_max, [0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn initiator_payload_includes_signalling() {
+        let mut rng = rand_core::OsRng;
+        let identity = Identity::from_seed(b"signalling-test").unwrap();
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+
+        let (_link, payload) =
+            Link::new_initiator(dest_hash, identity.ed25519_pub(), &mut rng, 100);
+
+        assert_eq!(payload.len(), 67);
+        // Last 3 bytes should be signalling for MTU=500, mode=1
+        let expected = signalling_bytes(rete_core::MTU as u32, MODE_AES_CBC);
+        assert_eq!(&payload[64..67], &expected);
+    }
+
+    #[test]
+    fn proof_signed_data_is_83_bytes() {
+        let mut rng = rand_core::OsRng;
+        let owner = Identity::from_seed(b"proof-83-test-owner").unwrap();
+        let peer_id = Identity::from_seed(b"proof-83-test-peer").unwrap();
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+
+        // Build initiator payload (67 bytes with signalling)
+        let (_peer_link, request_payload) =
+            Link::new_initiator(dest_hash, peer_id.ed25519_pub(), &mut rng, 100);
+
+        let link_id = [0x22u8; TRUNCATED_HASH_LEN];
+        let link = Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
+
+        let proof = link.build_proof(&owner).unwrap();
+
+        // Independently verify the signature covers exactly 83 bytes
+        let sig = &proof[..64];
+        let resp_x25519_pub = &proof[64..96];
+        let signalling = &proof[96..99];
+
+        let mut signed_data = [0u8; 83];
+        signed_data[..16].copy_from_slice(&link_id);
+        signed_data[16..48].copy_from_slice(resp_x25519_pub);
+        signed_data[48..80].copy_from_slice(owner.ed25519_pub());
+        signed_data[80..83].copy_from_slice(signalling);
+
+        assert!(owner.verify(&signed_data, sig).is_ok());
+
+        // Verify truncated 80-byte data does NOT match
+        assert!(owner.verify(&signed_data[..80], sig).is_err());
+    }
+
+    #[test]
+    fn validate_proof_backward_compat_96_bytes() {
+        // When responder returns a 96-byte proof (no signalling),
+        // initiator should still validate it.
+        let mut rng = rand_core::OsRng;
+        let responder_identity = Identity::from_seed(b"compat-responder").unwrap();
+        let initiator_identity = Identity::from_seed(b"compat-initiator").unwrap();
+        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+
+        let (mut initiator_link, request_payload) =
+            Link::new_initiator(dest_hash, initiator_identity.ed25519_pub(), &mut rng, 100);
+
+        let mut pkt_buf = [0u8; MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::LinkRequest)
+            .dest_type(DestType::Single)
+            .destination_hash(&dest_hash)
+            .context(0x00)
+            .payload(&request_payload)
+            .build()
+            .unwrap();
+        let link_id = compute_link_id(&pkt_buf[..pkt_len]).unwrap();
+        initiator_link.set_link_id(link_id);
+
+        // Simulate a Python node that accepts 67-byte request but returns 96-byte proof
+        // (backward compat: no signalling in proof)
+        let responder_link =
+            Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
+
+        // Manually build 96-byte proof (old format, no signalling in signed data)
+        let mut signed_data_80 = [0u8; 80];
+        signed_data_80[..16].copy_from_slice(&link_id);
+        signed_data_80[16..48].copy_from_slice(&responder_link.our_x25519_pub);
+        signed_data_80[48..80].copy_from_slice(responder_identity.ed25519_pub());
+        let sig = responder_identity.sign(&signed_data_80).unwrap();
+        let mut proof_96 = [0u8; 96];
+        proof_96[..64].copy_from_slice(&sig);
+        proof_96[64..96].copy_from_slice(&responder_link.our_x25519_pub);
+
+        // Initiator should accept 96-byte proof (signalling slice is empty → 80-byte signed_data)
+        assert!(initiator_link
+            .validate_proof(&proof_96, &responder_identity)
+            .is_ok());
     }
 }

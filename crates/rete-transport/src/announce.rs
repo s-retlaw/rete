@@ -1,5 +1,8 @@
 //! Announce handling — validation and pending outbound announces.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use rete_core::{NAME_HASH_LEN, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
 
@@ -138,7 +141,7 @@ pub struct PendingAnnounce {
     /// Destination hash this announce is for.
     pub dest_hash: [u8; TRUNCATED_HASH_LEN],
     /// Complete raw packet bytes (header + payload).
-    pub raw: heapless::Vec<u8, 500>,
+    pub raw: Vec<u8>,
     /// Number of times transmitted so far.
     pub tx_count: u8,
     /// Timestamp of last transmission (monotonic seconds).

@@ -38,7 +38,7 @@ BRIDGE_PORT = 4280
 def main():
     with InteropTest("esp32c6-py-announce", default_port=0, default_timeout=30.0) as t:
         # Start serial bridge
-        bridge = t.start_serial_bridge(tcp_port=BRIDGE_PORT)
+        bridge = t.start_rust_serial_bridge(tcp_port=BRIDGE_PORT)
 
         # Create RNS instance connecting via bridge
         tmpdir = tempfile.mkdtemp(prefix="rete_esp32c6_py_ann_")
@@ -59,6 +59,18 @@ def main():
 
         rns = RNS.Reticulum(configdir=tmpdir, loglevel=RNS.LOG_VERBOSE)
         time.sleep(1.0)
+
+        # Pre-register ESP32 identity so we can reach it
+        esp32_id = identity_from_seed(ESP32_SEED)
+        esp32_dest_hash = RNS.Destination.hash_from_name_and_identity(
+            f"{APP_NAME}.{'.'.join(ASPECTS)}", esp32_id
+        )
+        RNS.Identity.remember(
+            packet_hash=None,
+            destination_hash=esp32_dest_hash,
+            public_key=esp32_id.get_public_key(),
+            app_data=None,
+        )
 
         # Create our identity and destination
         our_id = RNS.Identity()
@@ -82,6 +94,10 @@ def main():
         our_dest.announce()
         time.sleep(2.0)
 
+        # Request a path to ESP32 to trigger its cached announce response
+        t._log("requesting path to ESP32...")
+        RNS.Transport.request_path(esp32_dest_hash)
+
         # Wait for ESP32 announce
         t._log("waiting for ESP32 announce...")
         deadline = time.time() + t.timeout
@@ -94,7 +110,6 @@ def main():
         if received_announces:
             ann = received_announces[0]
             # Verify the announce is from ESP32
-            esp32_id = identity_from_seed(ESP32_SEED)
             esp32_hash = RNS.Identity.truncated_hash(esp32_id.get_public_key())
             got_hash = ann["identity"].hash if ann["identity"] else None
 

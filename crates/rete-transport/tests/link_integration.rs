@@ -33,7 +33,7 @@ fn build_link_request(
     dest_hash: &[u8; TRUNCATED_HASH_LEN],
     identity: &Identity,
     rng: &mut impl rand_core::CryptoRngCore,
-) -> (Vec<u8>, [u8; 64]) {
+) -> Vec<u8> {
     let (_, request_payload) = Link::new_initiator(*dest_hash, identity.ed25519_pub(), rng, 100);
 
     let mut buf = [0u8; MTU];
@@ -45,7 +45,7 @@ fn build_link_request(
         .payload(&request_payload)
         .build()
         .unwrap();
-    (buf[..n].to_vec(), request_payload)
+    buf[..n].to_vec()
 }
 
 /// Full handshake between two transports. Returns (initiator, responder, link_id).
@@ -65,7 +65,7 @@ fn full_handshake() -> (
     init_t.register_identity(resp_dest, resp_id.public_key(), 100);
 
     // Initiator builds and sends LINKREQUEST
-    let (request_pkt, _) = build_link_request(&resp_dest, &init_id, &mut rng);
+    let request_pkt = build_link_request(&resp_dest, &init_id, &mut rng);
     let link_id = compute_link_id(&request_pkt).unwrap();
 
     // Responder ingests LINKREQUEST
@@ -77,7 +77,8 @@ fn full_handshake() -> (
     };
 
     // Initiator sets up its link (manually, since it needs the raw packet)
-    let (mut init_link, _) = Link::new_initiator(resp_dest, init_id.ed25519_pub(), &mut rng, 100);
+    let (mut init_link, _payload) =
+        Link::new_initiator(resp_dest, init_id.ed25519_pub(), &mut rng, 100);
     // Recompute from the same raw packet
     init_link.set_link_id(link_id);
 
@@ -127,7 +128,7 @@ fn link_request_local_creates_link() {
     let (mut t, identity, dest_hash) = make_responder(b"responder-1");
 
     let initiator = Identity::from_seed(b"initiator-1").unwrap();
-    let (request_pkt, _) = build_link_request(&dest_hash, &initiator, &mut rng);
+    let request_pkt = build_link_request(&dest_hash, &initiator, &mut rng);
 
     let mut raw = request_pkt;
     match t.ingest(&mut raw, 100, &mut rng, &identity) {
@@ -153,7 +154,7 @@ fn link_request_non_local_forwards() {
 
     let remote_dest = [0xAA; TRUNCATED_HASH_LEN];
     let initiator = Identity::from_seed(b"initiator-2").unwrap();
-    let (request_pkt, _) = build_link_request(&remote_dest, &initiator, &mut rng);
+    let request_pkt = build_link_request(&remote_dest, &initiator, &mut rng);
 
     let mut raw = request_pkt;
     match t.ingest(&mut raw, 100, &mut rng, &identity) {
@@ -412,7 +413,7 @@ fn duplicate_link_request() {
     let (mut t, identity, dest_hash) = make_responder(b"responder-dup");
 
     let initiator = Identity::from_seed(b"initiator-dup").unwrap();
-    let (request_pkt, _) = build_link_request(&dest_hash, &initiator, &mut rng);
+    let request_pkt = build_link_request(&dest_hash, &initiator, &mut rng);
 
     // First request
     let mut raw1 = request_pkt.clone();
