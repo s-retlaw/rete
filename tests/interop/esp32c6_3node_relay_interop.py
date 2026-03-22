@@ -61,10 +61,8 @@ class TestMessage(RNS.MessageBase):
     def pack(self):
         return self.data
 
-    @classmethod
-    def unpack(cls, raw):
-        msg = cls(raw)
-        return msg
+    def unpack(self, raw):
+        self.data = raw
 
 
 def main():

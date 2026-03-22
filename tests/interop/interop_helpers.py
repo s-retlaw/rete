@@ -19,6 +19,7 @@ def write_rnsd_config(
     config_dir: str,
     port: int,
     ifac_netname: str = None,
+    share_instance: bool = False,
 ) -> str:
     """Write a minimal rnsd config file. Returns the config dir path.
 
@@ -26,6 +27,7 @@ def write_rnsd_config(
         config_dir: Directory for the config file.
         port: TCP server listen port.
         ifac_netname: Optional IFAC network name.
+        share_instance: Enable shared instance (needed for multi-hop link relay).
     """
     os.makedirs(config_dir, exist_ok=True)
     config_path = os.path.join(config_dir, "config")
@@ -34,11 +36,12 @@ def write_rnsd_config(
     if ifac_netname:
         ifac_line = f"\n    networkname = {ifac_netname}"
 
+    share_val = "yes" if share_instance else "no"
     with open(config_path, "w") as f:
         f.write(f"""\
 [reticulum]
   enable_transport = yes
-  share_instance = no
+  share_instance = {share_val}
 
 [logging]
   loglevel = 5
@@ -148,11 +151,11 @@ class InteropTest:
 
     # -- process helpers --
 
-    def start_rnsd(self, port=None, ifac_netname=None):
+    def start_rnsd(self, port=None, ifac_netname=None, share_instance=False):
         """Start an rnsd transport node and wait for its TCP port."""
         port = port or self.port
         config_dir = os.path.join(self.tmpdir, f"rnsd_config_{port}")
-        write_rnsd_config(config_dir, port, ifac_netname=ifac_netname)
+        write_rnsd_config(config_dir, port, ifac_netname=ifac_netname, share_instance=share_instance)
 
         self._log(f"starting rnsd on port {port}...")
         proc = subprocess.Popen(

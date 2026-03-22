@@ -350,6 +350,7 @@ impl Link {
         derived.zeroize();
         self.our_x25519_prv.zeroize(); // no longer needed
         self.peer_x25519_pub = responder_x25519_pub;
+        self.peer_ed25519_pub.copy_from_slice(dest_identity.ed25519_pub());
         self.state = LinkState::Handshake; // will become Active after RTT
 
         Ok(())

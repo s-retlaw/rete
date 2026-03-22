@@ -44,10 +44,8 @@ class TestMessage(RNS.MessageBase):
     def pack(self):
         return self.data
 
-    @classmethod
-    def unpack(cls, raw):
-        msg = cls(raw)
-        return msg
+    def unpack(self, raw):
+        self.data = raw
 
 
 BRIDGE_PORT = 4282
@@ -139,18 +137,19 @@ def main():
             t.check(got_greeting, "Received ESP32 greeting channel message",
                     detail=f"received {len(received_messages)} messages so far")
 
-            # Send channel messages
+            # Send channel messages — space them out to allow channel window
+            # proofs to round-trip over serial before the ESP32 window fills.
             t._log("sending channel messages...")
             channel = link.get_channel()
             msg1 = TestMessage(b"test-msg-one")
             channel.send(msg1)
-            time.sleep(0.5)
+            time.sleep(2)
 
             msg2 = TestMessage(b"test-msg-two")
             channel.send(msg2)
 
             # Wait for echoes
-            deadline = time.time() + 8
+            deadline = time.time() + 10
             while time.time() < deadline:
                 msgs = received_messages[:]
                 if (any(b"echo:test-msg-one" in m for m in msgs) and

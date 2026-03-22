@@ -1078,14 +1078,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         let link_id = cr.link_id;
                         let sequence = cr.sequence;
                         let sig = &pkt.payload[32..96];
-                        // Verify using the link peer's node identity (not ephemeral keys).
-                        // The proof is signed by the peer's Ed25519 identity key.
+                        // Verify using the link peer's signing key (peer_ed25519_pub).
+                        // Python initiators use an ephemeral Ed25519 key (not their
+                        // node identity) for link signing, so we must use the key
+                        // from the LINKREQUEST/LRPROOF handshake.
                         let verified = if let Some(link) = self.links.get(&link_id) {
-                            self.known_identities
-                                .get(&link.destination_hash)
-                                .and_then(|pk| Identity::from_public_key(pk).ok())
-                                .map(|id| id.verify(&full_hash, sig).is_ok())
-                                .unwrap_or(false)
+                            Identity::verify_raw_ed25519(
+                                &link.peer_ed25519_pub,
+                                &full_hash,
+                                sig,
+                            )
+                            .is_ok()
                         } else {
                             false
                         };

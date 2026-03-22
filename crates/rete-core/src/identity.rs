@@ -214,6 +214,25 @@ impl Identity {
             .map_err(|_| Error::InvalidSignature)
     }
 
+    /// Verify an Ed25519 signature using a raw 32-byte public key.
+    ///
+    /// Standalone helper for verifying link proofs where only the peer's
+    /// Ed25519 public key is available (not a full Identity).
+    pub fn verify_raw_ed25519(
+        ed25519_pub: &[u8; 32],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Error> {
+        use ed25519_dalek::Verifier;
+
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(ed25519_pub)
+            .map_err(|_| Error::InvalidSignature)?;
+        let sig =
+            ed25519_dalek::Signature::from_slice(signature).map_err(|_| Error::InvalidSignature)?;
+        vk.verify(message, &sig)
+            .map_err(|_| Error::InvalidSignature)
+    }
+
     /// Encrypt `plaintext` to this identity's X25519 public key.
     ///
     /// Writes ciphertext into `out`. Returns number of bytes written.
