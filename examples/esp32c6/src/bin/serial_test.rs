@@ -352,6 +352,16 @@ fn handle_event(
                 );
             }
         }
+
+        NodeEvent::LinkIdentified { link_id, identity_hash, .. } => {
+            let lh = hex4(&link_id);
+            let ih = hex4(&identity_hash);
+            println!(
+                "[serial-test] LINK_IDENTIFIED link={} identity={}",
+                core::str::from_utf8(&lh).unwrap_or("????"),
+                core::str::from_utf8(&ih).unwrap_or("????"),
+            );
+        }
     }
 
     out

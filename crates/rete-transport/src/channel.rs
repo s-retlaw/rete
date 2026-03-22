@@ -434,8 +434,17 @@ impl Channel {
     /// Returns timeout in seconds.
     pub fn compute_retry_timeout(&self, tries: u8) -> f64 {
         let rtt_secs = self.rtt_ms as f64 / 1000.0;
-        let base = 1.5_f64.powi(tries.saturating_sub(1) as i32);
-        let rtt_factor = (rtt_secs * 2.5).max(0.025);
+        // Manual pow(1.5, n) for no_std compatibility (no f64::powi)
+        let exp = tries.saturating_sub(1) as usize;
+        let mut base = 1.0_f64;
+        for _ in 0..exp {
+            base *= 1.5;
+        }
+        let rtt_factor = if rtt_secs * 2.5 > 0.025 {
+            rtt_secs * 2.5
+        } else {
+            0.025
+        };
         let queue_factor = self.tx_pending.len() as f64 + 1.5;
         base * rtt_factor * queue_factor
     }
