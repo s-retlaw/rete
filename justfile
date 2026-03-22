@@ -257,6 +257,11 @@ test-e2e-resource-concurrent:
     cargo build -p rete-example-linux
     cd tests/interop && uv run python resource_concurrent_interop.py
 
+# E2E resource multi-segment transfer (2-3 segments, both directions)
+test-e2e-resource-multiseg:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python resource_multiseg_interop.py
+
 # E2E resource multi-window transfer
 test-e2e-resource-multiwindow:
     cargo build -p rete-example-linux
@@ -413,9 +418,10 @@ test-all:
     run_e2e TCPDISC tcp_disconnect_interop.py
     run_e2e HDLC hdlc_recovery_interop.py
 
-    # Resource (3)
+    # Resource (4)
     run_e2e RESOURCE resource_interop.py
     run_e2e RESCONCUR resource_concurrent_interop.py
+    run_e2e RESMULTISEG resource_multiseg_interop.py
     run_e2e RESMULTI resource_multiwindow_interop.py
 
     # Long-running (2)
@@ -501,6 +507,7 @@ test-all:
     echo "    Resource:"
     printf "  %-30s %s passed, %s failed\n" "resource-interop" "$RESOURCE_PASS" "$RESOURCE_FAIL"
     printf "  %-30s %s passed, %s failed\n" "resource-concurrent-interop" "$RESCONCUR_PASS" "$RESCONCUR_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "resource-multiseg-interop" "$RESMULTISEG_PASS" "$RESMULTISEG_FAIL"
     printf "  %-30s %s passed, %s failed\n" "resource-multiwindow-interop" "$RESMULTI_PASS" "$RESMULTI_FAIL"
     echo "    Long-running:"
     printf "  %-30s %s passed, %s failed\n" "keepalive-interop" "$KEEPALIVE_PASS" "$KEEPALIVE_FAIL"
@@ -528,7 +535,7 @@ test-all:
         + LOCALIPC_PASS \
         + LXMFOPP_PASS + LXMFDIR_PASS + LXMFBIDI_PASS + LXMFPROP_PASS + LXMFSF_PASS + LXMFAF_PASS + LXMFRET_PASS \
         + TCPDISC_PASS + HDLC_PASS \
-        + RESOURCE_PASS + RESCONCUR_PASS + RESMULTI_PASS \
+        + RESOURCE_PASS + RESCONCUR_PASS + RESMULTISEG_PASS + RESMULTI_PASS \
         + KEEPALIVE_PASS + STABILITY_PASS \
         + LINKSTALE_PASS + LINKCYCLE_PASS + DATAINTEG_PASS + MTUBOUND_PASS + MALANN_PASS + ANNFLOOD_PASS \
         + CHANORDER_PASS + CONCTRAF_PASS + PATHEXP_PASS + RESCANCEL_PASS \
@@ -542,13 +549,13 @@ test-all:
         + LOCALIPC_FAIL \
         + LXMFOPP_FAIL + LXMFDIR_FAIL + LXMFBIDI_FAIL + LXMFPROP_FAIL + LXMFSF_FAIL + LXMFAF_FAIL + LXMFRET_FAIL \
         + TCPDISC_FAIL + HDLC_FAIL \
-        + RESOURCE_FAIL + RESCONCUR_FAIL + RESMULTI_FAIL \
+        + RESOURCE_FAIL + RESCONCUR_FAIL + RESMULTISEG_FAIL + RESMULTI_FAIL \
         + KEEPALIVE_FAIL + STABILITY_FAIL \
         + LINKSTALE_FAIL + LINKCYCLE_FAIL + DATAINTEG_FAIL + MTUBOUND_FAIL + MALANN_FAIL + ANNFLOOD_FAIL \
         + CHANORDER_FAIL + CONCTRAF_FAIL + PATHEXP_FAIL + RESCANCEL_FAIL \
         + RESLARGE_FAIL + MIXSTRESS_FAIL + PROOFCHAIN_FAIL))
     echo ""
-    printf "  %-30s %s passed, %s failed\n" "e2e total (58 suites)" "$E2E_PASS" "$E2E_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "e2e total (59 suites)" "$E2E_PASS" "$E2E_FAIL"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))

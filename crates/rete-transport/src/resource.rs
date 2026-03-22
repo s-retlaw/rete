@@ -688,6 +688,10 @@ pub struct Resource {
     ///
     /// Always at a `HASHMAP_MAX_LEN` boundary or at `total_segments`.
     hashmap_cursor: usize,
+    /// Number of parts requested but not yet received in the current window.
+    /// Set by `build_request()`, decremented by `receive_part()`.
+    /// When zero, the window is complete and a follow-up REQ can be sent.
+    pub outstanding_parts: usize,
 }
 
 impl Resource {
@@ -766,6 +770,7 @@ impl Resource {
             part_hashes,
             received: vec![false; total_segments],
             hashmap_cursor: 0,
+            outstanding_parts: 0,
         }
     }
 
@@ -1192,6 +1197,7 @@ impl Resource {
             part_hashes,
             received: vec![false; total_segments],
             hashmap_cursor: initial_hashes,
+            outstanding_parts: 0,
         })
     }
 
@@ -1221,13 +1227,26 @@ impl Resource {
 
         // Find matching index in known part hashes (only within hashmap_cursor
         // range to avoid matching unfilled [0u8;4] sentinel slots).
+        let mut matched = false;
         for idx in 0..self.hashmap_cursor {
             if self.part_hashes[idx] == part_hash && !self.received[idx] {
                 self.parts[idx] = part_data.to_vec();
                 self.received[idx] = true;
+                self.outstanding_parts = self.outstanding_parts.saturating_sub(1);
+                matched = true;
                 break;
             }
         }
+
+        #[cfg(feature = "relay-debug")]
+        if !matched {
+            std::eprintln!(
+                "resource receive_part: no hash match, computed={:02x}{:02x}{:02x}{:02x} len={} cursor={} total={}",
+                part_hash[0], part_hash[1], part_hash[2], part_hash[3],
+                part_data.len(), self.hashmap_cursor, self.total_segments,
+            );
+        }
+        let _ = matched; // suppress unused warning when relay-debug is off
 
         // Check if all parts received
         self.received.iter().all(|&r| r)
@@ -1263,6 +1282,14 @@ impl Resource {
         }
     }
 
+    /// Whether all parts from the current window have been received.
+    ///
+    /// Python sends the next REQ only when `outstanding_parts == 0`
+    /// (Resource.py line 886). Matches that behaviour.
+    pub fn is_window_complete(&self) -> bool {
+        self.outstanding_parts == 0
+    }
+
     /// Build a RESOURCE_REQ payload requesting needed parts.
     ///
     /// Format:
@@ -1274,7 +1301,7 @@ impl Resource {
     ///   hashes but still need more (i.e. `part_hashes.len() < total_segments`).
     /// - When we have all hashes, status is `0x00` (just requesting parts).
     /// - Only requests parts within the current window that have not been received.
-    pub fn build_request(&self) -> Vec<u8> {
+    pub fn build_request(&mut self) -> Vec<u8> {
         // Match Python's consecutive_completed_height scanning:
         // Start from the first unreceived part and scan forward within the window.
         let consecutive_completed = self.consecutive_completed();
@@ -1298,6 +1325,9 @@ impl Resource {
                 }
             }
         }
+
+        // Track how many parts we requested — window is "complete" when all arrive.
+        self.outstanding_parts = requested_hashes.len();
 
         // Also signal exhausted if we couldn't fill the window and more hashes exist
         let exhausted = hashmap_exhausted
@@ -1520,7 +1550,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
         let adv = sender.build_advertisement();
-        let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
         let req = receiver.build_request();
         // For single part, all hashes known from advertisement => status=0x00 (not exhausted)
         // Format: status[1] + resource_hash[32] + hashes[N*4]

@@ -20,8 +20,7 @@ fn hex_short(h: &[u8]) -> alloc::string::String {
 }
 
 use crate::announce::validate_announce;
-use crate::link::LINK_MDU;
-use crate::link::{compute_link_id, Link};
+use crate::link::{compute_link_id, decode_mtu, Link};
 use crate::receipt::ReceiptTable;
 use crate::resource::Resource;
 use crate::{announce::PendingAnnounce, dedup::DedupWindow, path::Path};
@@ -1597,7 +1596,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 };
                 // Send data parts (NOT link-encrypted in Python RNS).
                 for (_idx, part_data) in parts_to_send {
-                    let mut pkt_buf = [0u8; rete_core::MTU];
+                    // Use heap buffer for large TCP segments (SDU up to 8156)
+                    let buf_size = part_data.len() + 20; // header + payload
+                    let mut pkt_buf = alloc::vec![0u8; buf_size];
                     if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
                         .packet_type(PacketType::Data)
                         .dest_type(DestType::Link)
@@ -2217,12 +2218,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         compressed: bool,
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
-        // Step 1: Check link is active and encrypt data (immutable borrow scope)
-        let encrypted = {
+        // Step 1: Check link is active, extract peer MTU, and encrypt data
+        let (encrypted, peer_mtu) = {
             let link = self.links.get(link_id)?;
             if !link.is_active() {
                 return None;
             }
+            let mtu = decode_mtu(&link.signalling) as usize;
 
             // Prepend 4 random bytes (Python: self.data = os.urandom(4) + self.data)
             let mut prepended = alloc::vec::Vec::with_capacity(4 + data.len());
@@ -2237,13 +2239,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             let mut ct_buf = alloc::vec![0u8; max_ct_len];
             let ct_len = link.encrypt(&prepended, rng, &mut ct_buf).ok()?;
             ct_buf.truncate(ct_len);
-            ct_buf
+            (ct_buf, mtu)
         };
 
-        // Step 2: Create Resource from the encrypted blob
+        // Step 2: Create Resource from the encrypted blob.
+        // SDU = link.mtu - HEADER_MAXSIZE(35) - IFAC_MIN_SIZE(1).
+        // Python: self.sdu = self.link.mtu - RNS.Reticulum.HEADER_MAXSIZE - RNS.Reticulum.IFAC_MIN_SIZE
+        // For TCP links (mtu=8192), SDU=8156. For radio (mtu=500), SDU=464.
+        let sdu = if peer_mtu > 36 { peer_mtu - 36 } else { 464 };
         let original_size = original_data.len();
         let mut resource =
-            Resource::new_outbound(&encrypted, *link_id, LINK_MDU, original_size, rng);
+            Resource::new_outbound(&encrypted, *link_id, sdu, original_size, rng);
         // Set the encrypted flag (Python: self.flags |= Resource.FLAG_ENCRYPTED)
         resource.flags.encrypted = true;
         resource.flags.compressed = compressed;
@@ -2294,7 +2300,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
         let req = {
-            let res = self.resources.iter().find(|r| {
+            let res = self.resources.iter_mut().find(|r| {
                 !r.is_sender
                     && r.link_id == *link_id
                     && r.resource_hash[..TRUNCATED_HASH_LEN] == *resource_hash
@@ -2316,7 +2322,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
         let req = {
-            let res = self.resources.iter().find(|r| {
+            let res = self.resources.iter_mut().find(|r| {
                 !r.is_sender
                     && r.link_id == *link_id
                     && r.resource_hash[..TRUNCATED_HASH_LEN] == *resource_hash
@@ -2363,28 +2369,47 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // Retry follow-up requests for stalled receiver resources.
         // This prevents deadlocks where a REQ was lost or the sender
         // is waiting for a REQ that was never sent.
+        // Only retry when outstanding_parts == 0 (not waiting for in-flight parts).
         let mut req_packets = alloc::vec::Vec::new();
-        for res in &self.resources {
-            if !res.is_sender && !res.received.iter().all(|&r| r) {
-                // Resource has unreceived parts — build a follow-up request
+        for res in &mut self.resources {
+            if !res.is_sender
+                && !res.received.iter().all(|&r| r)
+                && res.outstanding_parts == 0
+            {
+                // Resource has unreceived parts and no in-flight window — retry REQ
                 let req_payload = res.build_request();
                 let mut link_id = [0u8; TRUNCATED_HASH_LEN];
                 link_id.copy_from_slice(&res.link_id);
-                if let Some(pkt) = self.build_resource_req_packet(&link_id, &req_payload, rng) {
-                    req_packets.push(pkt);
-                }
+                req_packets.push((link_id, req_payload));
             }
         }
-        // Also send HMU for sender resources with unsent hashes
+        // Encrypt REQ packets via the link (separate loop to avoid borrow conflict)
+        for (link_id, req_payload) in &req_packets {
+            if let Some(pkt) = self.build_resource_req_packet(link_id, req_payload, rng) {
+                self.resource_outbound.push(pkt);
+            }
+        }
+        // Also send link-encrypted HMU for sender resources with unsent hashes.
+        // Collect payloads first to avoid borrow conflict between resources and links.
+        let mut hmu_items: alloc::vec::Vec<([u8; TRUNCATED_HASH_LEN], alloc::vec::Vec<u8>)> =
+            alloc::vec::Vec::new();
         for res in &mut self.resources {
             if res.is_sender && res.needs_hashmap_update() {
                 if let Some(hmu) = res.build_hashmap_update() {
-                    self.resource_outbound.push(hmu);
+                    let mut lid = [0u8; TRUNCATED_HASH_LEN];
+                    lid.copy_from_slice(&res.link_id);
+                    hmu_items.push((lid, hmu));
                 }
             }
         }
-        for pkt in req_packets {
-            self.resource_outbound.push(pkt);
+        for (lid, hmu_payload) in &hmu_items {
+            if let Some(link) = self.links.get(lid) {
+                if let Some(pkt) =
+                    Self::build_link_packet(link, lid, hmu_payload, CONTEXT_RESOURCE_HMU, rng)
+                {
+                    self.resource_outbound.push(pkt);
+                }
+            }
         }
     }
 

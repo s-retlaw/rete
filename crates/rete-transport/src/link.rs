@@ -503,6 +503,14 @@ pub fn signalling_bytes(mtu: u32, mode: u8) -> [u8; LINK_MTU_SIZE] {
     [be[1], be[2], be[3]]
 }
 
+/// Decode MTU from 3 signalling bytes.
+///
+/// Inverse of `signalling_bytes`: extracts the 21-bit MTU field.
+pub fn decode_mtu(sig: &[u8; LINK_MTU_SIZE]) -> u32 {
+    let packed = u32::from_be_bytes([0, sig[0], sig[1], sig[2]]);
+    packed & 0x1F_FFFF
+}
+
 /// Compute the link_id from a LINKREQUEST packet's raw bytes.
 ///
 /// ```text

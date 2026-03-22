@@ -902,7 +902,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         rng: &mut R,
     ) -> IngestOutcome {
         let len = raw.len();
-        if len > MTU {
+
+        // TCP links can carry packets up to ~8192 bytes (link MTU negotiated
+        // during handshake). Allow up to TCP_MAX_PKT for TCP-capable nodes.
+        const TCP_MAX_PKT: usize = 8292;
+        if len > TCP_MAX_PKT {
             return IngestOutcome::empty();
         }
 
@@ -911,12 +915,29 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             log_fn(raw, "IN", iface);
         }
 
-        let mut pkt_buf = [0u8; MTU];
-        pkt_buf[..len].copy_from_slice(raw);
+        // Use stack buffer for small packets (common case), heap for large TCP packets.
+        if len <= MTU {
+            let mut pkt_buf = [0u8; MTU];
+            pkt_buf[..len].copy_from_slice(raw);
+            return self.dispatch_ingest(&mut pkt_buf[..len], now, iface, rng);
+        }
 
+        let mut pkt_buf = vec![0u8; len];
+        pkt_buf[..len].copy_from_slice(raw);
+        self.dispatch_ingest(&mut pkt_buf[..len], now, iface, rng)
+    }
+
+    /// Dispatch a parsed packet buffer to the transport layer.
+    fn dispatch_ingest<R: RngCore + CryptoRng>(
+        &mut self,
+        pkt_buf: &mut [u8],
+        now: u64,
+        iface: u8,
+        rng: &mut R,
+    ) -> IngestOutcome {
         match self
             .transport
-            .ingest_on(&mut pkt_buf[..len], now, iface, rng, &self.identity)
+            .ingest_on(pkt_buf, now, iface, rng, &self.identity)
         {
             IngestResult::AnnounceReceived {
                 dest_hash,
@@ -1302,19 +1323,26 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 for pkt in self.transport.drain_resource_outbound() {
                     packets.push(OutboundPacket::broadcast(pkt));
                 }
-                // Grow window and send follow-up REQ if not all parts received
+                // Only send follow-up REQ when the entire window batch has
+                // arrived (outstanding_parts == 0). Python does the same:
+                // Resource.py line 886 checks `outstanding_parts == 0`.
                 if current < total {
-                    // Grow the sliding window for faster throughput
-                    if let Some(res) =
-                        self.transport.get_resource_mut(&link_id, &resource_hash)
-                    {
-                        res.grow_window(true); // assume fast link (localhost/TCP)
-                    }
-                    if let Some(req_pkt) =
-                        self.transport
-                            .build_followup_request(&link_id, &resource_hash, rng)
-                    {
-                        packets.push(OutboundPacket::broadcast(req_pkt));
+                    let window_complete = self
+                        .transport
+                        .get_resource(&link_id, &resource_hash)
+                        .map_or(false, |r| r.is_window_complete());
+                    if window_complete {
+                        if let Some(res) =
+                            self.transport.get_resource_mut(&link_id, &resource_hash)
+                        {
+                            res.grow_window(true); // assume fast link (localhost/TCP)
+                        }
+                        if let Some(req_pkt) =
+                            self.transport
+                                .build_followup_request(&link_id, &resource_hash, rng)
+                        {
+                            packets.push(OutboundPacket::broadcast(req_pkt));
+                        }
                     }
                 }
                 IngestOutcome {
@@ -2250,12 +2278,12 @@ mod tests {
 
     #[test]
     fn test_ingest_oversized_packet() {
-        // Pass a 501-byte buffer to handle_ingest — should not panic,
-        // should return empty outcome (no event).
+        // Pass a buffer larger than TCP_MAX_PKT (8292) to handle_ingest —
+        // should not panic, should return empty outcome (no event).
         let mut core = make_core(b"oversized-test");
         let mut rng = rand::thread_rng();
 
-        let oversized = [0u8; 501];
+        let oversized = [0u8; 8293];
         let outcome = core.handle_ingest(&oversized, 1000, 0, &mut rng);
         assert!(
             outcome.event.is_none(),
