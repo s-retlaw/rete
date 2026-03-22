@@ -132,10 +132,6 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     additional_dests: Vec<Destination>,
     /// Optional auto-reply message sent after receiving an announce.
     auto_reply: Option<Vec<u8>>,
-    /// When true, echo received DATA back to sender with "echo:" prefix.
-    echo_data: bool,
-    /// Dest hash of the most recently announced peer (echo target).
-    last_peer: Option<[u8; TRUNCATED_HASH_LEN]>,
     /// Optional decompressor for bz2-compressed resource data.
     /// Called when a received resource has the compressed flag set.
     /// Desktop: provide bz2 decompressor. MCUs without enough RAM: leave as None.
@@ -196,8 +192,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             primary_dest,
             additional_dests: Vec::new(),
             auto_reply: None,
-            echo_data: false,
-            last_peer: None,
             decompress_fn: None,
             compress_fn: None,
             packet_log_fn: None,
@@ -228,11 +222,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     /// Set an auto-reply message sent to any peer that announces.
     pub fn set_auto_reply(&mut self, msg: Option<Vec<u8>>) {
         self.auto_reply = msg;
-    }
-
-    /// Enable echo mode: received DATA is sent back to the sender with "echo:" prefix.
-    pub fn set_echo_data(&mut self, echo: bool) {
-        self.echo_data = echo;
     }
 
     /// Set the decompression function for bz2-compressed resource data.
@@ -431,7 +420,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer_id_hash));
         self.transport
             .register_identity(peer_dest_hash, peer.public_key(), now);
-        self.last_peer = Some(peer_dest_hash);
     }
 
     /// Register a peer's identity and build a cached announce for them.
@@ -919,12 +907,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         if len <= MTU {
             let mut pkt_buf = [0u8; MTU];
             pkt_buf[..len].copy_from_slice(raw);
-            return self.dispatch_ingest(&mut pkt_buf[..len], now, iface, rng);
+            self.dispatch_ingest(&mut pkt_buf[..len], now, iface, rng)
+        } else {
+            let mut pkt_buf = vec![0u8; len];
+            pkt_buf[..len].copy_from_slice(raw);
+            self.dispatch_ingest(&mut pkt_buf[..len], now, iface, rng)
         }
-
-        let mut pkt_buf = vec![0u8; len];
-        pkt_buf[..len].copy_from_slice(raw);
-        self.dispatch_ingest(&mut pkt_buf[..len], now, iface, rng)
     }
 
     /// Dispatch a parsed packet buffer to the transport layer.
@@ -945,7 +933,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 hops,
                 app_data,
             } => {
-                self.last_peer = Some(dest_hash);
                 let mut packets = Vec::new();
 
                 // Auto-reply to announcing peer
@@ -960,7 +947,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                     }
                 }
 
-                // Flush pending announces (retransmissions) to all interfaces
+                // Flush pending announces so received announces are forwarded
+                // immediately (retransmit_timeout=now fires on first flush).
                 packets.extend(self.flush_announces(now, rng));
 
                 IngestOutcome {
@@ -1006,21 +994,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 };
                 if should_prove {
                     packets.extend(self.proof_outbound(&packet_hash));
-                }
-
-                // Echo data back to sender if echo mode is on
-                if self.echo_data {
-                    if let Some(peer) = self.last_peer {
-                        let mut echo_msg = Vec::with_capacity(5 + decrypted.len());
-                        echo_msg.extend_from_slice(b"echo:");
-                        echo_msg.extend_from_slice(&decrypted);
-                        if let Some(pkt) = self.build_data_packet(&peer, &echo_msg, rng, now) {
-                            packets.push(OutboundPacket {
-                                data: pkt,
-                                routing: PacketRouting::SourceInterface,
-                            });
-                        }
-                    }
                 }
 
                 IngestOutcome {
@@ -1630,49 +1603,6 @@ mod tests {
             .collect();
         assert_eq!(proof_packets.len(), 1, "should generate one proof packet");
         assert_eq!(proof_packets[0].routing, PacketRouting::SourceInterface);
-    }
-
-    #[test]
-    fn node_core_handle_ingest_data_with_echo() {
-        let mut core = make_core(b"echo-node");
-        core.set_echo_data(true);
-        let mut rng = rand::thread_rng();
-
-        // Register a peer so we have a last_peer to echo back to
-        let peer = Identity::from_seed(b"echo-peer").unwrap();
-        core.register_peer(&peer, "testapp", &["aspect1"], 100);
-
-        // Build encrypted DATA
-        let node_id = Identity::from_seed(b"echo-node").unwrap();
-        let recipient = Identity::from_public_key(&node_id.public_key()).unwrap();
-        let mut ct_buf = [0u8; MTU];
-        let ct_len = recipient.encrypt(b"ping", &mut rng, &mut ct_buf).unwrap();
-
-        let mut pkt_buf = [0u8; MTU];
-        let pkt_len = PacketBuilder::new(&mut pkt_buf)
-            .packet_type(PacketType::Data)
-            .dest_type(DestType::Single)
-            .destination_hash(core.dest_hash())
-            .context(0x00)
-            .payload(&ct_buf[..ct_len])
-            .build()
-            .unwrap();
-
-        let outcome = core.handle_ingest(&pkt_buf[..pkt_len], 1000, 0, &mut rng);
-        // Should have an echo DATA packet
-        let data_packets: Vec<_> = outcome
-            .packets
-            .iter()
-            .filter(|p| {
-                Packet::parse(&p.data)
-                    .map(|pkt| pkt.packet_type == PacketType::Data)
-                    .unwrap_or(false)
-            })
-            .collect();
-        assert!(
-            !data_packets.is_empty(),
-            "echo mode should produce a DATA packet"
-        );
     }
 
     #[test]

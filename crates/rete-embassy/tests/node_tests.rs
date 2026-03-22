@@ -208,56 +208,6 @@ async fn embassy_node_receives_encrypted_data() {
 }
 
 #[tokio::test]
-async fn embassy_node_echo_mode() {
-    let mut node = make_node(b"test-node-4");
-    let node_dest = *node.core.dest_hash();
-    node.core.set_echo_data(true);
-    let mut iface = MockInterface::new();
-    let mut rng = rand::thread_rng();
-    let mut events = Vec::new();
-
-    // First: inject a peer announce so node has a last_peer and can echo back
-    let peer = Identity::from_seed(b"peer-node-4").unwrap();
-    let announce = build_announce(&peer);
-    iface.push_inbound(announce);
-
-    // Then: inject encrypted DATA from that peer
-    let node_identity = Identity::from_seed(b"test-node-4").unwrap();
-    let recipient = Identity::from_public_key(&node_identity.public_key()).unwrap();
-    let plaintext = b"ping";
-    let mut ct_buf = [0u8; MTU];
-    let ct_len = recipient.encrypt(plaintext, &mut rng, &mut ct_buf).unwrap();
-
-    let mut pkt_buf = [0u8; MTU];
-    let pkt_len = rete_core::PacketBuilder::new(&mut pkt_buf)
-        .packet_type(PacketType::Data)
-        .dest_type(rete_core::DestType::Single)
-        .destination_hash(&node_dest)
-        .context(0x00)
-        .payload(&ct_buf[..ct_len])
-        .build()
-        .unwrap();
-    iface.push_inbound(pkt_buf[..pkt_len].to_vec());
-
-    node.run(&mut iface, &mut rng, |ev| events.push(ev)).await;
-
-    // outbound should contain at least one DATA packet (the echo)
-    let data_packets: Vec<_> = iface
-        .outbound
-        .iter()
-        .filter(|raw| {
-            Packet::parse(raw)
-                .map(|p| p.packet_type == PacketType::Data)
-                .unwrap_or(false)
-        })
-        .collect();
-    assert!(
-        !data_packets.is_empty(),
-        "echo mode should produce at least one DATA packet"
-    );
-}
-
-#[tokio::test]
 async fn embassy_node_auto_reply() {
     let mut node = make_node(b"test-node-5");
     node.core

@@ -21,7 +21,8 @@ pub use rete_stack::EmbeddedNodeCore;
 pub use rete_stack::NodeEvent;
 pub use rete_stack::OutboundPacket;
 pub use rete_stack::ProofStrategy;
-use rete_stack::{PacketRouting, ReteInterface};
+pub use rete_stack::PacketRouting;
+use rete_stack::ReteInterface;
 use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 // ---------------------------------------------------------------------------

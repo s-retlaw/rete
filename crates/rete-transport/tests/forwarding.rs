@@ -100,6 +100,7 @@ fn transport_without_identity_never_forwards() {
     let mut rng = rand::thread_rng();
     let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xAA; TRUNCATED_HASH_LEN];
+    t.add_local_destination(dest);
     let mut raw = build_header1_data(&dest, b"test payload");
     match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::LocalData { .. } => {} // expected for HEADER_1 DATA
@@ -144,6 +145,7 @@ fn header1_data_local_delivery() {
     let mut rng = rand::thread_rng();
     let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xAA; TRUNCATED_HASH_LEN];
+    t.add_local_destination(dest);
     let mut raw = build_header1_data(&dest, b"local delivery");
     match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::LocalData {
@@ -159,14 +161,14 @@ fn header1_data_local_delivery() {
 #[test]
 fn header2_data_other_transport_id_falls_through() {
     // HEADER_2 DATA with non-matching transport_id should NOT be dropped.
-    // It falls through to normal processing (local delivery), matching
-    // Python RNS behavior where non-matching HEADER_2 packets are still
-    // processed for announces and local DATA.
+    // It falls through to normal processing (local delivery if destination
+    // is registered), matching Python RNS behavior.
     let (mut t, _local_hash) = make_relay_transport(b"relay-node");
     let mut rng = rand::thread_rng();
     let identity = Identity::from_seed(b"test-identity").unwrap();
     let other_tid = [0xFF; TRUNCATED_HASH_LEN]; // not our identity
     let dest = [0xCC; TRUNCATED_HASH_LEN];
+    t.add_local_destination(dest);
     let mut raw = build_header2_data(&other_tid, &dest, b"not for relay");
     match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::LocalData {
@@ -504,6 +506,7 @@ fn ingest_local_data_includes_packet_hash() {
     let mut rng = rand::thread_rng();
     let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xAA; TRUNCATED_HASH_LEN];
+    t.add_local_destination(dest);
     let raw = build_header1_data(&dest, b"hash test");
     // Compute expected hash before ingest (ingest increments hops but hash is hop-invariant)
     let expected_hash = Packet::parse(&raw).unwrap().compute_hash();
@@ -620,6 +623,7 @@ fn dedup_prevents_double_processing() {
     let mut rng = rand::thread_rng();
     let identity = Identity::from_seed(b"test-identity").unwrap();
     let dest = [0xAA; TRUNCATED_HASH_LEN];
+    t.add_local_destination(dest);
     let raw = build_header1_data(&dest, b"dedup test");
 
     let mut raw1 = raw.clone();

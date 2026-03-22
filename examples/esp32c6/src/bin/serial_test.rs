@@ -31,7 +31,8 @@ use esp_hal::uart::{self, Uart};
 use esp_hal::{clock::CpuClock, ram, timer::timg::TimerGroup};
 use esp_println::println;
 use rete_embassy::{
-    EmbassyHdlcInterface, EmbassyNode, EmbeddedNodeCore, NodeEvent, OutboundPacket, ProofStrategy,
+    EmbassyHdlcInterface, EmbassyNode, EmbeddedNodeCore, NodeEvent, OutboundPacket,
+    PacketRouting, ProofStrategy,
 };
 
 #[path = "../rng.rs"]
@@ -88,7 +89,6 @@ async fn main(_spawner: Spawner) -> ! {
     let identity = rete_core::Identity::from_seed(b"rete-esp32c6-test").expect("invalid key");
 
     let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]);
-    node.core.set_echo_data(true);
     node.core.set_proof_strategy(ProofStrategy::ProveAll);
     node.set_announce_interval(10); // Short interval for testing
 
@@ -112,8 +112,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut rng = EspRng(esp_hal::rng::Rng::new());
 
     println!("[serial-test] running (full handler mode)");
+    let mut last_peer: Option<[u8; 16]> = None;
     node.run_with_handler(&mut iface, &mut rng, |event, core, rng| {
-        handle_event(event, core, rng)
+        handle_event(event, core, rng, &mut last_peer)
     })
     .await;
 
@@ -127,6 +128,7 @@ fn handle_event(
     event: NodeEvent,
     core: &mut EmbeddedNodeCore,
     rng: &mut EspRng,
+    last_peer: &mut Option<[u8; 16]>,
 ) -> Vec<OutboundPacket> {
     let now = Instant::now().as_secs();
     let mut out = Vec::new();
@@ -138,6 +140,11 @@ fn handle_event(
             app_data,
             ..
         } => {
+            // Track the most recent peer for DATA echo (skip our own dest)
+            if dest_hash != *core.dest_hash() {
+                *last_peer = Some(dest_hash);
+            }
+
             let dh = hex4(&dest_hash);
             println!(
                 "[serial-test] ANNOUNCE {:?} hops={}",
@@ -168,6 +175,18 @@ fn handle_event(
                 println!("[serial-test] DATA: {}", text);
             } else {
                 println!("[serial-test] DATA: {} bytes", payload.len());
+            }
+
+            // Echo back to last announced peer
+            if let Some(peer) = *last_peer {
+                let mut echo_msg = b"echo:".to_vec();
+                echo_msg.extend_from_slice(&payload);
+                if let Some(pkt) = core.build_data_packet(&peer, &echo_msg, rng, now) {
+                    out.push(OutboundPacket {
+                        data: pkt,
+                        routing: PacketRouting::SourceInterface,
+                    });
+                }
             }
         }
 

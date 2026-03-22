@@ -1018,10 +1018,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     }
                 }
 
-                IngestResult::LocalData {
-                    dest_hash: dh,
-                    payload: pkt.payload,
-                    packet_hash: pkt_hash,
+                // Only treat as local if the destination is actually registered
+                // as ours. Packets for unknown destinations are dropped — they
+                // reached a dead end (no path, not local).
+                if self.is_local_destination(&dh) {
+                    IngestResult::LocalData {
+                        dest_hash: dh,
+                        payload: pkt.payload,
+                        packet_hash: pkt_hash,
+                    }
+                } else {
+                    IngestResult::Invalid
                 }
             }
             PacketType::Proof => {
@@ -1822,7 +1829,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             dest_hash: dh,
                             raw: ann_raw,
                             tx_count: 0,
-                            retransmit_timeout: now + PATHFINDER_G,
+                            retransmit_timeout: now, // Forward immediately; PATHFINDER_G applies to retransmissions
                             local: false,
                             local_rebroadcasts: 0,
                             block_rebroadcasts: false,

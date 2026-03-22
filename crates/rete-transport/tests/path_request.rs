@@ -102,14 +102,13 @@ fn path_request_ignored_without_transport() {
     let identity = Identity::from_seed(b"test-identity").unwrap();
     let mut rng = rand::thread_rng();
 
-    // Path request should be treated as normal LocalData
+    // Path request on a non-transport node is dropped (PATH_REQUEST_DEST
+    // is not a local destination and there's no path to forward to).
     let requested = [0xAA; TRUNCATED_HASH_LEN];
     let mut req = build_path_request(&requested);
     match t.ingest(&mut req, 1000, &mut rng, &identity) {
-        IngestResult::LocalData { dest_hash, .. } => {
-            assert_eq!(dest_hash, PATH_REQUEST_DEST);
-        }
-        other => panic!("expected LocalData, got {:?}", other),
+        IngestResult::Invalid => {} // non-transport nodes drop path requests
+        other => panic!("expected Invalid, got {:?}", other),
     }
 }
 
