@@ -58,8 +58,10 @@ pub enum LXMessageState {
     Failed,
 }
 
-/// The Link MDU — maximum payload for a single link packet.
-const LINK_MDU: usize = 431;
+/// Default Link MDU for standard radio links (MTU=500).
+/// For TCP links (MTU=8192), the negotiated MDU is ~8111.
+/// Use `fits_in_single_packet_with_mdu()` for non-default links.
+pub const LINK_MDU_DEFAULT: usize = 431;
 
 /// An LXMF message.
 #[derive(Debug)]
@@ -177,9 +179,16 @@ impl LXMessage {
         })
     }
 
-    /// Check if this message fits in a single link packet.
+    /// Check if this message fits in a single link packet (default radio MDU=431).
     pub fn fits_in_single_packet(&self) -> bool {
-        self.pack().len() <= LINK_MDU
+        self.pack().len() <= LINK_MDU_DEFAULT
+    }
+
+    /// Check if this message fits in a single link packet with a specific MDU.
+    ///
+    /// Use this for TCP links where the negotiated MDU may be much larger.
+    pub fn fits_in_single_packet_with_mdu(&self, link_mdu: usize) -> bool {
+        self.pack().len() <= link_mdu
     }
 
     /// Compute the message hash (SHA-256 of packed representation).

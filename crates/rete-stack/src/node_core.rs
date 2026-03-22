@@ -642,9 +642,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     ///
     /// Call after `queue_announce()` to flush the announce immediately, or rely
     /// on `handle_tick()` which calls this internally.
-    pub fn flush_announces(&mut self, now: u64) -> Vec<OutboundPacket> {
+    pub fn flush_announces<R: RngCore>(&mut self, now: u64, rng: &mut R) -> Vec<OutboundPacket> {
         self.transport
-            .pending_outbound(now)
+            .pending_outbound(now, rng)
             .into_iter()
             .map(|raw| OutboundPacket::broadcast(raw))
             .collect()
@@ -961,7 +961,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 }
 
                 // Flush pending announces (retransmissions) to all interfaces
-                packets.extend(self.flush_announces(now));
+                packets.extend(self.flush_announces(now, rng));
 
                 IngestOutcome {
                     event: Some(NodeEvent::AnnounceReceived {
@@ -1431,7 +1431,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
     /// Periodic maintenance: expire paths, collect pending announces, send keepalives.
     pub fn handle_tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> IngestOutcome {
-        let mut packets = self.flush_announces(now);
+        let mut packets = self.flush_announces(now, rng);
 
         // Resource maintenance: send HMU for sender resources with unsent hashes
         self.transport.tick_resources(rng);
@@ -2124,7 +2124,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         core.queue_announce(None, &mut rng, 1000);
-        let pending = core.transport.pending_outbound(1000);
+        let pending = core.transport.pending_outbound(1000, &mut rng);
 
         // local=true means it's sent immediately
         assert_eq!(pending.len(), 1);
@@ -2141,18 +2141,18 @@ mod tests {
         core.queue_announce(None, &mut rng, 1000);
 
         // First flush: immediate (local=true)
-        let p1 = core.transport.pending_outbound(1000);
+        let p1 = core.transport.pending_outbound(1000, &mut rng);
         assert_eq!(p1.len(), 1);
 
         // Still in queue (tx_count=1, PATHFINDER_R=1)
         assert_eq!(core.transport.announce_count(), 1);
 
         // Too early for retransmit (delay = PATHFINDER_G = 5s, timeout at 1005)
-        let p2 = core.transport.pending_outbound(1004);
+        let p2 = core.transport.pending_outbound(1004, &mut rng);
         assert_eq!(p2.len(), 0);
 
-        // At timeout: retransmit
-        let p3 = core.transport.pending_outbound(1005);
+        // At timeout: retransmit (with jitter, timeout could be 1005 or 1006)
+        let p3 = core.transport.pending_outbound(1006, &mut rng);
         assert_eq!(p3.len(), 1);
 
         // Now tx_count=2 > PATHFINDER_R=1, so dropped from queue
@@ -2474,7 +2474,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         assert!(core.queue_announce_for(&lxmf_hash, None, &mut rng, 1000));
-        let pending = core.transport.pending_outbound(1000);
+        let pending = core.transport.pending_outbound(1000, &mut rng);
         assert_eq!(pending.len(), 1);
 
         let pkt = Packet::parse(&pending[0]).unwrap();
@@ -2490,7 +2490,7 @@ mod tests {
 
         let app_data = b"some app data";
         assert!(core.queue_announce_for(&lxmf_hash, Some(app_data), &mut rng, 1000));
-        let pending = core.transport.pending_outbound(1000);
+        let pending = core.transport.pending_outbound(1000, &mut rng);
         assert_eq!(pending.len(), 1);
     }
 

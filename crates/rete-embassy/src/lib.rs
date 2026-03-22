@@ -214,7 +214,7 @@ impl EmbassyNode {
         {
             let now = Instant::now().as_secs();
             self.core.queue_announce(None, rng, self.announce_time());
-            dispatch(iface, &self.core.flush_announces(now)).await;
+            dispatch(iface, &self.core.flush_announces(now, rng)).await;
         }
 
         let mut recv_buf = [0u8; MTU];
@@ -274,7 +274,7 @@ impl EmbassyNode {
                     next_announce = Instant::now() + Duration::from_secs(announce_interval);
                     let now = Instant::now().as_secs();
                     self.core.queue_announce(None, rng, self.announce_time());
-                    dispatch(iface, &self.core.flush_announces(now)).await;
+                    dispatch(iface, &self.core.flush_announces(now, rng)).await;
                 }
                 Either3::Third(()) => {
                     next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);

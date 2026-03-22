@@ -33,8 +33,9 @@ pub use channel::{
 };
 pub use dedup::DedupWindow;
 pub use link::{
-    compute_link_id, signalling_bytes, Link, LinkRole, LinkState, TeardownReason, LINK_MDU,
-    LINK_MTU_SIZE,
+    compute_establishment_timeout, compute_keepalive, compute_link_id, compute_link_mdu,
+    compute_resource_sdu, compute_traffic_timeout_ms, signalling_bytes, Link, LinkRole, LinkState,
+    TeardownReason, LINK_MDU, LINK_MTU_SIZE,
 };
 pub use path::{InterfaceMode, Path, PATH_EXPIRES_AP, PATH_EXPIRES_ROAMING};
 pub use receipt::{PacketReceipt, ReceiptStatus, ReceiptTable};
@@ -42,7 +43,7 @@ pub use request::{
     build_request, build_response, parse_request, parse_response, path_hash, request_id,
     RequestError, PATH_HASH_LEN, REQUEST_ID_LEN,
 };
-pub use resource::{Resource, ResourceFlags, ResourceState};
+pub use resource::{hashmap_max_len, Resource, ResourceFlags, ResourceState, HASHMAP_MAX_LEN_DEFAULT};
 pub use snapshot::{IdentityEntry, PathEntry, Snapshot, SnapshotDetail};
 pub use transport::{
     IngestResult, ReverseEntry, TickResult, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,

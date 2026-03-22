@@ -66,10 +66,21 @@ pub const SENDER_GRACE_TIME: u64 = 10;
 pub const ADV_OVERHEAD: usize = 134;
 /// Sentinel value indicating the hashmap is fully transferred.
 pub const HASHMAP_IS_EXHAUSTED: u8 = 0xFF;
-/// Maximum number of part hashes per hashmap segment in an advertisement.
-/// Python: `math.floor((Link.MDU - OVERHEAD) / MAPHASH_LEN)`
-/// = (431 - 134) / 4 = 74
-pub const HASHMAP_MAX_LEN: usize = (crate::link::LINK_MDU - ADV_OVERHEAD) / MAPHASH_LEN;
+/// Default hashmap max len for standard radio links (MDU=431).
+/// Python: `math.floor((Link.MDU - OVERHEAD) / MAPHASH_LEN)` = 74
+pub const HASHMAP_MAX_LEN_DEFAULT: usize = (crate::link::LINK_MDU - ADV_OVERHEAD) / MAPHASH_LEN;
+
+/// Compute the maximum number of part hashes per hashmap segment for a given link MDU.
+///
+/// For TCP links (MDU ~8111), this yields ~1994 hashes per segment instead of 74,
+/// dramatically reducing HMU round-trips for large resource transfers.
+pub fn hashmap_max_len(link_mdu: usize) -> usize {
+    if link_mdu > ADV_OVERHEAD {
+        (link_mdu - ADV_OVERHEAD) / MAPHASH_LEN
+    } else {
+        1 // minimum: at least one hash per segment
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Minimal msgpack helpers (no std dependency)
@@ -706,12 +717,16 @@ pub struct Resource {
     /// - Sender: index up to which hashes have been sent (via advertisement + HMUs).
     /// - Receiver: index up to which valid hashes have been received.
     ///
-    /// Always at a `HASHMAP_MAX_LEN` boundary or at `total_segments`.
+    /// Always at a `hashmap_max_len` boundary or at `total_segments`.
     hashmap_cursor: usize,
     /// Number of parts requested but not yet received in the current window.
     /// Set by `build_request()`, decremented by `receive_part()`.
     /// When zero, the window is complete and a follow-up REQ can be sent.
     pub outstanding_parts: usize,
+    /// Maximum part hashes per hashmap segment, computed from the link's MDU.
+    /// Python: `math.floor((Link.MDU - OVERHEAD) / MAPHASH_LEN)`.
+    /// For radio (MDU=431) = 74; for TCP (MDU≈8111) ≈ 1994.
+    hashmap_max_len: usize,
 }
 
 impl Resource {
@@ -726,11 +741,14 @@ impl Resource {
     ///
     /// `original_size` is the size of the original plaintext data before
     /// prepend/compression/encryption (used for the "d" field in advertisements).
+    /// `link_mdu` is the link's MDU, used to compute how many part hashes fit
+    /// per hashmap segment (74 for radio, ~1994 for TCP).
     pub fn new_outbound<R: RngCore + CryptoRng>(
         data: &[u8],
         link_id: [u8; 16],
         mdu: usize,
         original_size: usize,
+        link_mdu: usize,
         rng: &mut R,
     ) -> Self {
         // 1. Generate random_hash (4 random bytes)
@@ -769,6 +787,9 @@ impl Resource {
             parts.push(segment);
         }
 
+        let hml = hashmap_max_len(link_mdu);
+        debug_assert!(hml >= 1, "hashmap_max_len must be >= 1, got {hml} for link_mdu={link_mdu}");
+
         Resource {
             state: ResourceState::Queued,
             is_sender: true,
@@ -791,6 +812,7 @@ impl Resource {
             received: vec![false; total_segments],
             hashmap_cursor: 0,
             outstanding_parts: 0,
+            hashmap_max_len: hml,
         }
     }
 
@@ -812,7 +834,7 @@ impl Resource {
     /// ```
     pub fn build_advertisement(&mut self) -> Vec<u8> {
         self.state = ResourceState::Advertised;
-        self.hashmap_cursor = HASHMAP_MAX_LEN.min(self.total_segments);
+        self.hashmap_cursor = self.hashmap_max_len.min(self.total_segments);
 
         // Build hashmap bytes: concatenated 4-byte hashes for the first segment of the hashmap
         let hashmap_len = self.hashmap_cursor * MAPHASH_LEN;
@@ -895,7 +917,7 @@ impl Resource {
 
         // If hashmap is exhausted, the next 4 bytes are the last known map hash.
         // We use it to find where the receiver's hashmap ends and set our cursor
-        // so build_hashmap_update() sends the correct HASHMAP_MAX_LEN-aligned segment.
+        // so build_hashmap_update() sends the correct hashmap_max_len-aligned segment.
         if needs_hmu {
             if req_payload.len() < offset + MAPHASH_LEN {
                 return HandleRequestResult::default();
@@ -917,9 +939,9 @@ impl Resource {
 
             if let Some(idx) = part_index {
                 // Set cursor past the matched hash so build_hashmap_update()
-                // sends the next HASHMAP_MAX_LEN-aligned segment.
+                // sends the next hashmap_max_len-aligned segment.
                 // The receiver always gets aligned chunks, so idx+1 is always
-                // at a HASHMAP_MAX_LEN boundary (or at total_segments).
+                // at a hashmap_max_len boundary (or at total_segments).
                 self.hashmap_cursor = (idx + 1).min(self.total_segments);
             }
         }
@@ -1036,10 +1058,10 @@ impl Resource {
             return None;
         }
 
-        // Compute the segment number (aligned to HASHMAP_MAX_LEN boundaries)
-        let segment_number = self.hashmap_cursor / HASHMAP_MAX_LEN;
-        let chunk_start = segment_number * HASHMAP_MAX_LEN;
-        let end = ((segment_number + 1) * HASHMAP_MAX_LEN).min(self.total_segments);
+        // Compute the segment number (aligned to hashmap_max_len boundaries)
+        let segment_number = self.hashmap_cursor / self.hashmap_max_len;
+        let chunk_start = segment_number * self.hashmap_max_len;
+        let end = ((segment_number + 1) * self.hashmap_max_len).min(self.total_segments);
 
         // Build the hash chunk
         let chunk_len = (end - chunk_start) * MAPHASH_LEN;
@@ -1218,6 +1240,7 @@ impl Resource {
             received: vec![false; total_segments],
             hashmap_cursor: initial_hashes,
             outstanding_parts: 0,
+            hashmap_max_len: HASHMAP_MAX_LEN_DEFAULT,
         })
     }
 
@@ -1402,7 +1425,7 @@ impl Resource {
         let new_hashes = read_msgpack_bin(msgpack_data, &mut pos)?;
 
         // Place hashes at the correct segment-aligned position
-        let placement_start = segment_index * HASHMAP_MAX_LEN;
+        let placement_start = segment_index * self.hashmap_max_len;
         let count = new_hashes.len() / MAPHASH_LEN;
         for i in 0..count {
             let target = placement_start + i;
@@ -1491,7 +1514,7 @@ mod tests {
         let data = vec![0xAA; 1000];
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let res = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
+        let res = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
         assert_eq!(res.total_segments, 3); // ceil(1000/431)
         assert_eq!(res.total_size, 1000);
         assert_eq!(res.state, ResourceState::Queued);
@@ -1501,7 +1524,7 @@ mod tests {
     fn test_resource_hash_computation() {
         let data = b"hello resource";
         let mut rng = rand::thread_rng();
-        let res = Resource::new_outbound(data, [0x11; 16], 431, data.len(), &mut rng);
+        let res = Resource::new_outbound(data, [0x11; 16], 431, data.len(), 431, &mut rng);
         // Verify hash = SHA-256(data || random_hash)
         let mut hasher = Sha256::new();
         hasher.update(data);
@@ -1514,7 +1537,7 @@ mod tests {
     fn test_part_hash_computation() {
         let data = vec![0xBB; 100];
         let mut rng = rand::thread_rng();
-        let res = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
+        let res = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
         // Single part — hash should be SHA-256(data || random_hash)[0:4]
         let mut hasher = Sha256::new();
         hasher.update(&data);
@@ -1527,7 +1550,7 @@ mod tests {
     fn test_advertisement_msgpack_round_trip() {
         let data = vec![0xCC; 500];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
         let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
         assert_eq!(receiver.total_size, 500);
@@ -1540,7 +1563,7 @@ mod tests {
     fn test_advertisement_is_msgpack_dict() {
         let data = vec![0xDD; 200];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
         // First byte should be a fixmap header (0x80 | n)
         assert_eq!(
@@ -1557,10 +1580,10 @@ mod tests {
         let data = vec![0xDD; 2000];
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
         let _adv = sender.build_advertisement();
-        // hashmap_cursor should be min(HASHMAP_MAX_LEN, total_segments)
-        let expected_cursor = HASHMAP_MAX_LEN.min(sender.total_segments);
+        // hashmap_cursor should be min(hashmap_max_len, total_segments)
+        let expected_cursor = hashmap_max_len(mdu).min(sender.total_segments);
         assert_eq!(sender.hashmap_cursor, expected_cursor);
     }
 
@@ -1568,7 +1591,7 @@ mod tests {
     fn test_request_wire_format() {
         let data = vec![0xEE; 100]; // single part
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
         let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
         let req = receiver.build_request();
@@ -1585,7 +1608,7 @@ mod tests {
     fn test_proof_format() {
         let data = vec![0xFF; 100];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
         let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
         // Feed the single part
@@ -1604,7 +1627,7 @@ mod tests {
         // After successful request handling, window should grow
         let data = vec![0xAA; 2000];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
         let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
         let initial_window = receiver.window;
@@ -1617,7 +1640,7 @@ mod tests {
     fn test_cancel_transitions_to_failed() {
         let data = vec![0xBB; 100];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
         sender.handle_cancel();
         assert_eq!(sender.state, ResourceState::Failed);
     }
@@ -1627,7 +1650,7 @@ mod tests {
         // Full sender -> receiver cycle for small data (1 segment)
         let data = b"small transfer data";
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(data, [0x11; 16], 431, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(data, [0x11; 16], 431, data.len(), 431, &mut rng);
 
         // Step 1: Build advertisement
         let adv = sender.build_advertisement();
@@ -1683,7 +1706,7 @@ mod tests {
     fn test_empty_data_resource() {
         let data = b"";
         let mut rng = rand::thread_rng();
-        let res = Resource::new_outbound(data, [0x11; 16], 431, data.len(), &mut rng);
+        let res = Resource::new_outbound(data, [0x11; 16], 431, data.len(), 431, &mut rng);
         assert_eq!(res.total_segments, 0);
         assert_eq!(res.total_size, 0);
     }
@@ -1694,10 +1717,10 @@ mod tests {
         let data = vec![0xAA; 80 * 431]; // 80 segments
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
         assert_eq!(sender.total_segments, 80);
         let adv = sender.build_advertisement();
-        assert_eq!(sender.hashmap_cursor, 74); // HASHMAP_MAX_LEN
+        assert_eq!(sender.hashmap_cursor, 74); // hashmap_max_len(431)
         let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
 
         // Build a hashmap update from sender (segment 1: hashes 74-79)
@@ -1715,17 +1738,17 @@ mod tests {
     #[test]
     fn test_multi_segment_transfer() {
         // Full sender -> receiver cycle for multi-segment data.
-        // With HASHMAP_MAX_LEN=74, all 5 hashes fit in the advertisement.
+        // With hashmap_max_len=74, all 5 hashes fit in the advertisement.
         let data = vec![0x42; 2000]; // ceil(2000/431) = 5 segments
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
         assert_eq!(sender.total_segments, 5);
 
         let adv = sender.build_advertisement();
         let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
         assert_eq!(receiver.total_segments, 5);
-        // All 5 hashes included (min(HASHMAP_MAX_LEN=74, 5) = 5)
+        // All 5 hashes included (min(hashmap_max_len=74, 5) = 5)
         assert_eq!(receiver.hashmap_cursor, 5);
 
         // Receiver requests all parts — no exhaustion since all hashes known
@@ -1762,7 +1785,7 @@ mod tests {
         let data: Vec<u8> = (0..80 * 431).map(|i| (i % 256) as u8).collect();
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), &mut rng);
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
         assert_eq!(sender.total_segments, 80);
 
         let adv = sender.build_advertisement();

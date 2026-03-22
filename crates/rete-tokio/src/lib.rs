@@ -243,7 +243,7 @@ impl TokioNode {
             NodeCommand::Announce { app_data } => {
                 self.core.queue_announce(app_data.as_deref(), rng, now);
                 eprintln!("[rete] cmd: queued announce");
-                (self.core.flush_announces(now), true, None)
+                (self.core.flush_announces(now, rng), true, None)
             }
             NodeCommand::AppCommand { name, .. } => {
                 eprintln!(
@@ -327,7 +327,7 @@ impl TokioNode {
         {
             let now = current_time_secs();
             self.core.queue_announce(None, &mut rng, now);
-            dispatch_single(iface, &self.core.flush_announces(now)).await;
+            dispatch_single(iface, &self.core.flush_announces(now, &mut rng)).await;
         }
         eprintln!(
             "[rete] sent announce for dest {}",
@@ -416,7 +416,7 @@ impl TokioNode {
                 _ = announce_timer.tick() => {
                     let now = current_time_secs();
                     self.core.queue_announce(None, &mut rng, now);
-                    dispatch_single(iface, &self.core.flush_announces(now)).await;
+                    dispatch_single(iface, &self.core.flush_announces(now, &mut rng)).await;
                 }
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();
@@ -496,7 +496,7 @@ impl TokioNode {
         {
             let now = current_time_secs();
             self.core.queue_announce(None, &mut rng, now);
-            dispatch_multi(&iface_senders, &self.core.flush_announces(now), 0).await;
+            dispatch_multi(&iface_senders, &self.core.flush_announces(now, &mut rng), 0).await;
         }
         eprintln!("[rete] sent announce on {} interfaces", iface_senders.len());
 
@@ -552,7 +552,7 @@ impl TokioNode {
                 _ = announce_timer.tick() => {
                     let now = current_time_secs();
                     self.core.queue_announce(None, &mut rng, now);
-                    dispatch_multi(&iface_senders, &self.core.flush_announces(now), 0).await;
+                    dispatch_multi(&iface_senders, &self.core.flush_announces(now, &mut rng), 0).await;
                 }
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();

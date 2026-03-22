@@ -340,11 +340,11 @@ impl Channel {
             // RTT-based tier promotion (matches Python Channel._packet_tx_op lines 504-527)
             let rtt_ms = (link_rtt_secs * 1000.0) as u64;
             if rtt_ms > 0 {
-                if rtt_ms > RTT_FAST_MS {
-                    // Not fast — reset fast counter
+                if rtt_ms >= RTT_FAST_MS {
+                    // Not fast (Python: rtt >= RTT_FAST) — reset fast counter
                     self.fast_rate_rounds = 0;
 
-                    if rtt_ms > RTT_MEDIUM_MS {
+                    if rtt_ms >= RTT_MEDIUM_MS {
                         // Slow — reset medium counter too
                         self.medium_rate_rounds = 0;
                     } else {

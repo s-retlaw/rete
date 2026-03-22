@@ -916,7 +916,7 @@ async fn run_multi_with_local_server<F>(
     {
         let now = rete_tokio::current_time_secs();
         node.core.queue_announce(None, &mut rng, now);
-        let announces = node.core.flush_announces(now);
+        let announces = node.core.flush_announces(now, &mut rng);
         dispatch_with_local(&iface_senders, &announces, 0, &broadcaster, None).await;
     }
     eprintln!(
@@ -971,7 +971,7 @@ async fn run_multi_with_local_server<F>(
             _ = announce_timer.tick() => {
                 let now = rete_tokio::current_time_secs();
                 node.core.queue_announce(None, &mut rng, now);
-                let announces = node.core.flush_announces(now);
+                let announces = node.core.flush_announces(now, &mut rng);
                 dispatch_with_local(&iface_senders, &announces, 0, &broadcaster, None).await;
             }
             _ = tick_timer.tick() => {
@@ -1554,7 +1554,7 @@ fn handle_lxmf_command(
             let router = lxmf_router.borrow();
             router.queue_delivery_announce(core, rng, now);
             router.queue_propagation_announce(core, rng, now);
-            let announces = core.flush_announces(now);
+            let announces = core.flush_announces(now, rng);
             eprintln!("[rete] LXMF delivery announce sent");
             Some(announces)
         }
@@ -1562,7 +1562,7 @@ fn handle_lxmf_command(
             let now = rete_tokio::current_time_secs();
             let router = lxmf_router.borrow();
             if router.queue_propagation_announce(core, rng, now) {
-                let announces = core.flush_announces(now);
+                let announces = core.flush_announces(now, rng);
                 eprintln!("[rete] LXMF propagation announce sent");
                 Some(announces)
             } else {

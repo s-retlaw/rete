@@ -54,9 +54,9 @@ fn path_request_known_dest_queues_announce() {
         IngestResult::AnnounceReceived { dest_hash, .. } => {
             // Drain the retransmit announce from normal announce processing
             // First call sends (tx_count 0→1) at retransmit_timeout (1000+5=1005)
-            let _ = t.pending_outbound(1005);
+            let _ = t.pending_outbound(1006, &mut rng);
             // Second call sends (tx_count 1→2) and drops (tx_count > PATHFINDER_R)
-            let _ = t.pending_outbound(1010);
+            let _ = t.pending_outbound(1012, &mut rng);
             let count_before = t.announce_count();
             assert_eq!(count_before, 0, "queue should be drained");
 

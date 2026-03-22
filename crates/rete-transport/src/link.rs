@@ -492,6 +492,72 @@ impl Link {
 /// This gives 431 bytes — the largest plaintext that fits in one link packet.
 pub const LINK_MDU: usize = 431;
 
+/// Compute link MDU from a given MTU.
+///
+/// Python: `math.floor((mtu - IFAC_MIN_SIZE - HEADER_MINSIZE - TOKEN_OVERHEAD) / 16) * 16 - 1`
+/// where IFAC_MIN_SIZE=1, HEADER_MINSIZE=19, TOKEN_OVERHEAD=48 → overhead=68.
+/// For radio (500) = 431; for TCP (8192) = 8111.
+pub fn compute_link_mdu(mtu: usize) -> usize {
+    const OVERHEAD: usize = 68; // IFAC_MIN_SIZE(1) + HEADER_MINSIZE(19) + TOKEN_OVERHEAD(48)
+    if mtu <= OVERHEAD {
+        return 0;
+    }
+    ((mtu - OVERHEAD) / 16) * 16 - 1
+}
+
+/// Compute resource SDU from a given MTU.
+///
+/// Python: `mtu - HEADER_MAXSIZE - IFAC_MIN_SIZE` (35 + 1 = 36).
+/// For radio (500) = 464; for TCP (8192) = 8156.
+pub fn compute_resource_sdu(mtu: usize) -> usize {
+    const OVERHEAD: usize = 36; // HEADER_MAXSIZE(35) + IFAC_MIN_SIZE(1)
+    if mtu <= OVERHEAD {
+        return 0;
+    }
+    mtu - OVERHEAD
+}
+
+/// Compute keepalive interval and stale time from RTT.
+///
+/// Returns `(keepalive_interval_s, stale_time_s)` as floats.
+/// Python: `max(KEEPALIVE_MIN, min(KEEPALIVE_MAX, rtt * (KEEPALIVE_MAX / KEEPALIVE_MAX_RTT)))`
+pub fn compute_keepalive(rtt: f32) -> (f32, f32) {
+    let keepalive = if rtt <= 0.0 {
+        KEEPALIVE_MIN
+    } else {
+        let ka = rtt * (KEEPALIVE_MAX / KEEPALIVE_MAX_RTT);
+        if ka < KEEPALIVE_MIN {
+            KEEPALIVE_MIN
+        } else if ka > KEEPALIVE_MAX {
+            KEEPALIVE_MAX
+        } else {
+            ka
+        }
+    };
+    let stale = keepalive * STALE_FACTOR + STALE_GRACE as f32;
+    (keepalive, stale)
+}
+
+/// Compute traffic timeout in milliseconds from RTT.
+///
+/// Python: `max(TRAFFIC_TIMEOUT_MIN_MS, rtt_ms * TRAFFIC_TIMEOUT_FACTOR)`
+pub fn compute_traffic_timeout_ms(rtt: f32) -> f32 {
+    let rtt_ms = rtt * 1000.0;
+    let timeout = rtt_ms * TRAFFIC_TIMEOUT_FACTOR as f32;
+    if timeout < TRAFFIC_TIMEOUT_MIN_MS as f32 {
+        TRAFFIC_TIMEOUT_MIN_MS as f32
+    } else {
+        timeout
+    }
+}
+
+/// Compute establishment timeout from hop count.
+///
+/// Python: `hops * ESTABLISHMENT_TIMEOUT_PER_HOP`
+pub fn compute_establishment_timeout(hops: u64) -> u64 {
+    hops * ESTABLISHMENT_TIMEOUT_PER_HOP
+}
+
 /// Size of MTU signalling bytes appended to LINKREQUEST and LRPROOF.
 /// Python: `Link.LINK_MTU_SIZE = 3`.
 pub const LINK_MTU_SIZE: usize = 3;

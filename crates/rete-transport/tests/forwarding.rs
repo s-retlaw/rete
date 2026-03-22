@@ -898,7 +898,7 @@ fn announce_rebroadcast_as_header2_when_transport() {
 
     // The queued announce should be HEADER_2 with our transport_id
     // (retransmit_timeout = ingest_time + PATHFINDER_G = 1005)
-    let pending = t.pending_outbound(1005);
+    let pending = t.pending_outbound(1006, &mut rng);
     assert!(!pending.is_empty(), "should have a pending announce");
 
     let rebroadcast = &pending[0];
@@ -943,7 +943,7 @@ fn announce_rebroadcast_keeps_header1_without_transport() {
     }
 
     // retransmit_timeout = ingest_time + PATHFINDER_G = 1005
-    let pending = t.pending_outbound(1005);
+    let pending = t.pending_outbound(1006, &mut rng);
     assert!(!pending.is_empty(), "should have a pending announce");
 
     let rebroadcast = &pending[0];
@@ -978,7 +978,7 @@ fn rebroadcast_hops_preserved() {
     let _ = t.ingest(&mut pkt, 1000, &mut rng, &identity);
 
     // retransmit_timeout = ingest_time + PATHFINDER_G = 1005
-    let pending = t.pending_outbound(1005);
+    let pending = t.pending_outbound(1006, &mut rng);
     assert!(!pending.is_empty());
 
     let rpkt = Packet::parse(&pending[0]).unwrap();

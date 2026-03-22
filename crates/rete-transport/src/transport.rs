@@ -2248,9 +2248,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // Python: self.sdu = self.link.mtu - RNS.Reticulum.HEADER_MAXSIZE - RNS.Reticulum.IFAC_MIN_SIZE
         // For TCP links (mtu=8192), SDU=8156. For radio (mtu=500), SDU=464.
         let sdu = if peer_mtu > 36 { peer_mtu - 36 } else { 464 };
+        // Link MDU: largest plaintext fitting in one link-encrypted packet.
+        // Formula: floor((mtu - 1 - HEADER_1_OVERHEAD(19) - TOKEN_OVERHEAD(48)) / 16) * 16 - 1
+        // For radio (mtu=500) = 431; for TCP (mtu=8192) = 8111.
+        let link_mdu = if peer_mtu > 68 {
+            ((peer_mtu - 68) / 16) * 16 - 1
+        } else {
+            crate::link::LINK_MDU
+        };
+        debug_assert!(link_mdu > 0 && link_mdu <= peer_mtu, "link_mdu={link_mdu} peer_mtu={peer_mtu}");
+        debug_assert!(sdu > 0 && sdu <= peer_mtu, "sdu={sdu} peer_mtu={peer_mtu}");
         let original_size = original_data.len();
         let mut resource =
-            Resource::new_outbound(&encrypted, *link_id, sdu, original_size, rng);
+            Resource::new_outbound(&encrypted, *link_id, sdu, original_size, link_mdu, rng);
         // Set the encrypted flag (Python: self.flags |= Resource.FLAG_ENCRYPTED)
         resource.flags.encrypted = true;
         resource.flags.compressed = compressed;
@@ -2528,7 +2538,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     }
 
     /// Returns announces that are due for retransmission.
-    pub fn pending_outbound(&mut self, now: u64) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+    ///
+    /// Python adds `random.random() * PATHFINDER_RW` (0–0.5s) of jitter to
+    /// each retransmit timeout to prevent synchronized retransmissions on
+    /// shared radio channels.
+    pub fn pending_outbound<R: RngCore>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
         let mut to_send: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
         let mut keep: heapless::Deque<PendingAnnounce, A> = heapless::Deque::new();
 
@@ -2540,8 +2558,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             if ann.local || now >= ann.retransmit_timeout {
                 to_send.push(ann.raw.clone());
                 ann.tx_count += 1;
-                // Next retransmission: PATHFINDER_G after now (matching Python)
-                ann.retransmit_timeout = now + PATHFINDER_G;
+                // Next retransmission: PATHFINDER_G + random jitter (0..PATHFINDER_RW_MS ms)
+                // Python: now + PATHFINDER_G + random.random() * PATHFINDER_RW
+                let jitter_ms = (rng.next_u32() % PATHFINDER_RW_MS as u32) as u64;
+                // Convert to seconds (integer math: add 1s if jitter >= 500ms)
+                let jitter_secs = if jitter_ms >= 500 { 1 } else { 0 };
+                ann.retransmit_timeout = now + PATHFINDER_G + jitter_secs;
+                debug_assert!(ann.retransmit_timeout > now);
                 ann.local = false;
                 if ann.tx_count <= PATHFINDER_R && !ann.block_rebroadcasts {
                     let _ = keep.push_back(ann);

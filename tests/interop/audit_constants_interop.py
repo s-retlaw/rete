@@ -12,6 +12,7 @@ Usage:
 
 import sys
 import json
+import os
 
 
 def main():
@@ -206,6 +207,43 @@ def main():
     check("Destination", "ALLOW_LIST", RNS.Destination.ALLOW_LIST, 0x02)
     check("Destination", "IN", RNS.Destination.IN, 0x11)
     check("Destination", "OUT", RNS.Destination.OUT, 0x12)
+
+    # -----------------------------------------------------------------------
+    # Computed values (cross-check against generated vectors)
+    # -----------------------------------------------------------------------
+    import math
+    from RNS.Cryptography import Token as CryptoToken2
+
+    # Verify computed_vectors.json exists and matches Python
+    vectors_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "computed_vectors.json")
+    if os.path.exists(vectors_path):
+        with open(vectors_path) as f:
+            vectors = json.load(f)
+
+        # MTU vectors
+        for v in vectors.get("mtu_vectors", []):
+            mtu = v["mtu"]
+            expected_mdu = math.floor(
+                (mtu - RNS.Reticulum.IFAC_MIN_SIZE - RNS.Reticulum.HEADER_MINSIZE - CryptoToken2.TOKEN_OVERHEAD) / 16
+            ) * 16 - 1
+            check("Computed", f"link_mdu(MTU={mtu})", expected_mdu, v["link_mdu"])
+
+            expected_sdu = mtu - RNS.Reticulum.HEADER_MAXSIZE - RNS.Reticulum.IFAC_MIN_SIZE
+            check("Computed", f"resource_sdu(MTU={mtu})", expected_sdu, v["resource_sdu"])
+
+            expected_hml = math.floor((expected_mdu - 134) / 4)
+            check("Computed", f"hashmap_max_len(MTU={mtu})", expected_hml, v["hashmap_max_len"])
+
+        # RTT vectors
+        for v in vectors.get("rtt_vectors", []):
+            rtt = v["rtt"]
+            expected_ka = max(
+                RNS.Link.KEEPALIVE_MIN,
+                min(RNS.Link.KEEPALIVE_MAX, rtt * (RNS.Link.KEEPALIVE_MAX / RNS.Link.KEEPALIVE_MAX_RTT)),
+            )
+            check("Computed", f"keepalive(RTT={rtt})", expected_ka, v["keepalive_interval_s"])
+    else:
+        print("  NOTE: computed_vectors.json not found, skipping computed value checks")
 
     # -----------------------------------------------------------------------
     # Report

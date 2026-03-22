@@ -1,0 +1,190 @@
+{
+  "_generator": "generate_computed_vectors.py",
+  "_rns_version": "1.1.4",
+  "_generated_at": "2026-03-22T18:21:10Z",
+  "_description": "Computed test vectors derived from Python RNS internals across a configuration matrix of MTU and RTT values. Used to validate Rust computed constants match the Python reference.",
+  "_constants_used": {
+    "IFAC_MIN_SIZE": 1,
+    "HEADER_MINSIZE": 19,
+    "HEADER_MAXSIZE": 35,
+    "TOKEN_OVERHEAD": 48,
+    "KEEPALIVE_MIN": 5,
+    "KEEPALIVE_MAX": 360,
+    "KEEPALIVE_MAX_RTT": 1.75,
+    "STALE_FACTOR": 2,
+    "STALE_GRACE": 5,
+    "TRAFFIC_TIMEOUT_MIN_MS": 5,
+    "TRAFFIC_TIMEOUT_FACTOR": 6,
+    "ESTABLISHMENT_TIMEOUT_PER_HOP": 6,
+    "ADV_OVERHEAD": 134,
+    "MAPHASH_LEN": 4,
+    "RTT_FAST": 0.18,
+    "RTT_MEDIUM": 0.75,
+    "RTT_SLOW": 1.45,
+    "WINDOW_MIN_LIMIT_FAST": 16,
+    "WINDOW_MIN_LIMIT_MEDIUM": 5,
+    "WINDOW_MIN_LIMIT_SLOW": 2,
+    "WINDOW_MAX_FAST": 48,
+    "WINDOW_MAX_MEDIUM": 12,
+    "WINDOW_MAX_SLOW": 5,
+    "CHANNEL_INITIAL_WINDOW": 2
+  },
+  "mtu_vectors": [
+    {
+      "mtu": 500,
+      "link_mdu": 431,
+      "resource_sdu": 464,
+      "hashmap_max_len": 74
+    },
+    {
+      "mtu": 1000,
+      "link_mdu": 927,
+      "resource_sdu": 964,
+      "hashmap_max_len": 198
+    },
+    {
+      "mtu": 2000,
+      "link_mdu": 1919,
+      "resource_sdu": 1964,
+      "hashmap_max_len": 446
+    },
+    {
+      "mtu": 4096,
+      "link_mdu": 4015,
+      "resource_sdu": 4060,
+      "hashmap_max_len": 970
+    },
+    {
+      "mtu": 8192,
+      "link_mdu": 8111,
+      "resource_sdu": 8156,
+      "hashmap_max_len": 1994
+    }
+  ],
+  "rtt_vectors": [
+    {
+      "rtt": 0.01,
+      "keepalive_interval_s": 5,
+      "stale_time_s": 15,
+      "traffic_timeout_ms": 60.0
+    },
+    {
+      "rtt": 0.05,
+      "keepalive_interval_s": 10.285714285714286,
+      "stale_time_s": 25.571428571428573,
+      "traffic_timeout_ms": 300.0
+    },
+    {
+      "rtt": 0.18,
+      "keepalive_interval_s": 37.02857142857143,
+      "stale_time_s": 79.05714285714286,
+      "traffic_timeout_ms": 1080.0
+    },
+    {
+      "rtt": 0.5,
+      "keepalive_interval_s": 102.85714285714286,
+      "stale_time_s": 210.71428571428572,
+      "traffic_timeout_ms": 3000.0
+    },
+    {
+      "rtt": 0.75,
+      "keepalive_interval_s": 154.28571428571428,
+      "stale_time_s": 313.57142857142856,
+      "traffic_timeout_ms": 4500.0
+    },
+    {
+      "rtt": 1.0,
+      "keepalive_interval_s": 205.71428571428572,
+      "stale_time_s": 416.42857142857144,
+      "traffic_timeout_ms": 6000.0
+    },
+    {
+      "rtt": 1.5,
+      "keepalive_interval_s": 308.57142857142856,
+      "stale_time_s": 622.1428571428571,
+      "traffic_timeout_ms": 9000.0
+    },
+    {
+      "rtt": 2.0,
+      "keepalive_interval_s": 360,
+      "stale_time_s": 725,
+      "traffic_timeout_ms": 12000.0
+    }
+  ],
+  "channel_vectors": [
+    {
+      "rtt": 0.01,
+      "window_min": 16,
+      "window_max": 48,
+      "initial_window": 2
+    },
+    {
+      "rtt": 0.05,
+      "window_min": 16,
+      "window_max": 48,
+      "initial_window": 2
+    },
+    {
+      "rtt": 0.18,
+      "window_min": 5,
+      "window_max": 12,
+      "initial_window": 2
+    },
+    {
+      "rtt": 0.5,
+      "window_min": 5,
+      "window_max": 12,
+      "initial_window": 2
+    },
+    {
+      "rtt": 0.75,
+      "window_min": 2,
+      "window_max": 5,
+      "initial_window": 2
+    },
+    {
+      "rtt": 1.0,
+      "window_min": 2,
+      "window_max": 5,
+      "initial_window": 2
+    },
+    {
+      "rtt": 1.5,
+      "window_min": 2,
+      "window_max": 5,
+      "initial_window": 2
+    },
+    {
+      "rtt": 2.0,
+      "window_min": 2,
+      "window_max": 5,
+      "initial_window": 2
+    }
+  ],
+  "hop_vectors": [
+    {
+      "hops": 1,
+      "establishment_timeout_s": 6
+    },
+    {
+      "hops": 2,
+      "establishment_timeout_s": 12
+    },
+    {
+      "hops": 3,
+      "establishment_timeout_s": 18
+    },
+    {
+      "hops": 5,
+      "establishment_timeout_s": 30
+    },
+    {
+      "hops": 8,
+      "establishment_timeout_s": 48
+    },
+    {
+      "hops": 10,
+      "establishment_timeout_s": 60
+    }
+  ]
+}

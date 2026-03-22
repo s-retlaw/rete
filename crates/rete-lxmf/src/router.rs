@@ -1258,7 +1258,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         assert!(router.queue_delivery_announce(&mut core, &mut rng, 1000));
-        let pending = core.transport.pending_outbound(1000);
+        let pending = core.transport.pending_outbound(1000, &mut rng);
         assert_eq!(pending.len(), 1);
 
         let pkt = rete_core::Packet::parse(&pending[0]).unwrap();
@@ -1561,7 +1561,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         assert!(router.queue_propagation_announce(&mut core, &mut rng, 1000));
-        let pending = core.transport.pending_outbound(1000);
+        let pending = core.transport.pending_outbound(1000, &mut rng);
         assert_eq!(pending.len(), 1);
 
         let pkt = rete_core::Packet::parse(&pending[0]).unwrap();
