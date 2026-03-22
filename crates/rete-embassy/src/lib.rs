@@ -135,6 +135,8 @@ pub struct EmbassyNode {
     pub core: EmbeddedNodeCore,
     /// Epoch offset: seconds to add to monotonic uptime to approximate Unix time.
     epoch_offset: u64,
+    /// Announce interval override (0 = use default ANNOUNCE_INTERVAL_SECS).
+    announce_interval: u64,
 }
 
 impl EmbassyNode {
@@ -143,6 +145,23 @@ impl EmbassyNode {
         EmbassyNode {
             core: EmbeddedNodeCore::new(identity, app_name, aspects),
             epoch_offset: 0,
+            announce_interval: 0,
+        }
+    }
+
+    /// Override the announce interval (default: 300s from Python RNS spec).
+    ///
+    /// Useful for test firmware where faster announce cycles are needed.
+    pub fn set_announce_interval(&mut self, secs: u64) {
+        self.announce_interval = secs;
+    }
+
+    /// Effective announce interval.
+    fn effective_announce_interval(&self) -> u64 {
+        if self.announce_interval > 0 {
+            self.announce_interval
+        } else {
+            ANNOUNCE_INTERVAL_SECS
         }
     }
 
@@ -199,8 +218,22 @@ impl EmbassyNode {
         }
 
         let mut recv_buf = [0u8; MTU];
-        let mut next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
+        let announce_interval = self.effective_announce_interval();
+        let mut next_announce = Instant::now() + Duration::from_secs(announce_interval);
         let mut next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
+
+        // Re-announce when data arrives after an idle gap. On UART there
+        // is no connection event, so "data after silence" is the best
+        // proxy for "a new peer just connected."
+        //
+        // How it works: `last_recv` tracks when the last packet arrived.
+        // If a packet arrives more than REANNOUNCE_IDLE_SECS after the
+        // previous one, we schedule a re-announce 2 seconds later via the
+        // announce timer. This handles both first-boot and reconnection
+        // after a test/peer swap without flooding announces during active
+        // communication.
+        const REANNOUNCE_IDLE_SECS: u64 = 3;
+        let mut last_recv = Instant::from_secs(0);
 
         loop {
             match select3(
@@ -212,7 +245,22 @@ impl EmbassyNode {
             {
                 Either3::First(result) => match result {
                     Ok(data) => {
-                        let now = Instant::now().as_secs();
+                        let now_inst = Instant::now();
+
+                        // If idle for long enough, schedule a re-announce
+                        // so the new peer learns our identity.
+                        if now_inst.duration_since(last_recv).as_secs()
+                            >= REANNOUNCE_IDLE_SECS
+                        {
+                            let reannounce_at =
+                                now_inst + Duration::from_secs(2);
+                            if reannounce_at < next_announce {
+                                next_announce = reannounce_at;
+                            }
+                        }
+                        last_recv = now_inst;
+
+                        let now = now_inst.as_secs();
                         let outcome = self.core.handle_ingest(data, now, 0, rng);
                         dispatch(iface, &outcome.packets).await;
                         if let Some(event) = outcome.event {
@@ -223,7 +271,7 @@ impl EmbassyNode {
                     Err(_) => break,
                 },
                 Either3::Second(()) => {
-                    next_announce = Instant::now() + Duration::from_secs(ANNOUNCE_INTERVAL_SECS);
+                    next_announce = Instant::now() + Duration::from_secs(announce_interval);
                     let now = Instant::now().as_secs();
                     self.core.queue_announce(None, rng, self.announce_time());
                     dispatch(iface, &self.core.flush_announces(now)).await;

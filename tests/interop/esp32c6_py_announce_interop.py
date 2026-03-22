@@ -60,16 +60,11 @@ def main():
         rns = RNS.Reticulum(configdir=tmpdir, loglevel=RNS.LOG_VERBOSE)
         time.sleep(1.0)
 
-        # Pre-register ESP32 identity so we can reach it
+        # Compute ESP32 identity and dest hash (do NOT pre-register — let
+        # the announce discovery prove the full path works).
         esp32_id = identity_from_seed(ESP32_SEED)
         esp32_dest_hash = RNS.Destination.hash_from_name_and_identity(
             f"{APP_NAME}.{'.'.join(ASPECTS)}", esp32_id
-        )
-        RNS.Identity.remember(
-            packet_hash=None,
-            destination_hash=esp32_dest_hash,
-            public_key=esp32_id.get_public_key(),
-            app_data=None,
         )
 
         # Create our identity and destination
@@ -77,43 +72,25 @@ def main():
         our_dest = RNS.Destination(our_id, RNS.Destination.IN, RNS.Destination.SINGLE,
                                     APP_NAME, *ASPECTS)
 
-        # Track received announces
-        received_announces = []
-
-        def announce_handler(destination_hash, announced_identity, app_data):
-            received_announces.append({
-                "dest_hash": destination_hash,
-                "identity": announced_identity,
-                "app_data": app_data,
-            })
-
-        RNS.Transport.register_announce_handler(announce_handler)
-
-        # Announce ourselves
+        # Announce ourselves — this is the first packet the ESP32 sees,
+        # triggering its idle-gap re-announce mechanism.
         t._log("sending Python announce...")
         our_dest.announce()
-        time.sleep(2.0)
 
-        # Request a path to ESP32 to trigger its cached announce response
-        t._log("requesting path to ESP32...")
-        RNS.Transport.request_path(esp32_dest_hash)
-
-        # Wait for ESP32 announce
-        t._log("waiting for ESP32 announce...")
+        # Wait for ESP32 announce to create a path entry
+        t._log("waiting for ESP32 announce (path discovery)...")
         deadline = time.time() + t.timeout
-        while time.time() < deadline and len(received_announces) == 0:
+        while time.time() < deadline:
+            if RNS.Transport.has_path(esp32_dest_hash):
+                break
             time.sleep(0.5)
 
-        t.check(len(received_announces) > 0, "Received announce from ESP32",
-                detail=f"got {len(received_announces)} announces")
+        path_found = RNS.Transport.has_path(esp32_dest_hash)
+        t.check(path_found, "ESP32 path discovered via announce")
 
-        if received_announces:
-            ann = received_announces[0]
-            # Verify the announce is from ESP32
-            esp32_hash = RNS.Identity.truncated_hash(esp32_id.get_public_key())
-            got_hash = ann["identity"].hash if ann["identity"] else None
-
-            t.check(got_hash is not None, "Announce has valid identity")
+        # Verify the identity was learned from the announce
+        recalled = RNS.Identity.recall(esp32_dest_hash)
+        t.check(recalled is not None, "ESP32 identity recalled from announce")
 
         # Cleanup
         RNS.Reticulum.exit_handler()

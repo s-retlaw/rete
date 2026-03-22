@@ -861,6 +861,27 @@ test-esp32c6-all: flash-esp32c6-test
     [ "$SUITE_FAIL" -eq 0 ]
 
 # --------------------------------------------------------------------------
+# ESP32-C6 diagnostic tests (packet-level capture for debugging)
+# --------------------------------------------------------------------------
+
+# Diagnostic: ESP32 announce with packet capture (Topology B)
+test-esp32c6-diag-announce:
+    cd tests/interop && uv run python esp32c6_diag_announce.py \
+        --serial-port {{serial_port}} --timeout 30
+
+# Diagnostic: ESP32 channel with packet capture (Topology B)
+test-esp32c6-diag-channel:
+    cd tests/interop && uv run python esp32c6_diag_channel.py \
+        --serial-port {{serial_port}} --timeout 30
+
+# Diagnostic: ESP32 3-node relay with packet capture (Topology C)
+test-esp32c6-diag-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python esp32c6_diag_relay.py \
+        --rust-binary ../../target/debug/rete-linux \
+        --serial-port {{serial_port}} --timeout 120
+
+# --------------------------------------------------------------------------
 # End-to-end test: ESP32-C6 <-> Python RNS reference over serial
 # --------------------------------------------------------------------------
 

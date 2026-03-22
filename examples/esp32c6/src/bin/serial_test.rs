@@ -90,6 +90,7 @@ async fn main(_spawner: Spawner) -> ! {
     let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]);
     node.core.set_echo_data(true);
     node.core.set_proof_strategy(ProofStrategy::ProveAll);
+    node.set_announce_interval(10); // Short interval for testing
 
     // Register a secondary destination for multi-dest testing
     let secondary_hash = node

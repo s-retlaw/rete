@@ -411,6 +411,34 @@ class InteropTest:
 
     # -- ESP32 serial helpers --
 
+    def start_diag_serial_bridge(self, tcp_port, serial_port=None, baud=115200):
+        """Launch serial_bridge_diag.py and wait for TCP port to accept connections.
+
+        Like start_serial_bridge() but also decodes and logs every HDLC
+        frame as parsed RNS packets to stderr.
+
+        Returns the bridge process.
+        """
+        serial_port = serial_port or self.args.serial_port
+        bridge_script = os.path.join(os.path.dirname(__file__), "serial_bridge_diag.py")
+        cmd = [
+            sys.executable, bridge_script,
+            "--serial-port", serial_port,
+            "--baud", str(baud),
+            "--tcp-port", str(tcp_port),
+        ]
+        self._log(f"starting diagnostic serial bridge on TCP port {tcp_port}...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self._procs.append(proc)
+
+        if not wait_for_port("127.0.0.1", tcp_port, timeout=10.0):
+            self._log(f"FAIL: diagnostic serial bridge did not start on port {tcp_port}")
+            sys.exit(1)
+        self._log("diagnostic serial bridge is listening")
+        return proc
+
     def start_serial_bridge(self, tcp_port, serial_port=None, baud=115200):
         """Launch serial_bridge.py and wait for TCP port to accept connections.
 
