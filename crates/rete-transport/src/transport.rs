@@ -1086,8 +1086,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             self.channel_receipts.remove(&receipt_key);
                             if let Some(link) = self.links.get_mut(&link_id) {
                                 link.touch_inbound(now);
+                                let rtt = link.rtt;
                                 if let Some(channel) = link.channel.as_mut() {
-                                    channel.mark_delivered(sequence);
+                                    channel.mark_delivered(sequence, rtt);
                                 }
                             }
                             return IngestResult::ProofReceived {

@@ -65,9 +65,9 @@ pub enum TeardownReason {
 
 /// Default keepalive interval in seconds (6 minutes, matches Python RNS).
 pub const KEEPALIVE_INTERVAL_SECS: u64 = 360;
-/// Default stale timeout in seconds (1.6x keepalive = 576s, matches Python RNS).
-/// Python: `STALE_TIME = int(round(KEEPALIVE * 1.6))`.
-pub const STALE_TIMEOUT_SECS: u64 = 576;
+/// Default stale timeout in seconds (2x keepalive = 720s, matches Python RNS).
+/// Python: `STALE_FACTOR = 2`, `STALE_TIME = STALE_FACTOR * KEEPALIVE = 2 * 360 = 720`.
+pub const STALE_TIMEOUT_SECS: u64 = 720;
 
 /// Maximum RTT that produces the maximum keepalive interval.
 /// Python: `Link.KEEPALIVE_TIMEOUT_FACTOR = 4` → `360 / (4/1.75*1) = 1.75` effectively.
@@ -79,6 +79,16 @@ pub const KEEPALIVE_MAX: f32 = 360.0;
 pub const KEEPALIVE_MIN: f32 = 5.0;
 /// Stale timeout multiplier relative to keepalive interval.
 pub const STALE_FACTOR: f32 = 2.0;
+/// Grace period added to stale detection (seconds). Python: `STALE_GRACE = 5`.
+pub const STALE_GRACE: u64 = 5;
+/// Minimum traffic timeout in milliseconds. Python: `TRAFFIC_TIMEOUT_MIN_MS = 5`.
+pub const TRAFFIC_TIMEOUT_MIN_MS: u64 = 5;
+/// Traffic timeout multiplier for receipt timeouts. Python: `TRAFFIC_TIMEOUT_FACTOR = 6`.
+pub const TRAFFIC_TIMEOUT_FACTOR: u64 = 6;
+/// Keepalive timeout factor. Python: `KEEPALIVE_TIMEOUT_FACTOR = 4`.
+pub const KEEPALIVE_TIMEOUT_FACTOR: f32 = 4.0;
+/// Establishment timeout per hop (seconds). Python: `DEFAULT_PER_HOP_TIMEOUT = 6`.
+pub const ESTABLISHMENT_TIMEOUT_PER_HOP: u64 = 6;
 
 /// An encrypted link session.
 pub struct Link {

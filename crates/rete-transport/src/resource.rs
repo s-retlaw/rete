@@ -26,8 +26,8 @@ use sha2::{Digest, Sha256};
 pub const MAPHASH_LEN: usize = 4;
 /// Length of the random hash in a resource advertisement.
 pub const RANDOM_HASH_SIZE: usize = 4;
-/// Maximum efficient resource size (0xFF_FF_FF).
-pub const MAX_EFFICIENT_SIZE: usize = 16_777_215;
+/// Maximum efficient resource size. Python: `1 * 1024 * 1024 - 1` = 1048575.
+pub const MAX_EFFICIENT_SIZE: usize = 1_048_575;
 /// Initial sliding window size.
 pub const WINDOW_INITIAL: usize = 4;
 /// Minimum window size.
@@ -36,6 +36,26 @@ pub const WINDOW_MIN: usize = 2;
 pub const WINDOW_MAX_SLOW: usize = 10;
 /// Maximum window for fast links.
 pub const WINDOW_MAX_FAST: usize = 75;
+/// Maximum window for very slow links. Python: `Resource.WINDOW_MAX_VERY_SLOW = 4`.
+pub const WINDOW_MAX_VERY_SLOW: usize = 4;
+/// Window flexibility. Python: `Resource.WINDOW_FLEXIBILITY = 4`.
+pub const WINDOW_FLEXIBILITY: usize = 4;
+/// Rate threshold: rounds above which the fast window can be used.
+/// Python: `Resource.FAST_RATE_THRESHOLD = WINDOW_MAX_SLOW - WINDOW - 2 = 4`.
+pub const FAST_RATE_THRESHOLD: usize = 4;
+/// Rate threshold for very slow detection.
+/// Python: `Resource.VERY_SLOW_RATE_THRESHOLD = 2`.
+pub const VERY_SLOW_RATE_THRESHOLD: usize = 2;
+/// Fast transfer rate in bytes/sec. Python: `Resource.RATE_FAST = (50*1000)/8 = 6250`.
+pub const RATE_FAST: usize = 6250;
+/// Very slow transfer rate in bytes/sec. Python: `Resource.RATE_VERY_SLOW = (2*1000)/8 = 250`.
+pub const RATE_VERY_SLOW: usize = 250;
+/// Part timeout factor. Python: `Resource.PART_TIMEOUT_FACTOR = 4`.
+pub const PART_TIMEOUT_FACTOR: u64 = 4;
+/// Part timeout factor after RTT measurement. Python: `Resource.PART_TIMEOUT_FACTOR_AFTER_RTT = 2`.
+pub const PART_TIMEOUT_FACTOR_AFTER_RTT: u64 = 2;
+/// Proof timeout factor. Python: `Resource.PROOF_TIMEOUT_FACTOR = 3`.
+pub const PROOF_TIMEOUT_FACTOR: u64 = 3;
 /// Maximum transfer retries before failure.
 pub const MAX_RETRIES: usize = 16;
 /// Maximum advertisement retries.
