@@ -20,8 +20,8 @@ use rete_core::{Identity, MTU};
 pub use rete_stack::EmbeddedNodeCore;
 pub use rete_stack::NodeEvent;
 pub use rete_stack::OutboundPacket;
-pub use rete_stack::ProofStrategy;
 pub use rete_stack::PacketRouting;
+pub use rete_stack::ProofStrategy;
 use rete_stack::ReteInterface;
 use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
@@ -250,11 +250,8 @@ impl EmbassyNode {
 
                         // If idle for long enough, schedule a re-announce
                         // so the new peer learns our identity.
-                        if now_inst.duration_since(last_recv).as_secs()
-                            >= REANNOUNCE_IDLE_SECS
-                        {
-                            let reannounce_at =
-                                now_inst + Duration::from_secs(2);
+                        if now_inst.duration_since(last_recv).as_secs() >= REANNOUNCE_IDLE_SECS {
+                            let reannounce_at = now_inst + Duration::from_secs(2);
                             if reannounce_at < next_announce {
                                 next_announce = reannounce_at;
                             }

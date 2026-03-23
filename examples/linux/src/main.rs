@@ -40,12 +40,20 @@ fn log_packet(raw: &[u8], direction: &str, iface_idx: u8) {
     let pkt = match Packet::parse(raw) {
         Ok(p) => p,
         Err(_) => {
-            eprintln!("[pkt] {} iface={} PARSE_ERROR len={}", direction, iface_idx, raw.len());
+            eprintln!(
+                "[pkt] {} iface={} PARSE_ERROR len={}",
+                direction,
+                iface_idx,
+                raw.len()
+            );
             return;
         }
     };
 
-    let hdr = match pkt.header_type { HeaderType::Header1 => "H1", HeaderType::Header2 => "H2" };
+    let hdr = match pkt.header_type {
+        HeaderType::Header1 => "H1",
+        HeaderType::Header2 => "H2",
+    };
     let ctx_name = match pkt.context {
         rete_core::CONTEXT_NONE => "NONE",
         rete_core::CONTEXT_RESOURCE => "RESOURCE",
@@ -69,9 +77,17 @@ fn log_packet(raw: &[u8], direction: &str, iface_idx: u8) {
 
     eprintln!(
         "[pkt] {} iface={} {}/{:?}/{:?} hops={} dest={} ctx={:#04x}({}) plen={} raw={}",
-        direction, iface_idx, hdr, pkt.packet_type, pkt.dest_type,
-        pkt.hops, hex::encode(pkt.destination_hash), pkt.context, ctx_name,
-        pkt.payload.len(), hex::encode(&raw[..raw.len().min(64)])
+        direction,
+        iface_idx,
+        hdr,
+        pkt.packet_type,
+        pkt.dest_type,
+        pkt.hops,
+        hex::encode(pkt.destination_hash),
+        pkt.context,
+        ctx_name,
+        pkt.payload.len(),
+        hex::encode(&raw[..raw.len().min(64)])
     );
 }
 
@@ -645,8 +661,9 @@ async fn main() {
             rand::thread_rng(),
         )
         .await;
-    } else if serial_path.is_some() && addrs.is_empty() && local_server_name.is_none() {
-        let path = serial_path.unwrap();
+    } else if let Some(path) =
+        serial_path.filter(|_| addrs.is_empty() && local_server_name.is_none())
+    {
         eprintln!("[rete] opening serial port {} at {} baud ...", path, baud);
         let mut iface = match SerialInterface::open(path, baud) {
             Ok(i) => i,

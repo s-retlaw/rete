@@ -86,6 +86,12 @@ pub struct KissDecoder<const N: usize> {
     command: u8,
 }
 
+impl<const N: usize> Default for KissDecoder<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> KissDecoder<N> {
     /// Create a new decoder with an internal buffer of `N` bytes.
     pub const fn new() -> Self {

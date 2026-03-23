@@ -577,7 +577,7 @@ fn read_map(data: &[u8], pos: &mut usize) -> Result<BTreeMap<u8, Vec<u8>>, &'sta
 const B64URL_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 fn base64url_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity((data.len() * 4 + 2) / 3);
+    let mut out = String::with_capacity((data.len() * 4).div_ceil(3));
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -602,9 +602,21 @@ fn base64url_decode(s: &str) -> Option<Vec<u8>> {
     let mut i = 0;
     while i < bytes.len() {
         let a = b64url_val(bytes[i])?;
-        let b = if i + 1 < bytes.len() { b64url_val(bytes[i + 1])? } else { 0 };
-        let c = if i + 2 < bytes.len() { b64url_val(bytes[i + 2])? } else { 0 };
-        let d = if i + 3 < bytes.len() { b64url_val(bytes[i + 3])? } else { 0 };
+        let b = if i + 1 < bytes.len() {
+            b64url_val(bytes[i + 1])?
+        } else {
+            0
+        };
+        let c = if i + 2 < bytes.len() {
+            b64url_val(bytes[i + 2])?
+        } else {
+            0
+        };
+        let d = if i + 3 < bytes.len() {
+            b64url_val(bytes[i + 3])?
+        } else {
+            0
+        };
 
         let triple = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
 

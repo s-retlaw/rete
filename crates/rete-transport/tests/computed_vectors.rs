@@ -122,7 +122,8 @@ fn test_channel_window_tiers() {
 
         let mut ch = Channel::new();
         assert_eq!(
-            ch.window(), expected_initial,
+            ch.window(),
+            expected_initial,
             "initial_window mismatch at RTT={rtt}"
         );
 
@@ -138,7 +139,8 @@ fn test_channel_window_tiers() {
         }
 
         assert_eq!(
-            ch.window_max(), expected_max,
+            ch.window_max(),
+            expected_max,
             "window_max mismatch at RTT={rtt}: rust={} python={expected_max} (after 12 deliveries)",
             ch.window_max()
         );

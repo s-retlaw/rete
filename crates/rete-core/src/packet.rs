@@ -40,6 +40,7 @@
 //! ```
 //! The hash is invariant to hop count and transport changes.
 
+#[allow(unused_imports)]
 use crate::{Error, HEADER_1_OVERHEAD, HEADER_2_OVERHEAD, MTU, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
 

@@ -117,11 +117,7 @@ pub fn generate_stamp_with_workblock(
 /// Validate a stamp using a ticket (ticket-based bypass).
 ///
 /// Stamp is valid if it equals `truncated_hash(ticket || message_id)`.
-pub fn validate_ticket_stamp(
-    stamp: &[u8],
-    message_id: &[u8],
-    tickets: &[Vec<u8>],
-) -> bool {
+pub fn validate_ticket_stamp(stamp: &[u8], message_id: &[u8], tickets: &[Vec<u8>]) -> bool {
     for ticket in tickets {
         let expected = ticket_stamp(ticket, message_id);
         if stamp.len() >= STAMP_SIZE && stamp[..STAMP_SIZE] == expected {
@@ -225,6 +221,10 @@ mod tests {
 
         let tickets = vec![ticket.to_vec()];
         assert!(validate_ticket_stamp(&stamp, message_id, &tickets));
-        assert!(!validate_ticket_stamp(&stamp, b"wrong-message-id", &tickets));
+        assert!(!validate_ticket_stamp(
+            &stamp,
+            b"wrong-message-id",
+            &tickets
+        ));
     }
 }

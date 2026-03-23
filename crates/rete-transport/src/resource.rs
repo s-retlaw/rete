@@ -399,7 +399,8 @@ fn read_msgpack_uint(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> 
             if *pos + 4 > data.len() {
                 return Err("truncated int32");
             }
-            let v = i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            let v =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
             *pos += 4;
             Ok(v as u64)
         }
@@ -788,7 +789,10 @@ impl Resource {
         }
 
         let hml = hashmap_max_len(link_mdu);
-        debug_assert!(hml >= 1, "hashmap_max_len must be >= 1, got {hml} for link_mdu={link_mdu}");
+        debug_assert!(
+            hml >= 1,
+            "hashmap_max_len must be >= 1, got {hml} for link_mdu={link_mdu}"
+        );
 
         Resource {
             state: ResourceState::Queued,
@@ -1374,8 +1378,7 @@ impl Resource {
 
         // Also signal exhausted if we couldn't fill the window and more hashes exist
         let exhausted = hashmap_exhausted
-            || (self.hashmap_cursor < self.total_segments
-                && requested_hashes.len() < self.window);
+            || (self.hashmap_cursor < self.total_segments && requested_hashes.len() < self.window);
 
         let mut payload = Vec::new();
 

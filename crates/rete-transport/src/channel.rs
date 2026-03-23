@@ -764,7 +764,10 @@ mod tests {
         // One slow RTT resets the counter
         ch.send(0x01, b"data").unwrap();
         ch.mark_delivered(9, 1.0);
-        assert_eq!(ch.fast_rate_rounds, 0, "fast counter should reset on slow RTT");
+        assert_eq!(
+            ch.fast_rate_rounds, 0,
+            "fast counter should reset on slow RTT"
+        );
     }
 
     #[test]
@@ -814,7 +817,10 @@ mod tests {
 
         // window_max should shrink if > window_min + window_flexibility
         if wmax_before > ch.window_min + WINDOW_FLEXIBILITY {
-            assert!(ch.window_max < wmax_before, "window_max should shrink on timeout");
+            assert!(
+                ch.window_max < wmax_before,
+                "window_max should shrink on timeout"
+            );
         }
     }
 
@@ -826,10 +832,18 @@ mod tests {
 
         // tries=1: 1.5^0 * max(0.2*2.5, 0.025) * (1+1.5) = 1 * 0.5 * 2.5 = 1.25
         let timeout = ch.compute_retry_timeout(1);
-        assert!((timeout - 1.25).abs() < 0.01, "timeout should be ~1.25, got {}", timeout);
+        assert!(
+            (timeout - 1.25).abs() < 0.01,
+            "timeout should be ~1.25, got {}",
+            timeout
+        );
 
         // tries=2: 1.5^1 * 0.5 * 2.5 = 1.875
         let timeout2 = ch.compute_retry_timeout(2);
-        assert!((timeout2 - 1.875).abs() < 0.01, "timeout should be ~1.875, got {}", timeout2);
+        assert!(
+            (timeout2 - 1.875).abs() < 0.01,
+            "timeout should be ~1.875, got {}",
+            timeout2
+        );
     }
 }

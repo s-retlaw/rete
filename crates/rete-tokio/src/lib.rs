@@ -312,7 +312,10 @@ impl TokioNode {
         {
             let cached = self.core.cached_announces();
             if !cached.is_empty() {
-                eprintln!("[rete] flushing {} cached announces to new interface", cached.len());
+                eprintln!(
+                    "[rete] flushing {} cached announces to new interface",
+                    cached.len()
+                );
                 dispatch_single(iface, &cached).await;
             }
         }
@@ -476,7 +479,10 @@ impl TokioNode {
         {
             let cached = self.core.cached_announces();
             if !cached.is_empty() {
-                eprintln!("[rete] flushing {} cached announces to interfaces", cached.len());
+                eprintln!(
+                    "[rete] flushing {} cached announces to interfaces",
+                    cached.len()
+                );
                 dispatch_multi(&iface_senders, &cached, 0).await;
             }
         }

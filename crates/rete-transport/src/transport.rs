@@ -886,7 +886,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             if let Ok(lid) = compute_link_id(raw) {
                                 let path_entry = self.paths.get(&dest);
                                 let remaining = path_entry.map(|p| p.hops).unwrap_or(1);
-                                let outbound_iface = path_entry.and_then(|p| p.received_on).unwrap_or(0);
+                                let outbound_iface =
+                                    path_entry.and_then(|p| p.received_on).unwrap_or(0);
                                 relay_log!(
                                     "[relay] H2 LINKREQUEST link_table INSERT lid={} dest={} in_hops={} out_hops={} rcvd={} out={}",
                                     hex_short(&lid),
@@ -992,10 +993,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                                 }
                             }
                             _ => {
-                                relay_log!(
-                                    "[relay] H2 NO_PATH dest={}",
-                                    hex_short(&dest),
-                                );
+                                relay_log!("[relay] H2 NO_PATH dest={}", hex_short(&dest),);
                                 IngestResult::Invalid
                             }
                         };
@@ -1093,29 +1091,28 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 // our own destination, forward to the next hop.
                 if self.local_identity_hash.is_some()
                     && !self.is_local_destination(&dh)
+                    && self.paths.contains_key(&dh)
                 {
-                    if self.paths.contains_key(&dh) {
-                        // Create reverse_table entry so the proof can route back.
-                        let mut trunc_hash = [0u8; TRUNCATED_HASH_LEN];
-                        trunc_hash.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
-                        let _ = self.reverse_table.insert(
-                            trunc_hash,
-                            ReverseEntry {
-                                timestamp: now,
-                                received_on: iface,
-                                forwarded_to: 0,
-                            },
-                        );
-                        relay_log!(
-                            "[relay] H1 DATA FORWARD dest={} reverse={}",
-                            hex_short(&dh),
-                            hex_short(&trunc_hash),
-                        );
-                        return IngestResult::Forward {
-                            raw: &raw[..len],
-                            source_iface: iface,
-                        };
-                    }
+                    // Create reverse_table entry so the proof can route back.
+                    let mut trunc_hash = [0u8; TRUNCATED_HASH_LEN];
+                    trunc_hash.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
+                    let _ = self.reverse_table.insert(
+                        trunc_hash,
+                        ReverseEntry {
+                            timestamp: now,
+                            received_on: iface,
+                            forwarded_to: 0,
+                        },
+                    );
+                    relay_log!(
+                        "[relay] H1 DATA FORWARD dest={} reverse={}",
+                        hex_short(&dh),
+                        hex_short(&trunc_hash),
+                    );
+                    return IngestResult::Forward {
+                        raw: &raw[..len],
+                        source_iface: iface,
+                    };
                 }
 
                 // Only treat as local if the destination is actually registered
@@ -1195,12 +1192,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         // node identity) for link signing, so we must use the key
                         // from the LINKREQUEST/LRPROOF handshake.
                         let verified = if let Some(link) = self.links.get(&link_id) {
-                            Identity::verify_raw_ed25519(
-                                &link.peer_ed25519_pub,
-                                &full_hash,
-                                sig,
-                            )
-                            .is_ok()
+                            Identity::verify_raw_ed25519(&link.peer_ed25519_pub, &full_hash, sig)
+                                .is_ok()
                         } else {
                             false
                         };
@@ -1240,22 +1233,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         // Python Transport.py drops invalid proofs silently.
                         if pkt.context == CONTEXT_LRPROOF {
                             let dest_hash_for_link = lte.destination_hash;
-                            if let Some(pub_key) =
-                                self.known_identities.get(&dest_hash_for_link)
-                            {
-                                if let Ok(dest_id) = Identity::from_public_key(pub_key)
-                                {
+                            if let Some(pub_key) = self.known_identities.get(&dest_hash_for_link) {
+                                if let Ok(dest_id) = Identity::from_public_key(pub_key) {
                                     relay_log!(
                                         "[relay] LRPROOF_VALIDATE lid={} dest={} has_identity={}",
                                         hex_short(&dh),
                                         hex_short(&dest_hash_for_link),
                                         true,
                                     );
-                                    if !self.validate_lrproof_relay(
-                                        pkt.payload,
-                                        &dh,
-                                        &dest_id,
-                                    ) {
+                                    if !self.validate_lrproof_relay(pkt.payload, &dh, &dest_id) {
                                         relay_log!(
                                             "[relay] LRPROOF REJECTED lid={} dest={}",
                                             hex_short(&dh),
@@ -1308,7 +1294,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         if let Ok(lid) = compute_link_id(raw) {
                             let path_entry = self.paths.get(&dh);
                             let remaining = path_entry.map(|p| p.hops).unwrap_or(1);
-                            let outbound_iface = path_entry.and_then(|p| p.received_on).unwrap_or(0);
+                            let outbound_iface =
+                                path_entry.and_then(|p| p.received_on).unwrap_or(0);
                             relay_log!(
                                 "[relay] H1 LINKREQUEST link_table INSERT lid={} dest={} out_hops={} rcvd={} out={}",
                                 hex_short(&lid),
@@ -2397,7 +2384,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         } else {
             crate::link::LINK_MDU
         };
-        debug_assert!(link_mdu > 0 && link_mdu <= peer_mtu, "link_mdu={link_mdu} peer_mtu={peer_mtu}");
+        debug_assert!(
+            link_mdu > 0 && link_mdu <= peer_mtu,
+            "link_mdu={link_mdu} peer_mtu={peer_mtu}"
+        );
         debug_assert!(sdu > 0 && sdu <= peer_mtu, "sdu={sdu} peer_mtu={peer_mtu}");
         let original_size = original_data.len();
         let mut resource =
@@ -2524,10 +2514,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // Only retry when outstanding_parts == 0 (not waiting for in-flight parts).
         let mut req_packets = alloc::vec::Vec::new();
         for res in &mut self.resources {
-            if !res.is_sender
-                && !res.received.iter().all(|&r| r)
-                && res.outstanding_parts == 0
-            {
+            if !res.is_sender && !res.received.iter().all(|&r| r) && res.outstanding_parts == 0 {
                 // Resource has unreceived parts and no in-flight window — retry REQ
                 let req_payload = res.build_request();
                 let mut link_id = [0u8; TRUNCATED_HASH_LEN];
@@ -2728,16 +2715,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 // Same hop count means a peer rebroadcast at our level
                 if heard_hops.saturating_sub(1) == ann.received_hops {
                     ann.local_rebroadcasts += 1;
-                    if ann.tx_count > 0
-                        && ann.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX
-                    {
+                    if ann.tx_count > 0 && ann.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX {
                         ann.block_rebroadcasts = true;
                     }
                 }
                 // If we hear at one hop further, our rebroadcast was picked up
-                if heard_hops.saturating_sub(1) == ann.received_hops + 1
-                    && ann.tx_count > 0
-                {
+                if heard_hops.saturating_sub(1) == ann.received_hops + 1 && ann.tx_count > 0 {
                     ann.block_rebroadcasts = true;
                 }
                 break;
@@ -3203,7 +3186,10 @@ mod tests {
         // After processing, the relay incremented hops (0 -> 1).
         // The stored inbound_hops must be the POST-increment value (1),
         // matching Python's behavior.
-        let entry = transport.link_table.get(&link_id).expect("link_table entry");
+        let entry = transport
+            .link_table
+            .get(&link_id)
+            .expect("link_table entry");
         assert_eq!(
             entry.inbound_hops, 1,
             "H2 link_table inbound_hops should be post-increment (1), not pre-increment (0)"

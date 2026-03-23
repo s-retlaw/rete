@@ -73,11 +73,7 @@ pub fn validate_announce<'a>(
 
     let (ratchet, signature, app_data_start) = if context_flag {
         // Ratchet at [84..116], signature at [116..180], app_data at [180..]
-        (
-            Some(&payload[84..116]),
-            &payload[116..180],
-            180usize,
-        )
+        (Some(&payload[84..116]), &payload[116..180], 180usize)
     } else {
         // No ratchet, signature at [84..148], app_data at [148..]
         (None, &payload[84..148], 148usize)

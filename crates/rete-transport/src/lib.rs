@@ -8,9 +8,9 @@
 
 #![no_std]
 
+extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
-extern crate alloc;
 
 pub mod announce;
 pub mod buffer;
@@ -43,7 +43,9 @@ pub use request::{
     build_request, build_response, parse_request, parse_response, path_hash, request_id,
     RequestError, PATH_HASH_LEN, REQUEST_ID_LEN,
 };
-pub use resource::{hashmap_max_len, Resource, ResourceFlags, ResourceState, HASHMAP_MAX_LEN_DEFAULT};
+pub use resource::{
+    hashmap_max_len, Resource, ResourceFlags, ResourceState, HASHMAP_MAX_LEN_DEFAULT,
+};
 pub use snapshot::{IdentityEntry, PathEntry, Snapshot, SnapshotDetail};
 pub use transport::{
     IngestResult, ReverseEntry, TickResult, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,

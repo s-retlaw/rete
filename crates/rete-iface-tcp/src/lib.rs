@@ -7,7 +7,7 @@
 //! packet authentication. When an [`IfacKey`] is set, outgoing packets are
 //! signed and XOR-masked, and incoming packets are verified and unmasked.
 
-use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
+use rete_core::hdlc::{self, HdlcDecoder};
 use rete_core::ifac::IfacKey;
 use rete_stack::ReteInterface;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

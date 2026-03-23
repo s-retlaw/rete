@@ -1087,7 +1087,7 @@ fn lrproof_relay_rejects_invalid_signature() {
 
     // Build an LRPROOF with a corrupted signature (all zeros)
     let mut bad_payload = [0u8; 99]; // sig[64] + x25519[32] + signalling[3]
-    // Leave sig as zeros (invalid)
+                                     // Leave sig as zeros (invalid)
     bad_payload[64..96].copy_from_slice(&[0xAA; 32]); // random x25519 pub
     bad_payload[96..99].copy_from_slice(&[0x20, 0x01, 0xF4]); // signalling
 
@@ -1167,9 +1167,6 @@ fn lrproof_relay_forwards_when_identity_unknown() {
     let mut proof_raw = proof_buf[..proof_len].to_vec();
     match relay.ingest(&mut proof_raw, 101, &mut rng, &identity) {
         IngestResult::Forward { .. } => {} // forwarded without validation
-        other => panic!(
-            "expected Forward when identity unknown, got {:?}",
-            other
-        ),
+        other => panic!("expected Forward when identity unknown, got {:?}", other),
     }
 }

@@ -350,7 +350,8 @@ impl Link {
         derived.zeroize();
         self.our_x25519_prv.zeroize(); // no longer needed
         self.peer_x25519_pub = responder_x25519_pub;
-        self.peer_ed25519_pub.copy_from_slice(dest_identity.ed25519_pub());
+        self.peer_ed25519_pub
+            .copy_from_slice(dest_identity.ed25519_pub());
         self.state = LinkState::Handshake; // will become Active after RTT
 
         Ok(())
@@ -527,13 +528,7 @@ pub fn compute_keepalive(rtt: f32) -> (f32, f32) {
         KEEPALIVE_MIN
     } else {
         let ka = rtt * (KEEPALIVE_MAX / KEEPALIVE_MAX_RTT);
-        if ka < KEEPALIVE_MIN {
-            KEEPALIVE_MIN
-        } else if ka > KEEPALIVE_MAX {
-            KEEPALIVE_MAX
-        } else {
-            ka
-        }
+        ka.clamp(KEEPALIVE_MIN, KEEPALIVE_MAX)
     };
     let stale = keepalive * STALE_FACTOR + STALE_GRACE as f32;
     (keepalive, stale)
@@ -1272,8 +1267,7 @@ mod tests {
 
         // Simulate a Python node that accepts 67-byte request but returns 96-byte proof
         // (backward compat: no signalling in proof)
-        let responder_link =
-            Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
+        let responder_link = Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
 
         // Manually build 96-byte proof (old format, no signalling in signed data)
         let mut signed_data_80 = [0u8; 80];
