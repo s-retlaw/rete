@@ -18,10 +18,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("esp32c6-link-initiate", default_port=0, default_timeout=30.0) as t:
         # Start rete-linux connected to ESP32 over serial
-        rust_lines = t.start_rust_serial(
-            seed="esp32c6-link-init-test-42",
-            extra_args=["--peer-seed", "rete-esp32c6-test"],
-        )
+        rust_lines = t.start_rust_serial()
 
         # Wait for rete-linux to start up
         time.sleep(2.0)

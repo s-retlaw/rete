@@ -1,8 +1,5 @@
 """Shared utilities for rete interop tests."""
 
-# Pre-computed from seed "rete-esp32c6-test" + app "rete" + aspects ["example", "v1"]
-ESP32C6_DEST = "189101979d3805f31b6995a677919bf6"
-
 import argparse
 import os
 import shutil
@@ -90,7 +87,7 @@ class InteropTest:
 
         with InteropTest("my-test", default_port=4250) as t:
             t.start_rnsd()
-            rust = t.start_rust(seed="my-seed-42")
+            rust = t.start_rust()
             py = t.start_py_helper(script_text)
 
             t.wait_for_line(py, "PY_READY")
@@ -173,11 +170,10 @@ class InteropTest:
         self._log("rnsd is listening")
         return proc
 
-    def start_rust(self, seed, port=None, extra_args=None):
+    def start_rust(self, port=None, extra_args=None):
         """Start the Rust rete-linux node and return its stdout line list.
 
         Args:
-            seed: Identity seed string (``--identity-seed``).
             port: TCP port to connect to (defaults to ``self.port``).
             extra_args: Additional CLI args (e.g. ``["--transport"]``).
 
@@ -188,7 +184,6 @@ class InteropTest:
         cmd = [
             self.rust_binary,
             "--connect", f"127.0.0.1:{port}",
-            "--identity-seed", seed,
         ]
         if extra_args:
             cmd.extend(extra_args)
@@ -266,6 +261,34 @@ class InteropTest:
                     _, _, value = line.partition(":")
                     return value.strip() if value else ""
             time.sleep(0.3)
+        return None
+
+    def discover_esp32_dest(self, rust_lines, timeout=15):
+        """Wait for an ANNOUNCE line in rete-linux stdout and return the dest hash.
+
+        rete-linux logs ``ANNOUNCE:<dest_hash>:<identity_hash>:<hops>`` to stdout
+        when it receives an announce from a peer. This method returns the first
+        announce dest_hash that is NOT the rete-linux node's own destination.
+        """
+        own_dest = None
+        for line in rust_lines:
+            if line.startswith("IDENTITY:"):
+                _, _, v = line.partition(":")
+                own_dest = v.strip()
+                break
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for line in rust_lines:
+                if line.startswith("ANNOUNCE:"):
+                    parts = line.strip().split(":")
+                    if len(parts) >= 2:
+                        dest = parts[1]
+                        if dest != own_dest:
+                            self._log(f"discovered ESP32 dest: {dest}")
+                            return dest
+            time.sleep(0.3)
+        self._log("FAIL: timed out waiting for ESP32 announce")
         return None
 
     def establish_esp32_link(self, rust_lines, dest_hash, after_index=0, timeout=15):
@@ -377,11 +400,10 @@ class InteropTest:
             self._log("ALL TESTS PASSED")
             sys.exit(0)
 
-    def start_rust_dual(self, seed, port=None, serial_port=None, extra_args=None):
+    def start_rust_dual(self, port=None, serial_port=None, extra_args=None):
         """Start rete-linux with both --connect (TCP) and --serial (multi-interface).
 
         Args:
-            seed: Identity seed string (``--identity-seed``).
             port: TCP port to connect to (defaults to ``self.port``).
             serial_port: Serial port (defaults to ``--serial-port`` arg).
             extra_args: Additional CLI args (e.g. ``["--transport"]``).
@@ -395,7 +417,6 @@ class InteropTest:
             self.rust_binary,
             "--connect", f"127.0.0.1:{port}",
             "--serial", serial_port,
-            "--identity-seed", seed,
         ]
         if extra_args:
             cmd.extend(extra_args)
@@ -502,11 +523,10 @@ class InteropTest:
         self._log("Rust serial bridge is listening")
         return proc
 
-    def start_rust_serial(self, seed, serial_port=None, extra_args=None):
+    def start_rust_serial(self, serial_port=None, extra_args=None):
         """Start the Rust rete-linux node with --serial and return its stdout line list.
 
         Args:
-            seed: Identity seed string (``--identity-seed``).
             serial_port: Serial port to connect to (defaults to ``--serial-port`` arg).
             extra_args: Additional CLI args (e.g. ``["--transport"]``).
 
@@ -517,7 +537,6 @@ class InteropTest:
         cmd = [
             self.rust_binary,
             "--serial", serial_port,
-            "--identity-seed", seed,
         ]
         if extra_args:
             cmd.extend(extra_args)

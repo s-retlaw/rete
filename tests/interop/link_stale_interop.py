@@ -17,7 +17,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("link-stale", default_port=4340, default_timeout=45) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="link-stale-test-1")
+        rust = t.start_rust()
 
         time.sleep(3)
 

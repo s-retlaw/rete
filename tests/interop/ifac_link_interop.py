@@ -28,7 +28,6 @@ def main():
     with InteropTest("ifac-link", default_port=4284) as t:
         t.start_rnsd(ifac_netname=IFAC_NETNAME)
         rust = t.start_rust(
-            seed="ifac-link-test-seed-88",
             extra_args=["--ifac-netname", IFAC_NETNAME],
         )
 

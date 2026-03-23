@@ -41,7 +41,6 @@ def main():
 
         # --- Start Rust server (TCP + local socket) ---
         server_lines = t.start_rust(
-            seed="local-ipc-server-seed",
             extra_args=["--local-server", instance_name, "--transport"],
         )
         time.sleep(3)
@@ -56,7 +55,6 @@ def main():
             [
                 t.rust_binary,
                 "--local-client", instance_name,
-                "--identity-seed", "local-ipc-client1-seed",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -82,7 +80,6 @@ def main():
             [
                 t.rust_binary,
                 "--local-client", instance_name,
-                "--identity-seed", "local-ipc-client2-seed",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

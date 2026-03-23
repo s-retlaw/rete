@@ -63,7 +63,7 @@ def send_raw(sock: socket.socket, data: bytes):
 def main():
     with InteropTest("hdlc-recovery", default_port=4310) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="hdlc-recovery-test-seed-55")
+        rust = t.start_rust()
         time.sleep(2)
 
         # Verify Rust node started

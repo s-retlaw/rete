@@ -145,7 +145,6 @@ def main():
 
         t.start_rnsd(port=t.port, ifac_netname=IFAC_NETNAME)
         rust1 = t.start_rust(
-            seed="ifac-test-seed-42",
             port=t.port,
             extra_args=["--ifac-netname", IFAC_NETNAME, "--auto-reply", "hello from rust"],
         )
@@ -204,7 +203,6 @@ def main():
 
         t.start_rnsd(port=port2, ifac_netname=IFAC_NETNAME)
         rust2 = t.start_rust(
-            seed="no-ifac-seed-42",
             port=port2,
             extra_args=["--auto-reply", "hello from rust"],
             # No --ifac-netname
@@ -238,7 +236,6 @@ def main():
 
         t.start_rnsd(port=port3, ifac_netname=IFAC_NETNAME)
         rust3 = t.start_rust(
-            seed="wrong-ifac-seed-42",
             port=port3,
             extra_args=["--ifac-netname", "wrong-network-name", "--auto-reply", "hello from rust"],
         )

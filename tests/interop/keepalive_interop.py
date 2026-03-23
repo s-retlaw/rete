@@ -29,7 +29,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("keepalive", default_port=4290, default_timeout=60.0) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="keepalive-test-seed-99")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

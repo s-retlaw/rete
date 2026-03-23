@@ -14,7 +14,7 @@ NUM_MESSAGES = 10
 def main():
     with InteropTest("channel-ordering", default_port=4342, default_timeout=45) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="channel-order-test-1")
+        rust = t.start_rust()
 
         time.sleep(3)
 

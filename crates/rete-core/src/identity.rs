@@ -137,9 +137,13 @@ impl Identity {
     }
 
     /// Create an Identity from a seed (for deterministic/reproducible testing).
+    /// Derive an identity from a seed string (test/development helper).
     ///
     /// Derives a 64-byte private key via double SHA-256:
     /// `prv[0:32] = SHA-256(seed)`, `prv[32:64] = SHA-256(prv[0:32])`.
+    ///
+    /// **Do not use for production identities** — use [`Identity::from_private_key`]
+    /// with properly generated keys instead.
     ///
     /// # Errors
     /// [`Error::InvalidKey`] if key derivation fails.

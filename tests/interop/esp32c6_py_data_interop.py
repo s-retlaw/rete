@@ -9,7 +9,6 @@ Modernized version of serial_interop.py using the bridge topology:
 This uses RNS's full stack rather than raw HDLC, giving more realistic testing.
 """
 
-import hashlib
 import os
 import sys
 import tempfile
@@ -20,19 +19,8 @@ import RNS
 from interop_helpers import InteropTest
 
 
-ESP32_SEED = "rete-esp32c6-test"
 APP_NAME = "rete"
 ASPECTS = ["example", "v1"]
-
-
-def identity_from_seed(seed_str):
-    h1 = hashlib.sha256(seed_str.encode()).digest()
-    h2 = hashlib.sha256(h1).digest()
-    prv = h1 + h2
-    id_ = RNS.Identity(create_keys=False)
-    id_.load_private_key(prv)
-    return id_
-
 
 BRIDGE_PORT = 4283
 
@@ -75,26 +63,38 @@ def main():
 
         our_dest.set_packet_callback(packet_callback)
 
-        # Setup ESP32 destination
-        esp32_id = identity_from_seed(ESP32_SEED)
-        esp32_dest_hash = RNS.Destination.hash_from_name_and_identity(
-            f"{APP_NAME}.{'.'.join(ASPECTS)}", esp32_id
-        )
-        RNS.Identity.remember(
-            packet_hash=None,
-            destination_hash=esp32_dest_hash,
-            public_key=esp32_id.get_public_key(),
-            app_data=None,
-        )
+        # Announce ourselves so ESP32 learns our identity (also triggers
+        # ESP32 re-announce via idle-gap mechanism)
+        t._log("sending announce...")
+        our_dest.announce()
+
+        # Wait for ESP32 announce — discover dynamically from path_table
+        # since ESP32 generates a random identity on each boot.
+        t._log("waiting for ESP32 announce (path discovery)...")
+        esp32_dest_hash = None
+        deadline = time.time() + t.timeout
+        while time.time() < deadline:
+            for h in RNS.Transport.path_table:
+                if h != our_dest.hash:
+                    esp32_dest_hash = h
+                    break
+            if esp32_dest_hash:
+                break
+            time.sleep(0.5)
+
+        if esp32_dest_hash is None:
+            t.check(False, "ESP32 path discovered via announce")
+            RNS.Reticulum.exit_handler()
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return
+
+        t._log(f"discovered ESP32 dest hash: {esp32_dest_hash.hex()}")
+        esp32_id = RNS.Identity.recall(esp32_dest_hash)
         esp32_dest = RNS.Destination(
             esp32_id, RNS.Destination.OUT, RNS.Destination.SINGLE,
             APP_NAME, *ASPECTS
         )
-
-        # Announce ourselves so ESP32 learns our identity
-        t._log("sending announce...")
-        our_dest.announce()
-        time.sleep(2.0)
 
         # Send encrypted DATA
         ts = int(time.time())

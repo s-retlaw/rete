@@ -209,3 +209,4 @@ fn bidirectional_node_client_communication() {
             });
     });
 }
+// size check

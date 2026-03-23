@@ -38,6 +38,9 @@ pub struct Path {
     pub announce_raw: Option<Vec<u8>>,
     /// Interface mode this path was learned on.
     pub interface_mode: InterfaceMode,
+    /// Interface index the announce was received on (for relay routing).
+    /// Matches Python `IDX_PT_RVCD_IF`.
+    pub received_on: Option<u8>,
 }
 
 impl Path {
@@ -51,6 +54,7 @@ impl Path {
             hops: 1,
             announce_raw: None,
             interface_mode: InterfaceMode::Default,
+            received_on: None,
         }
     }
 
@@ -64,6 +68,7 @@ impl Path {
             hops,
             announce_raw: None,
             interface_mode: InterfaceMode::Default,
+            received_on: None,
         }
     }
 

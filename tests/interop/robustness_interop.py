@@ -147,7 +147,7 @@ def send_raw(sock: socket.socket, data: bytes):
 def main():
     with InteropTest("robustness", default_port=4249) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="robustness-test-seed-77")
+        rust = t.start_rust()
         time.sleep(2)
 
         # Verify Rust node started

@@ -23,8 +23,6 @@ Usage:
   uv run python proof_routing_interop.py
 """
 
-import subprocess
-import sys
 import time
 
 from interop_helpers import InteropTest
@@ -39,31 +37,17 @@ def main():
         t.start_rnsd(port=port1)
         t.start_rnsd(port=port2)
 
-        # Get Rust transport dest hash for filtering
-        rust_seed = "proof-routing-e2e-seed"
-        rust_dest_hex = ""
-        try:
-            result = subprocess.run(
-                [t.rust_binary, "--identity-seed", rust_seed,
-                 "--connect", "127.0.0.99:1"],
-                capture_output=True, text=True, timeout=5,
-            )
-            for line in result.stderr.split("\n"):
-                if "destination hash:" in line:
-                    rust_dest_hex = line.strip().split("destination hash: ")[-1]
-                    break
-        except subprocess.TimeoutExpired:
-            pass
-
         # Start Rust transport node connecting to both rnsd instances
         rust = t.start_rust(
-            seed=rust_seed,
             port=port1,
             extra_args=[
                 "--connect", f"127.0.0.1:{port2}",
                 "--transport",
             ],
         )
+
+        # Get Rust transport dest hash for filtering
+        rust_dest_hex = t.wait_for_line(rust, "IDENTITY:", timeout=10) or ""
         time.sleep(3)
 
         # --- Python_B: receiver with PROVE_ALL (connects to rnsd_2) ---

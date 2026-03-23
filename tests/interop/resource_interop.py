@@ -35,7 +35,7 @@ def main():
 
     with InteropTest("resource-interop", default_port=4254, default_timeout=120.0) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="resource-interop-test-seed-99")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

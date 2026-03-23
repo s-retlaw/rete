@@ -14,7 +14,7 @@ NUM_CYCLES = 5
 def main():
     with InteropTest("link-cycle", default_port=4341, default_timeout=90) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="link-cycle-test-42")
+        rust = t.start_rust()
 
         time.sleep(3)
 

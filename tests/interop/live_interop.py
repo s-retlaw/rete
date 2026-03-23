@@ -23,7 +23,6 @@ def main():
     with InteropTest("live-interop", default_port=4242) as t:
         t.start_rnsd()
         rust = t.start_rust(
-            seed="interop-test-seed-42",
             extra_args=["--auto-reply", "hello from rust"],
         )
 

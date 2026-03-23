@@ -26,7 +26,7 @@ def main():
         t.start_rnsd(port=RNSD_PORT)
 
         # Start Rust node connected to rnsd
-        rust_lines = t.start_rust(seed="resource-relay-rust-42", port=RNSD_PORT)
+        rust_lines = t.start_rust(port=RNSD_PORT)
 
         # Wait for Rust to connect and announce
         time.sleep(3.0)

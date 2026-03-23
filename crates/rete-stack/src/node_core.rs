@@ -11,7 +11,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
-use rete_core::{DestType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN};
+use rete_core::{
+    DestType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
+};
 use rete_transport::{IngestResult, PendingAnnounce, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT};
 
 use crate::destination::{Destination, DestinationType, Direction};
@@ -422,37 +424,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .register_identity(peer_dest_hash, peer.public_key(), now);
     }
 
-    /// Register a peer's identity and build a cached announce for them.
-    ///
-    /// Like `register_peer` but also builds an announce packet and stores it
-    /// as `announce_raw` in the path table. This allows the cached announce
-    /// flush (on new interface connect) to propagate the peer's identity to
-    /// other interfaces — eliminating the need for `queue_peer_announce`.
-    pub fn register_peer_with_announce<R: RngCore + CryptoRng>(
-        &mut self,
-        peer: &Identity,
-        app_name: &str,
-        aspects: &[&str],
-        rng: &mut R,
-        now: u64,
-    ) {
-        self.register_peer(peer, app_name, aspects, now);
-
-        let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-            .expect("app_name + aspects must fit in 128 bytes");
-        let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer.hash()));
-
-        // Build announce and store in path table for cached flush
-        let aspects_refs: Vec<&str> = aspects.iter().copied().collect();
-        let mut buf = [0u8; MTU];
-        if let Ok(n) = Transport::<P, A, D, L>::create_announce(
-            peer, app_name, &aspects_refs, None, rng, now, &mut buf,
-        ) {
-            self.transport.store_announce_raw(&peer_dest_hash, &buf[..n]);
-        }
-    }
-
     /// Build an encrypted DATA packet addressed to a known destination.
     ///
     /// Also registers a receipt for proof tracking. The `now` timestamp is
@@ -491,45 +462,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         Some(pkt_buf[..pkt_len].to_vec())
     }
 
-    /// Queue an announce on behalf of a peer identity.
-    ///
-    /// When we know a peer's full identity (e.g., from `--peer-seed`), we can
-    /// fabricate a valid announce and inject it into the transport. This lets
-    /// the announce propagate through the network even if the peer's original
-    /// announce was missed (e.g., ESP32 announced before we connected).
-    pub fn queue_peer_announce<R: RngCore + CryptoRng>(
-        &mut self,
-        peer: &Identity,
-        app_name: &str,
-        aspects: &[&str],
-        rng: &mut R,
-        now: u64,
-    ) -> bool {
-        let mut name_buf = [0u8; 128];
-        let expanded = match rete_core::expand_name(app_name, aspects, &mut name_buf) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-        let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer.hash()));
-
-        let mut buf = [0u8; MTU];
-        let n = match Transport::<P, A, D, L>::create_announce(
-            peer, app_name, aspects, None, rng, now, &mut buf,
-        ) {
-            Ok(n) => n,
-            Err(_) => return false,
-        };
-        self.transport.queue_announce(PendingAnnounce {
-            dest_hash: peer_dest_hash,
-            raw: buf[..n].to_vec(),
-            tx_count: 0,
-            retransmit_timeout: 0,
-            local: true,
-            local_rebroadcasts: 0,
-            block_rebroadcasts: false,
-            received_hops: 0,
-        })
-    }
 
     /// Build and return a raw announce packet for this node.
     pub fn build_announce<R: RngCore + CryptoRng>(
@@ -949,7 +881,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
                 // Flush pending announces so received announces are forwarded
                 // immediately (retransmit_timeout=now fires on first flush).
-                packets.extend(self.flush_announces(now, rng));
+                let flushed = self.flush_announces(now, rng);
+                packets.extend(flushed);
 
                 IngestOutcome {
                     event: Some(NodeEvent::AnnounceReceived {

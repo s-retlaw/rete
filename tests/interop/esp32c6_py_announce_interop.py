@@ -7,7 +7,6 @@ Tests cross-implementation announce exchange:
 3. Python RNS receives and validates ESP32's announce
 """
 
-import hashlib
 import os
 import sys
 import tempfile
@@ -18,19 +17,8 @@ import RNS
 from interop_helpers import InteropTest
 
 
-ESP32_SEED = "rete-esp32c6-test"
 APP_NAME = "rete"
 ASPECTS = ["example", "v1"]
-
-
-def identity_from_seed(seed_str):
-    h1 = hashlib.sha256(seed_str.encode()).digest()
-    h2 = hashlib.sha256(h1).digest()
-    prv = h1 + h2
-    id_ = RNS.Identity(create_keys=False)
-    id_.load_private_key(prv)
-    return id_
-
 
 BRIDGE_PORT = 4280
 
@@ -60,13 +48,6 @@ def main():
         rns = RNS.Reticulum(configdir=tmpdir, loglevel=RNS.LOG_VERBOSE)
         time.sleep(1.0)
 
-        # Compute ESP32 identity and dest hash (do NOT pre-register — let
-        # the announce discovery prove the full path works).
-        esp32_id = identity_from_seed(ESP32_SEED)
-        esp32_dest_hash = RNS.Destination.hash_from_name_and_identity(
-            f"{APP_NAME}.{'.'.join(ASPECTS)}", esp32_id
-        )
-
         # Create our identity and destination
         our_id = RNS.Identity()
         our_dest = RNS.Destination(our_id, RNS.Destination.IN, RNS.Destination.SINGLE,
@@ -77,16 +58,21 @@ def main():
         t._log("sending Python announce...")
         our_dest.announce()
 
-        # Wait for ESP32 announce to create a path entry
+        # Wait for ESP32 announce — discover dynamically from path_table
+        # since ESP32 generates a random identity on each boot.
         t._log("waiting for ESP32 announce (path discovery)...")
+        esp32_dest_hash = None
         deadline = time.time() + t.timeout
         while time.time() < deadline:
-            if RNS.Transport.has_path(esp32_dest_hash):
+            for h in RNS.Transport.path_table:
+                if h != our_dest.hash:
+                    esp32_dest_hash = h
+                    break
+            if esp32_dest_hash:
                 break
             time.sleep(0.5)
 
-        path_found = RNS.Transport.has_path(esp32_dest_hash)
-        t.check(path_found, "ESP32 path discovered via announce")
+        t.check(esp32_dest_hash is not None, "ESP32 path discovered via announce")
 
         # Verify the identity was learned from the announce
         recalled = RNS.Identity.recall(esp32_dest_hash)

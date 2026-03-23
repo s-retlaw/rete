@@ -130,7 +130,7 @@ print(f"{label.upper()}_DONE", flush=True)
 def main():
     with InteropTest("concurrent-links", default_port=4304) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="concurrent-links-test-seed-42")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

@@ -132,6 +132,11 @@ test-e2e-link-rust-relay:
     cargo build -p rete-example-linux
     cd tests/interop && uv run python link_rust_relay_interop.py
 
+# E2E link through 2-relay chain (rnsd_1 + rete-linux as second relay)
+test-e2e-link-3node-relay:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python link_3node_relay_interop.py
+
 # E2E link relay (Python-to-Python link through Rust relay)
 test-e2e-link-relay:
     cargo build -p rete-example-linux
@@ -373,10 +378,11 @@ test-all:
     run_e2e PROOF proof_routing_interop.py
     run_e2e ROBUSTNESS robustness_interop.py
 
-    # Link advanced (7)
+    # Link advanced (8)
     run_e2e LINKINIT link_initiate_interop.py
     run_e2e LINKRELAY link_relay_interop.py
     run_e2e LINKRUSTRELAY link_rust_relay_interop.py
+    run_e2e LINK3NODERELAY link_3node_relay_interop.py
     run_e2e LINKINITRELAY link_initiate_relay_interop.py
     run_e2e LINKBURST link_burst_interop.py
     run_e2e CONCURRENT concurrent_links_interop.py
@@ -474,6 +480,7 @@ test-all:
     printf "  %-30s %s passed, %s failed\n" "link-initiate-interop" "$LINKINIT_PASS" "$LINKINIT_FAIL"
     printf "  %-30s %s passed, %s failed\n" "link-relay-interop" "$LINKRELAY_PASS" "$LINKRELAY_FAIL"
     printf "  %-30s %s passed, %s failed\n" "link-rust-relay-interop" "$LINKRUSTRELAY_PASS" "$LINKRUSTRELAY_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "link-3node-relay-interop" "$LINK3NODERELAY_PASS" "$LINK3NODERELAY_FAIL"
     printf "  %-30s %s passed, %s failed\n" "link-initiate-relay-interop" "$LINKINITRELAY_PASS" "$LINKINITRELAY_FAIL"
     printf "  %-30s %s passed, %s failed\n" "link-burst-interop" "$LINKBURST_PASS" "$LINKBURST_FAIL"
     printf "  %-30s %s passed, %s failed\n" "concurrent-links-interop" "$CONCURRENT_PASS" "$CONCURRENT_FAIL"
@@ -536,7 +543,7 @@ test-all:
     printf "  %-30s %s passed, %s failed\n" "mixed-stress-interop" "$MIXSTRESS_PASS" "$MIXSTRESS_FAIL"
     printf "  %-30s %s passed, %s failed\n" "proof-chain-interop" "$PROOFCHAIN_PASS" "$PROOFCHAIN_FAIL"
     E2E_PASS=$((LIVE_PASS + LINK_PASS + CHANNEL_PASS + RELAY_PASS + PATHREQ_PASS + PROOF_PASS + ROBUSTNESS_PASS \
-        + LINKINIT_PASS + LINKRELAY_PASS + LINKRUSTRELAY_PASS + LINKINITRELAY_PASS + LINKBURST_PASS + CONCURRENT_PASS + TEARDOWN_PASS \
+        + LINKINIT_PASS + LINKRELAY_PASS + LINKRUSTRELAY_PASS + LINK3NODERELAY_PASS + LINKINITRELAY_PASS + LINKBURST_PASS + CONCURRENT_PASS + TEARDOWN_PASS \
         + IFAC_PASS + IFACMISMATCH_PASS + IFACRELAY_PASS + IFACLINK_PASS + IFACLARGE_PASS \
         + AUDITCONST_PASS \
         + TRANSPORT_PASS + DUAL_PASS + MULTIHOP_PASS + CHANRELAY_PASS + RESRELAY_PASS + RESINITRELAY_PASS \
@@ -551,7 +558,7 @@ test-all:
         + CHANORDER_PASS + CONCTRAF_PASS + PATHEXP_PASS + RESCANCEL_PASS \
         + RESLARGE_PASS + MIXSTRESS_PASS + PROOFCHAIN_PASS))
     E2E_FAIL=$((LIVE_FAIL + LINK_FAIL + CHANNEL_FAIL + RELAY_FAIL + PATHREQ_FAIL + PROOF_FAIL + ROBUSTNESS_FAIL \
-        + LINKINIT_FAIL + LINKRELAY_FAIL + LINKRUSTRELAY_FAIL + LINKINITRELAY_FAIL + LINKBURST_FAIL + CONCURRENT_FAIL + TEARDOWN_FAIL \
+        + LINKINIT_FAIL + LINKRELAY_FAIL + LINKRUSTRELAY_FAIL + LINK3NODERELAY_FAIL + LINKINITRELAY_FAIL + LINKBURST_FAIL + CONCURRENT_FAIL + TEARDOWN_FAIL \
         + IFAC_FAIL + IFACMISMATCH_FAIL + IFACRELAY_FAIL + IFACLINK_FAIL + IFACLARGE_FAIL \
         + AUDITCONST_FAIL \
         + TRANSPORT_FAIL + DUAL_FAIL + MULTIHOP_FAIL + CHANRELAY_FAIL + RESRELAY_FAIL + RESINITRELAY_FAIL \
@@ -566,7 +573,7 @@ test-all:
         + CHANORDER_FAIL + CONCTRAF_FAIL + PATHEXP_FAIL + RESCANCEL_FAIL \
         + RESLARGE_FAIL + MIXSTRESS_FAIL + PROOFCHAIN_FAIL))
     echo ""
-    printf "  %-30s %s passed, %s failed\n" "e2e total (60 suites)" "$E2E_PASS" "$E2E_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "e2e total (61 suites)" "$E2E_PASS" "$E2E_FAIL"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))
@@ -677,12 +684,11 @@ e2e-esp32c6: build-esp32c6
     sleep 0.5
     OUTPUT=$(timeout 30 cargo run -p rete-example-linux -- \
         --serial {{serial_port}} --auto-reply-ping \
-        --peer-seed rete-esp32c6-serial \
         2>&1 || true)
     echo "$OUTPUT"
     echo ""
     # Extract the ping timestamp from the log
-    PING=$(echo "$OUTPUT" | grep -oP 'will send on start: \Kping:\d+' || true)
+    PING=$(echo "$OUTPUT" | grep -oP 'auto-reply-ping: \Kping:\d+' || true)
     if [ -z "$PING" ]; then
         echo "=== FAIL: could not find ping message ==="
         exit 1
@@ -808,7 +814,9 @@ test-esp32c6-all: flash-esp32c6-test
             SUITE_FAIL=$((SUITE_FAIL+1))
             SUMMARY_LINES+=("$(printf '  FAIL  %-40s %s/%s checks' "esp32c6_${name} (${topo})" "$p_str" "$t_str")")
         fi
-        sleep 2
+        # DTR reset between tests to reboot ESP32 (ensures fresh announce on next test)
+        python3 tests/interop/reset_esp32.py {{serial_port}} 2>/dev/null || true
+        sleep 4
     }
     for t in "${TOPO_A[@]}"; do
         echo ""

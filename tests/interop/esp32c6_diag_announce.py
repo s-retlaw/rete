@@ -12,7 +12,6 @@ Usage:
     uv run python esp32c6_diag_announce.py --serial-port /dev/ttyUSB0 --timeout 30
 """
 
-import hashlib
 import os
 import sys
 import tempfile
@@ -23,19 +22,9 @@ import RNS
 from interop_helpers import InteropTest
 
 
-ESP32_SEED = "rete-esp32c6-test"
 APP_NAME = "rete"
 ASPECTS = ["example", "v1"]
 BRIDGE_PORT = 4280
-
-
-def identity_from_seed(seed_str):
-    h1 = hashlib.sha256(seed_str.encode()).digest()
-    h2 = hashlib.sha256(h1).digest()
-    prv = h1 + h2
-    id_ = RNS.Identity(create_keys=False)
-    id_.load_private_key(prv)
-    return id_
 
 
 def main():
@@ -62,18 +51,6 @@ def main():
 
         rns = RNS.Reticulum(configdir=tmpdir, loglevel=RNS.LOG_VERBOSE)
         time.sleep(1.0)
-
-        # Pre-register ESP32 identity
-        esp32_id = identity_from_seed(ESP32_SEED)
-        esp32_dest_hash = RNS.Destination.hash_from_name_and_identity(
-            f"{APP_NAME}.{'.'.join(ASPECTS)}", esp32_id
-        )
-        RNS.Identity.remember(
-            packet_hash=None,
-            destination_hash=esp32_dest_hash,
-            public_key=esp32_id.get_public_key(),
-            app_data=None,
-        )
 
         # Create our identity and destination
         our_id = RNS.Identity()
@@ -102,11 +79,6 @@ def main():
 
         # Step 2: Check if ESP32 re-announced
         t._log(f"=== Step 2: Checking for ESP32 announce ({len(received_announces)} so far) ===")
-
-        # If not yet received, request path as fallback
-        if len(received_announces) == 0:
-            t._log("No announce yet, requesting path to ESP32...")
-            RNS.Transport.request_path(esp32_dest_hash)
 
         # Wait for ESP32 announce
         deadline = time.time() + t.timeout

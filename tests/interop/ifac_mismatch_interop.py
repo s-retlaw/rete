@@ -31,7 +31,6 @@ def main():
 
         # Start Rust node with IFAC "alpha"
         rust = t.start_rust(
-            seed="ifac-mismatch-seed-01",
             extra_args=["--ifac-netname", "alpha", "--auto-reply", "hello from rust"],
         )
 

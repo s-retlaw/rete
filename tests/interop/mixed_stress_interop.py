@@ -130,7 +130,7 @@ print("N{node_id}_DONE", flush=True)
         time.sleep(2)
 
         # NOW start Rust node -- its announce will reach all connected Python nodes
-        rust = t.start_rust(seed="mixed-stress-test-1")
+        rust = t.start_rust()
 
         # All should find path
         for i, py in enumerate(nodes):

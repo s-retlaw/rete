@@ -30,7 +30,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("link-interop", default_port=4244) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="link-interop-test-seed-77")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

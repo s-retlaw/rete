@@ -28,7 +28,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("link-init-relay", default_port=4275) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="link-init-relay-seed-03")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

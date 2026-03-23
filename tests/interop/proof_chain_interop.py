@@ -118,7 +118,6 @@ print("SENDER_DONE", flush=True)
 
         # Step 2: Start Rust relay connecting to both rnsd instances
         rust = t.start_rust(
-            seed="proof-chain-relay-1",
             port=rnsd_port1,
             extra_args=["--connect", f"127.0.0.1:{rnsd_port2}", "--transport"],
         )

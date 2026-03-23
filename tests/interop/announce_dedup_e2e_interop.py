@@ -27,7 +27,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("announce-dedup-e2e", default_port=4312) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="announce-dedup-e2e-test-seed-42")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

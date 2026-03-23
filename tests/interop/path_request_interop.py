@@ -21,8 +21,6 @@ Usage:
   uv run python path_request_interop.py
 """
 
-import subprocess
-import sys
 import time
 
 from interop_helpers import InteropTest
@@ -32,7 +30,6 @@ def main():
     with InteropTest("path-request", default_port=4246) as t:
         t.start_rnsd()
         rust = t.start_rust(
-            seed="path-request-e2e-seed",
             extra_args=["--transport"],
         )
 
@@ -80,20 +77,12 @@ print("PY_A_DONE", flush=True)
         # Check Rust received the announce before proceeding
         rust_saw_announce = t.has_line(rust, f"ANNOUNCE:{a_dest_hex}")
 
-        # Get Rust transport dest hash for filtering (run binary briefly)
+        # Get Rust transport dest hash for filtering from stdout
         rust_dest_hex = ""
-        try:
-            result = subprocess.run(
-                [t.rust_binary, "--identity-seed", "path-request-e2e-seed",
-                 "--connect", "127.0.0.99:1"],
-                capture_output=True, text=True, timeout=5,
-            )
-            for line in result.stderr.split("\n"):
-                if "destination hash:" in line:
-                    rust_dest_hex = line.strip().split("destination hash: ")[-1]
-                    break
-        except subprocess.TimeoutExpired:
-            pass
+        for line in rust:
+            if line.startswith("IDENTITY:"):
+                rust_dest_hex = line.split(":")[1].strip()
+                break
 
         # --- Python_C: connect, request path, check discovery ---
         py_c = t.start_py_helper(f"""\

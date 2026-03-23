@@ -16,7 +16,6 @@ Usage:
   uv run python transport_relay_interop.py --rust-binary ../../target/debug/rete-linux
 """
 
-import subprocess
 import time
 
 from interop_helpers import InteropTest
@@ -153,28 +152,18 @@ def main():
         t.start_rnsd(port=port1)
         t.start_rnsd(port=port2)
 
-        # --- Get the Rust transport node's dest hash so Python nodes can filter it ---
-        rust_seed = "transport-relay-e2e-seed"
-        result = subprocess.run(
-            [t.rust_binary, "--identity-seed", rust_seed, "--connect", "127.0.0.99:1"],
-            capture_output=True, text=True, timeout=5,
-        )
-        rust_dest_hex = ""
-        for line in result.stderr.split("\n"):
-            if "destination hash:" in line:
-                rust_dest_hex = line.strip().split("destination hash: ")[-1]
-                break
-        print(f"[transport-relay] Rust transport dest hash: {rust_dest_hex}")
-
         # --- Start Rust transport node (connects to BOTH rnsd instances) ---
         rust = t.start_rust(
-            seed=rust_seed,
             port=port1,
             extra_args=[
                 "--connect", f"127.0.0.1:{port2}",
                 "--transport",
             ],
         )
+
+        # --- Get the Rust transport node's dest hash so Python nodes can filter it ---
+        rust_dest_hex = t.wait_for_line(rust, "IDENTITY:", timeout=10) or ""
+        print(f"[transport-relay] Rust transport dest hash: {rust_dest_hex}")
 
         # Give Rust node time to connect and announce on both interfaces
         time.sleep(3)

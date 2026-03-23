@@ -38,26 +38,12 @@ def main():
         t.start_rnsd(port=port1)
         t.start_rnsd(port=port2)
 
-        # Get the Rust transport node's dest hash so Python nodes can filter it out
-        rust_seed = "link-rust-relay-seed-02"
-        result = subprocess.run(
-            [t.rust_binary, "--identity-seed", rust_seed, "--connect", "127.0.0.99:1"],
-            capture_output=True, text=True, timeout=5,
-        )
-        rust_dest_hex = ""
-        for line in result.stderr.split("\n"):
-            if "destination hash:" in line:
-                rust_dest_hex = line.strip().split("destination hash: ")[-1]
-                break
-        t._log(f"Rust transport dest hash: {rust_dest_hex}")
-
         # Start Rust transport node connecting to both rnsd instances
         cmd = [
             t.rust_binary,
             "--connect", f"127.0.0.1:{port1}",
             "--connect", f"127.0.0.1:{port2}",
             "--transport",
-            "--identity-seed", rust_seed,
         ]
         t._log("starting Rust transport node...")
         rust_proc = subprocess.Popen(
@@ -71,6 +57,10 @@ def main():
             target=read_stdout_lines, args=(rust_proc, rust, t._stop), daemon=True,
         )
         rust_thread.start()
+
+        # Get the Rust transport node's dest hash so Python nodes can filter it out
+        rust_dest_hex = t.wait_for_line(rust, "IDENTITY:", timeout=10) or ""
+        t._log(f"Rust transport dest hash: {rust_dest_hex}")
 
         # Give Rust time to connect and announce on both interfaces
         time.sleep(3)

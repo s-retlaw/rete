@@ -26,7 +26,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("announce-appdata", default_port=4306) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="announce-appdata-test-seed-42")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

@@ -128,10 +128,14 @@ async fn main(spawner: Spawner) -> ! {
     // Wrap socket in HDLC interface
     let mut iface = EmbassyHdlcInterface::new(socket);
 
-    // WARNING: Deterministic identity for reproducible interop testing.
-    // For production, generate from hardware RNG instead.
-    println!("[rete] WARNING: using fixed test key (not for production)");
-    let identity = rete_core::Identity::from_seed(b"rete-esp32c6-example").expect("invalid key");
+    let mut rng = EspRng(esp_hal::rng::Rng::new());
+
+    // Generate random identity from hardware RNG
+    println!("[rete] generating identity from hardware RNG");
+    let mut prv = [0u8; 64];
+    use rand_core::RngCore;
+    rng.0.fill_bytes(&mut prv);
+    let identity = rete_core::Identity::from_private_key(&prv).expect("invalid key");
 
     let id_hash = identity.hash();
     println!(
@@ -148,7 +152,6 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     // Run the rete event loop
-    let mut rng = EspRng(esp_hal::rng::Rng::new());
     node.run(&mut iface, &mut rng, |event| match event {
         NodeEvent::AnnounceReceived {
             dest_hash, hops, ..

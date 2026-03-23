@@ -31,7 +31,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("tcp-disconnect", default_port=4302) as t:
         rnsd_proc = t.start_rnsd()
-        rust = t.start_rust(seed="tcp-disconnect-test-seed-42")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

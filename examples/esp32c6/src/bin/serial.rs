@@ -63,9 +63,14 @@ async fn main(_spawner: Spawner) -> ! {
 
     let mut iface = EmbassyHdlcInterface::new(uart0);
 
-    // Deterministic identity for reproducible testing
+    let mut rng = EspRng(esp_hal::rng::Rng::new());
+
+    // Generate random identity from hardware RNG
     println!("[rete-serial] creating identity");
-    let identity = rete_core::Identity::from_seed(b"rete-esp32c6-serial").expect("invalid key");
+    let mut prv = [0u8; 64];
+    use rand_core::RngCore;
+    rng.0.fill_bytes(&mut prv);
+    let identity = rete_core::Identity::from_private_key(&prv).expect("invalid key");
 
     let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]);
     let dh = node.core.dest_hash();
@@ -73,8 +78,6 @@ async fn main(_spawner: Spawner) -> ! {
         "[rete-serial] dest: {:02x}{:02x}{:02x}{:02x}",
         dh[0], dh[1], dh[2], dh[3]
     );
-
-    let mut rng = EspRng(esp_hal::rng::Rng::new());
 
     println!("[rete-serial] running (announces + HDLC on UART0)");
     node.run(&mut iface, &mut rng, |event| match event {

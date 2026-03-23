@@ -19,7 +19,6 @@ Usage:
   uv run python dual_interface_interop.py --rust-binary ../../target/debug/rete-linux
 """
 
-import subprocess
 import time
 
 from interop_helpers import InteropTest
@@ -124,25 +123,22 @@ def main():
         port1 = t.port
         port2 = t.port + 1
 
-        # Pre-compute Rust dest hash so Python nodes target the right peer
-        rust_seed = "dual-interface-test-seed-42"
-        result = subprocess.run(
-            [t.rust_binary, "--identity-seed", rust_seed, "--connect", "127.0.0.99:1"],
-            capture_output=True, text=True, timeout=5,
-        )
-        rust_dest_hex = ""
-        for line in result.stderr.split("\n"):
-            if "destination hash:" in line:
-                rust_dest_hex = line.strip().split("destination hash: ")[-1]
-                break
-        print(f"[dual-interface] Rust dest hash: {rust_dest_hex}")
-
         # Start two rnsd instances
         t.start_rnsd(port=port1)
         t.start_rnsd(port=port2)
 
-        # Start Python nodes FIRST — they need to be connected to rnsd
-        # before Rust announces, since rnsd deduplicates re-announces.
+        # Now start Rust — its initial announce will reach both Python nodes
+        # through their respective rnsd instances
+        rust = t.start_rust(
+            port=port1,
+            extra_args=["--connect", f"127.0.0.1:{port2}"],
+        )
+
+        # Get Rust dest hash from stdout so Python nodes target the right peer
+        rust_dest_hex = t.wait_for_line(rust, "IDENTITY:", timeout=10) or ""
+        print(f"[dual-interface] Rust dest hash: {rust_dest_hex}")
+
+        # Start Python nodes — they need to discover Rust's announce
         py_a = t.start_py_helper(_py_node_script(
             t.tmpdir, port1, "node_a", t.timeout, "hello from A", rust_dest_hex,
         ))
@@ -153,14 +149,6 @@ def main():
 
         # Give Python nodes time to connect to their rnsd instances
         time.sleep(3)
-
-        # Now start Rust — its initial announce will reach both Python nodes
-        # through their respective rnsd instances
-        rust = t.start_rust(
-            seed=rust_seed,
-            port=port1,
-            extra_args=["--connect", f"127.0.0.1:{port2}"],
-        )
 
         # Give Rust time to connect and announce on both interfaces
         time.sleep(3)

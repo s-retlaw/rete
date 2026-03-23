@@ -39,7 +39,6 @@ def main():
     with InteropTest("stability", default_port=4258, default_timeout=90.0) as t:
         t.start_rnsd()
         rust = t.start_rust(
-            seed="stability-test-seed",
             extra_args=["--auto-reply", "pong"],
         )
 

@@ -26,7 +26,7 @@ from interop_helpers import InteropTest
 def main():
     with InteropTest("channel-interop", default_port=4245) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="channel-interop-test-seed-88")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

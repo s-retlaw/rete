@@ -5,7 +5,7 @@
 
 pub mod local;
 
-use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN};
+use rete_core::{Identity, TRUNCATED_HASH_LEN};
 pub use rete_stack::NodeEvent;
 pub use rete_stack::ProofStrategy;
 use rete_stack::{HostedNodeCore, OutboundPacket, PacketRouting, ReteInterface};
@@ -99,34 +99,6 @@ impl TokioNode {
     pub fn register_peer(&mut self, peer: &Identity, app_name: &str, aspects: &[&str]) {
         let now = current_time_secs();
         self.core.register_peer(peer, app_name, aspects, now);
-    }
-
-    /// Queue an announce on behalf of a peer identity.
-    ///
-    /// Useful when we know a peer's full keypair (from a seed) and want to
-    /// inject their announce into the network before they re-announce themselves.
-    pub fn queue_peer_announce(&mut self, peer: &Identity, app_name: &str, aspects: &[&str]) {
-        let mut rng = rand::thread_rng();
-        let now = current_time_secs();
-        self.core
-            .queue_peer_announce(peer, app_name, aspects, &mut rng, now);
-    }
-
-    /// Register a peer and build a cached announce for flush-on-connect.
-    ///
-    /// Stores the peer's identity+path AND a synthetic announce_raw in the
-    /// path table, so `cached_announces()` includes it when new interfaces
-    /// connect at startup.
-    pub fn register_peer_with_announce(
-        &mut self,
-        peer: &Identity,
-        app_name: &str,
-        aspects: &[&str],
-    ) {
-        let mut rng = rand::thread_rng();
-        let now = current_time_secs();
-        self.core
-            .register_peer_with_announce(peer, app_name, aspects, &mut rng, now);
     }
 
     /// Build and return a raw announce packet for this node.

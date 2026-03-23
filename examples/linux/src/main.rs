@@ -413,12 +413,6 @@ async fn main() {
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(DEFAULT_BAUD);
 
-    // Parse --identity-seed <seed> (deterministic key for testing, takes priority)
-    let seed = args
-        .windows(2)
-        .find(|w| w[0] == "--identity-seed")
-        .map(|w| w[1].clone());
-
     // Parse --identity-file <path> (default: ~/.rete/identity)
     let identity_file = args
         .windows(2)
@@ -433,13 +427,6 @@ async fn main() {
 
     // --auto-reply-ping: send "ping:<unix_timestamp>" on announce receipt
     let auto_reply_ping = args.iter().any(|a| a == "--auto-reply-ping");
-
-    // Parse --peer-seed <seed> (pre-register peer identity from deterministic seed)
-    // DEPRECATED: use cached announce flush instead. Kept for backward compat.
-    let peer_seed = args
-        .windows(2)
-        .find(|w| w[0] == "--peer-seed")
-        .map(|w| w[1].clone());
 
     // --transport: enable transport mode (relay HEADER_2 packets)
     let transport_mode = args.iter().any(|a| a == "--transport");
@@ -500,13 +487,9 @@ async fn main() {
         );
     }
 
-    // Create or derive identity
-    let identity = if let Some(seed_str) = seed {
-        Identity::from_seed(seed_str.as_bytes()).expect("invalid derived key")
-    } else {
-        let id_path = identity_file.unwrap_or_else(default_identity_path);
-        load_or_create_identity(&id_path)
-    };
+    // Create or load identity
+    let id_path = identity_file.unwrap_or_else(default_identity_path);
+    let identity = load_or_create_identity(&id_path);
 
     let id_hash = identity.hash();
     eprintln!("[rete] identity hash: {}", hex::encode(id_hash));
@@ -533,31 +516,8 @@ async fn main() {
         eprintln!("[rete] transport mode enabled");
     }
 
-    // Pre-register peer identity (so we can send DATA without waiting for announce)
-    if let Some(ref ps) = peer_seed {
-        let peer = Identity::from_seed(ps.as_bytes()).expect("invalid peer seed");
-        let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(APP_NAME, ASPECTS, &mut name_buf).unwrap();
-        let peer_dest = rete_core::destination_hash(expanded, Some(&peer.hash()));
-        eprintln!("[rete] pre-registered peer: {}", hex::encode(peer_dest));
-        node.register_peer(&peer, APP_NAME, ASPECTS);
-        // Build a synthetic announce for the peer so it propagates to other
-        // interfaces (e.g., ESP32 announce → relay → rnsd → Python).
-        // Only used in multi-interface mode; harmless in single-interface.
-        node.queue_peer_announce(&peer, APP_NAME, ASPECTS);
-
-        // If --auto-reply-ping, send the ping to the pre-registered peer immediately
-        if auto_reply_ping {
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let msg = format!("ping:{ts}");
-            eprintln!("[rete] will send on start: {msg}");
-            node.send_on_start(peer_dest, msg.into_bytes());
-        }
-    } else if auto_reply_ping {
-        // No peer-seed: fall back to sending ping on announce receipt
+    // Auto-reply-ping: send ping on announce receipt
+    if auto_reply_ping {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -574,6 +534,8 @@ async fn main() {
         "[rete] destination hash: {}",
         hex::encode(node.core.dest_hash())
     );
+    // Print to stdout for interop test discovery (many tests wait for this line).
+    println!("IDENTITY:{}", hex::encode(node.core.dest_hash()));
 
     // Register LXMF delivery destination
     let mut lxmf_router = LxmfRouter::register(&mut node.core);
@@ -591,25 +553,6 @@ async fn main() {
         "[rete] LXMF delivery hash: {}",
         hex::encode(lxmf_router.delivery_dest_hash())
     );
-
-    // Parse --lxmf-peer-seed <seed> (pre-register LXMF peer identity)
-    let lxmf_peer_seed = args
-        .windows(2)
-        .find(|w| w[0] == "--lxmf-peer-seed")
-        .map(|w| w[1].clone());
-    if let Some(ref ps) = lxmf_peer_seed {
-        let peer = Identity::from_seed(ps.as_bytes()).expect("invalid lxmf peer seed");
-        let now = rete_tokio::current_time_secs();
-        node.core.register_peer(&peer, "lxmf", &["delivery"], now);
-        // Log the computed dest hash (register_peer stores it internally)
-        let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
-        let peer_dest = rete_core::destination_hash(expanded, Some(&peer.hash()));
-        eprintln!(
-            "[rete] pre-registered LXMF peer: {}",
-            hex::encode(peer_dest)
-        );
-    }
 
     // --lxmf-announce: queue LXMF delivery announce at startup
     let lxmf_announce = args.iter().any(|a| a == "--lxmf-announce");

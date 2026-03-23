@@ -30,7 +30,6 @@ def main():
         t.start_rnsd()
 
         rust = t.start_rust(
-            seed="lxmf-rust-node",
             extra_args=["--lxmf-announce", "--lxmf-name", "RustNode"],
         )
 
@@ -38,9 +37,7 @@ def main():
         time.sleep(3)
 
         # Python LXMF helper: discovers Rust announce, sends opportunistic LXMF.
-        # Computes the Rust LXMF delivery hash from the seed to reliably identify it.
         py = t.start_py_helper(f"""\
-import hashlib
 import RNS
 import LXMF
 import time
@@ -70,28 +67,21 @@ py_router.announce(py_lxmf_dest.hash)
 print(f"PY_LXMF_HASH:{{RNS.hexrep(py_lxmf_dest.hash, delimit=False)}}", flush=True)
 time.sleep(3)
 
-# Compute Rust's expected LXMF delivery hash from seed
-# (compute hash manually to avoid RNS.Destination side effects)
-rust_seed = "lxmf-rust-node"
-rh1 = hashlib.sha256(rust_seed.encode()).digest()
-rh2 = hashlib.sha256(rh1).digest()
-rprv = rh1 + rh2
-rust_id_tmp = RNS.Identity(create_keys=False)
-rust_id_tmp.load_private_key(rprv)
-rust_id_hash = rust_id_tmp.hash
-name_hash = hashlib.sha256("lxmf.delivery".encode("utf-8")).digest()[:10]
-rust_dest_hash = hashlib.sha256(name_hash + rust_id_hash).digest()[:16]
-print(f"PY_EXPECTED_RUST_HASH:{{rust_dest_hash.hex()}}", flush=True)
-
-# Wait for Rust LXMF announce
+# Wait for Rust LXMF announce in path table
 timeout = {t.timeout}
 deadline = time.time() + timeout
+rust_dest_hash = None
+
 while time.time() < deadline:
-    if RNS.Transport.has_path(rust_dest_hash):
+    for h in RNS.Transport.path_table:
+        if h != py_lxmf_dest.hash:
+            rust_dest_hash = h
+            break
+    if rust_dest_hash:
         break
     time.sleep(0.5)
 
-if not RNS.Transport.has_path(rust_dest_hash):
+if not rust_dest_hash:
     print("PY_FAIL:timeout_waiting_for_rust_announce", flush=True)
     sys.exit(1)
 

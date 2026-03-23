@@ -84,9 +84,14 @@ async fn main(_spawner: Spawner) -> ! {
 
     let mut iface = EmbassyHdlcInterface::new(uart0);
 
-    // Deterministic identity for reproducible testing
+    let mut rng = EspRng(esp_hal::rng::Rng::new());
+
+    // Generate random identity from hardware RNG
     println!("[serial-test] creating identity");
-    let identity = rete_core::Identity::from_seed(b"rete-esp32c6-test").expect("invalid key");
+    let mut prv = [0u8; 64];
+    use rand_core::RngCore;
+    rng.0.fill_bytes(&mut prv);
+    let identity = rete_core::Identity::from_private_key(&prv).expect("invalid key");
 
     let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]);
     node.core.set_proof_strategy(ProofStrategy::ProveAll);
@@ -108,8 +113,6 @@ async fn main(_spawner: Spawner) -> ! {
         "[serial-test] primary dest: {}",
         core::str::from_utf8(&dh_hex).unwrap_or("????")
     );
-
-    let mut rng = EspRng(esp_hal::rng::Rng::new());
 
     println!("[serial-test] running (full handler mode)");
     let mut last_peer: Option<[u8; 16]> = None;

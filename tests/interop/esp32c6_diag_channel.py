@@ -10,7 +10,6 @@ Usage:
     uv run python esp32c6_diag_channel.py --serial-port /dev/ttyUSB0 --timeout 30
 """
 
-import hashlib
 import os
 import sys
 import tempfile
@@ -22,19 +21,9 @@ import RNS.Channel
 from interop_helpers import InteropTest
 
 
-ESP32_SEED = "rete-esp32c6-test"
 APP_NAME = "rete"
 ASPECTS = ["example", "v1"]
 BRIDGE_PORT = 4282
-
-
-def identity_from_seed(seed_str):
-    h1 = hashlib.sha256(seed_str.encode()).digest()
-    h2 = hashlib.sha256(h1).digest()
-    prv = h1 + h2
-    id_ = RNS.Identity(create_keys=False)
-    id_.load_private_key(prv)
-    return id_
 
 
 class TestMessage(RNS.MessageBase):
@@ -77,29 +66,40 @@ def main():
         rns = RNS.Reticulum(configdir=tmpdir, loglevel=RNS.LOG_VERBOSE)
         time.sleep(1.0)
 
-        # Setup ESP32 destination
-        esp32_id = identity_from_seed(ESP32_SEED)
-        esp32_dest_hash = RNS.Destination.hash_from_name_and_identity(
-            f"{APP_NAME}.{'.'.join(ASPECTS)}", esp32_id
-        )
-        RNS.Identity.remember(
-            packet_hash=None,
-            destination_hash=esp32_dest_hash,
-            public_key=esp32_id.get_public_key(),
-            app_data=None,
-        )
-        esp32_dest = RNS.Destination(
-            esp32_id, RNS.Destination.OUT, RNS.Destination.SINGLE,
-            APP_NAME, *ASPECTS
-        )
-
         # Announce ourselves first to trigger ESP32 re-announce
         our_id = RNS.Identity()
         our_dest = RNS.Destination(our_id, RNS.Destination.IN, RNS.Destination.SINGLE,
                                     APP_NAME, *ASPECTS)
         t._log("=== Sending Python announce (triggers ESP32 re-announce) ===")
         our_dest.announce()
-        time.sleep(3.0)
+
+        # Wait for ESP32 announce — discover dynamically from path_table
+        # since ESP32 generates a random identity on each boot.
+        t._log("waiting for ESP32 announce (path discovery)...")
+        esp32_dest_hash = None
+        deadline = time.time() + t.timeout
+        while time.time() < deadline:
+            for h in RNS.Transport.path_table:
+                if h != our_dest.hash:
+                    esp32_dest_hash = h
+                    break
+            if esp32_dest_hash:
+                break
+            time.sleep(0.5)
+
+        if esp32_dest_hash is None:
+            t.check(False, "ESP32 path discovered via announce")
+            RNS.Reticulum.exit_handler()
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return
+
+        t._log(f"discovered ESP32 dest hash: {esp32_dest_hash.hex()}")
+        esp32_id = RNS.Identity.recall(esp32_dest_hash)
+        esp32_dest = RNS.Destination(
+            esp32_id, RNS.Destination.OUT, RNS.Destination.SINGLE,
+            APP_NAME, *ASPECTS
+        )
 
         # Track events
         link_established = [False]

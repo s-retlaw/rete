@@ -2,7 +2,7 @@
 """ESP32-C6 resource interop test — Topology A (rete-linux <-> ESP32 over serial).
 
 Tests small resource transfer to ESP32:
-1. Establish link (using known dest hash via --peer-seed)
+1. Establish link
 2. Send a small resource (<500 bytes, single segment, no compression)
 3. Verify RESOURCE_COMPLETE on rete-linux stdout (ESP32 received it)
 """
@@ -10,22 +10,23 @@ Tests small resource transfer to ESP32:
 import sys
 import time
 
-from interop_helpers import ESP32C6_DEST, InteropTest
+from interop_helpers import InteropTest
 
 
 def main():
     with InteropTest("esp32c6-resource", default_port=0, default_timeout=60.0) as t:
         # Start rete-linux connected to ESP32 over serial
-        rust_lines = t.start_rust_serial(
-            seed="esp32c6-resource-test-42",
-            extra_args=["--peer-seed", "rete-esp32c6-test"],
-        )
+        rust_lines = t.start_rust_serial()
 
-        # Wait for startup
-        time.sleep(2.0)
+        # Discover ESP32 destination hash from its announce
+        esp32_dest = t.discover_esp32_dest(rust_lines, timeout=15)
+        if esp32_dest is None:
+            t.check(False, "Discover ESP32 destination hash")
+            t.dump_output("Rust stdout", rust_lines)
+            return
 
         # Establish link
-        link_id, ok = t.establish_esp32_link(rust_lines, ESP32C6_DEST)
+        link_id, ok = t.establish_esp32_link(rust_lines, esp32_dest)
         t.check(ok, "Link established")
         if not ok:
             t.dump_output("Rust stdout", rust_lines)

@@ -27,7 +27,6 @@ def main():
     with InteropTest("ifac-large-pkt", default_port=4285) as t:
         t.start_rnsd(ifac_netname=IFAC_NETNAME)
         rust = t.start_rust(
-            seed="ifac-large-pkt-seed-55",
             extra_args=[
                 "--ifac-netname", IFAC_NETNAME,
                 "--auto-reply", "large reply from rust",

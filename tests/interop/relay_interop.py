@@ -33,7 +33,6 @@ def main():
 
         # --- Start Rust node connected to rnsd relay ---
         rust = t.start_rust(
-            seed="relay-interop-test-seed-99",
             extra_args=["--auto-reply", "hello from rust via relay"],
         )
 

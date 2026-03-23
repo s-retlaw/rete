@@ -15,7 +15,6 @@ Usage:
         --serial-port /dev/ttyUSB0 --timeout 120
 """
 
-import hashlib
 import os
 import sys
 import tempfile
@@ -27,21 +26,11 @@ import RNS.Channel
 from interop_helpers import InteropTest
 
 
-ESP32_SEED = "rete-esp32c6-test"
 APP_NAME = "rete"
 ASPECTS = ["example", "v1"]
 RNSD_PORT = 4290
 PROXY_PORT = 4292  # proxy sits between rete-linux and rnsd
 BRIDGE_PORT = 4294  # diag bridge for serial side
-
-
-def identity_from_seed(seed_str):
-    h1 = hashlib.sha256(seed_str.encode()).digest()
-    h2 = hashlib.sha256(h1).digest()
-    prv = h1 + h2
-    id_ = RNS.Identity(create_keys=False)
-    id_.load_private_key(prv)
-    return id_
 
 
 class TestMessage(RNS.MessageBase):
@@ -98,11 +87,9 @@ def main():
         #    It connects to the proxy (which forwards to rnsd) on TCP side,
         #    and to the diag bridge (which forwards to ESP32) on serial side.
         rust_lines = t.start_rust(
-            seed="3node-relay-42",
             port=PROXY_PORT,
             extra_args=[
                 "--transport",
-                "--peer-seed", ESP32_SEED,
                 "--serial", f"127.0.0.1:{BRIDGE_PORT}",  # connect to diag bridge as TCP
             ],
         )
@@ -111,22 +98,6 @@ def main():
         time.sleep(5.0)
         t._log("=== Topology established ===")
 
-        # Create ESP32 identity from seed
-        esp32_id = identity_from_seed(ESP32_SEED)
-        esp32_dest_hash = RNS.Destination.hash_from_name_and_identity(
-            f"{APP_NAME}.{'.'.join(ASPECTS)}", esp32_id
-        )
-        RNS.Identity.remember(
-            packet_hash=None,
-            destination_hash=esp32_dest_hash,
-            public_key=esp32_id.get_public_key(),
-            app_data=None,
-        )
-        esp32_dest = RNS.Destination(
-            esp32_id, RNS.Destination.OUT, RNS.Destination.SINGLE,
-            APP_NAME, *ASPECTS
-        )
-
         our_id = RNS.Identity()
         our_dest = RNS.Destination(our_id, RNS.Destination.IN, RNS.Destination.SINGLE,
                                     APP_NAME, *ASPECTS)
@@ -134,14 +105,20 @@ def main():
         # === Phase 1: Announce propagation ===
         t._log("=== Phase 1: Announce propagation ===")
 
+        # Discover ESP32 dynamically from path_table since ESP32 generates
+        # a random identity on each boot.
+        esp32_dest_hash = None
         deadline = time.time() + 20
-        esp32_path_found = False
         while time.time() < deadline:
-            if RNS.Transport.has_path(esp32_dest_hash):
-                esp32_path_found = True
+            for h in RNS.Transport.path_table:
+                if h != our_dest.hash:
+                    esp32_dest_hash = h
+                    break
+            if esp32_dest_hash:
                 break
             time.sleep(0.5)
 
+        esp32_path_found = esp32_dest_hash is not None
         t.check(esp32_path_found, "Python received ESP32 announce through relay")
 
         if not esp32_path_found:
@@ -155,6 +132,13 @@ def main():
             import shutil
             shutil.rmtree(py_tmpdir, ignore_errors=True)
             return
+
+        t._log(f"discovered ESP32 dest hash: {esp32_dest_hash.hex()}")
+        esp32_id = RNS.Identity.recall(esp32_dest_hash)
+        esp32_dest = RNS.Destination(
+            esp32_id, RNS.Destination.OUT, RNS.Destination.SINGLE,
+            APP_NAME, *ASPECTS
+        )
 
         # === Phase 2: DATA echo ===
         t._log("=== Phase 2: DATA echo ===")

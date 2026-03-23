@@ -12,22 +12,23 @@ Tests request/response over a link:
 import sys
 import time
 
-from interop_helpers import ESP32C6_DEST, InteropTest
+from interop_helpers import InteropTest
 
 
 def main():
     with InteropTest("esp32c6-request", default_port=0, default_timeout=30.0) as t:
         # Start rete-linux connected to ESP32 over serial
-        rust_lines = t.start_rust_serial(
-            seed="esp32c6-request-test-42",
-            extra_args=["--peer-seed", "rete-esp32c6-test"],
-        )
+        rust_lines = t.start_rust_serial()
 
-        # Wait for startup
-        time.sleep(2.0)
+        # Discover ESP32 destination hash from its announce
+        esp32_dest = t.discover_esp32_dest(rust_lines, timeout=15)
+        if esp32_dest is None:
+            t.check(False, "Discover ESP32 destination hash")
+            t.dump_output("Rust stdout", rust_lines)
+            return
 
         # Establish link
-        link_id, ok = t.establish_esp32_link(rust_lines, ESP32C6_DEST)
+        link_id, ok = t.establish_esp32_link(rust_lines, esp32_dest)
         t.check(ok, "Link established")
         if not ok:
             t.dump_output("Rust stdout", rust_lines)

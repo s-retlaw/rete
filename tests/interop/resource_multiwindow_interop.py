@@ -51,7 +51,7 @@ def main():
 
     with InteropTest("resource-multiwindow-interop", default_port=4260, default_timeout=120.0) as t:
         t.start_rnsd()
-        rust = t.start_rust(seed="resource-multiwindow-test-seed-77")
+        rust = t.start_rust()
 
         # Give Rust time to connect and announce
         time.sleep(3)

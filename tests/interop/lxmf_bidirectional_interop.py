@@ -5,7 +5,6 @@ Topology:
   rnsd (transport=yes, TCP server on localhost:4254)
   Python LXMF node connects FIRST (so rnsd learns the path)
   Rust node connects as TCP client, announces LXMF delivery
-  Rust uses --lxmf-peer-seed to pre-register Python's identity
 
 Assertions:
   1. Python -> Rust opportunistic LXMF delivery
@@ -23,19 +22,14 @@ import time
 
 from interop_helpers import InteropTest
 
-PYTHON_LXMF_SEED = "lxmf-bidir-python"
-
-
 def main():
     with InteropTest("lxmf-bidir", default_port=4254) as t:
         t.start_rnsd()
 
         # Python helper connects FIRST so rnsd learns the path.
-        # It uses a deterministic identity so Rust can --lxmf-peer-seed it.
-        # It computes the Rust LXMF delivery hash from the seed to avoid
+        # It computes the Rust LXMF delivery hash to avoid
         # needing stderr access.
         py = t.start_py_helper(f"""\
-import hashlib
 import RNS
 import LXMF
 import time
@@ -51,13 +45,7 @@ with open(os.path.join(config_dir, "config"), "w") as cf:
 reticulum = RNS.Reticulum(configdir=config_dir)
 time.sleep(2)
 
-# Deterministic identity matching Rust's Identity::from_seed
-seed_str = "{PYTHON_LXMF_SEED}"
-h1 = hashlib.sha256(seed_str.encode()).digest()
-h2 = hashlib.sha256(h1).digest()
-prv = h1 + h2
-py_identity = RNS.Identity(create_keys=False)
-py_identity.load_private_key(prv)
+py_identity = RNS.Identity()
 
 py_router = LXMF.LXMRouter(
     identity=py_identity,
@@ -90,31 +78,25 @@ py_lxmf_hash = RNS.hexrep(py_lxmf_dest.hash, delimit=False)
 print(f"PY_LXMF_HASH:{{py_lxmf_hash}}", flush=True)
 time.sleep(3)
 
-# Compute Rust's LXMF delivery hash from its seed
-# (compute hash manually to avoid RNS.Destination side effects)
-rust_seed = "lxmf-bidir-rust"
-rh1 = hashlib.sha256(rust_seed.encode()).digest()
-rh2 = hashlib.sha256(rh1).digest()
-rprv = rh1 + rh2
-rust_id_tmp = RNS.Identity(create_keys=False)
-rust_id_tmp.load_private_key(rprv)
-rust_id_hash = rust_id_tmp.hash
-name_hash = hashlib.sha256("lxmf.delivery".encode("utf-8")).digest()[:10]
-rust_lxmf_hash = hashlib.sha256(name_hash + rust_id_hash).digest()[:16]
-print(f"PY_RUST_LXMF_HASH:{{rust_lxmf_hash.hex()}}", flush=True)
-
-# Wait for Rust LXMF announce
+# Wait for Rust LXMF announce in path table
 timeout = {t.timeout}
 deadline = time.time() + timeout
+rust_lxmf_hash = None
+
 while time.time() < deadline:
-    if RNS.Transport.has_path(rust_lxmf_hash):
+    for h in RNS.Transport.path_table:
+        if h != py_lxmf_dest.hash:
+            rust_lxmf_hash = h
+            break
+    if rust_lxmf_hash:
         break
     time.sleep(0.5)
 
-if not RNS.Transport.has_path(rust_lxmf_hash):
+if not rust_lxmf_hash:
     print("PY_FAIL:timeout_waiting_for_rust_announce", flush=True)
     sys.exit(1)
 
+print(f"PY_RUST_LXMF_HASH:{{rust_lxmf_hash.hex()}}", flush=True)
 print("PY_RUST_ANNOUNCED", flush=True)
 
 # Send Python -> Rust opportunistic LXMF
@@ -166,10 +148,8 @@ print("PY_DONE", flush=True)
         time.sleep(2)
 
         rust = t.start_rust(
-            seed="lxmf-bidir-rust",
             extra_args=[
                 "--lxmf-announce", "--lxmf-name", "BidirRust",
-                "--lxmf-peer-seed", PYTHON_LXMF_SEED,
             ],
         )
 

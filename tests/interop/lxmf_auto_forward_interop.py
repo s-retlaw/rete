@@ -46,7 +46,6 @@ def main():
 
         # --- Start Rust propagation node ---
         rust = t.start_rust(
-            seed="lxmf-af-seed-01",
             extra_args=["--propagation", "--lxmf-name", "PropNode"],
         )
 

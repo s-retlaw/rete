@@ -48,7 +48,6 @@ def main():
 
         # --- Start Rust propagation node ---
         rust = t.start_rust(
-            seed="lxmf-sf-seed-02",
             extra_args=["--propagation", "--lxmf-name", "PropNode"],
         )
 
@@ -84,13 +83,6 @@ def main():
         if not prop_hash:
             print("[lxmf-store-forward] Cannot continue without propagation hash")
             return
-
-        # --- Create the receiver identity (offline for now) ---
-        # We generate a deterministic identity for the receiver so we know its hash
-        receiver_seed = b"lxmf-sf-receiver-01"
-        import hashlib
-        # Deterministic receiver identity using RNS
-        # We'll create it in the sender helper and pass the dest hash
 
         # --- Python sender: deposit message to propagation node ---
         py_sender = t.start_py_helper(f"""\
