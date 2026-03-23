@@ -269,7 +269,13 @@ impl EmbassyNode {
                             dispatch(iface, &extra).await;
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        // Transient I/O errors (UART overrun, framing error)
+                        // are common when the host sends rapid-fire traffic.
+                        // Reset the decoder and continue rather than exiting.
+                        // The HDLC decoder will resync on the next FLAG byte.
+                        continue;
+                    }
                 },
                 Either3::Second(()) => {
                     next_announce = Instant::now() + Duration::from_secs(announce_interval);

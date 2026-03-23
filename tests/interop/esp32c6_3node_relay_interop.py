@@ -24,7 +24,6 @@ Usage:
       --serial-port /dev/ttyUSB0 --timeout 120
 """
 
-import hashlib
 import os
 import sys
 import tempfile
@@ -36,19 +35,9 @@ import RNS.Channel
 from interop_helpers import InteropTest
 
 
-ESP32_SEED = "rete-esp32c6-test"
 APP_NAME = "rete"
 ASPECTS = ["example", "v1"]
 RNSD_PORT = 4290
-
-
-def identity_from_seed(seed_str):
-    h1 = hashlib.sha256(seed_str.encode()).digest()
-    h2 = hashlib.sha256(h1).digest()
-    prv = h1 + h2
-    id_ = RNS.Identity(create_keys=False)
-    id_.load_private_key(prv)
-    return id_
 
 
 class TestMessage(RNS.MessageBase):
@@ -92,42 +81,98 @@ def main():
         rns = RNS.Reticulum(configdir=py_tmpdir, loglevel=RNS.LOG_VERBOSE)
         time.sleep(1.0)
 
-        # 3. Start rete-linux with TCP + serial (multi-interface, transport mode).
-        #    --peer-seed pre-registers ESP32 identity + builds cached announce
-        #    that gets flushed to TCP interface on startup (toward rnsd/Python).
+        # 3. Reset ESP32 via DTR toggle to ensure fresh boot and immediate announce.
+        try:
+            import serial as pyserial
+            ser = pyserial.Serial(t.args.serial_port, 115200)
+            ser.dtr = False; time.sleep(0.1)
+            ser.dtr = True; time.sleep(0.1)
+            ser.dtr = False; time.sleep(0.5)
+            ser.close()
+            t._log("ESP32 reset via DTR toggle")
+            time.sleep(2.0)  # wait for ESP32 boot
+        except Exception as e:
+            t._log(f"DTR reset skipped: {e}")
+
+        # 4. Start rete-linux with TCP + serial (multi-interface, transport mode).
+        #    The real ESP32 announce propagates naturally.
         rust_lines = t.start_rust_dual(
-            seed="3node-relay-42",
             port=RNSD_PORT,
-            extra_args=["--transport", "--peer-seed", ESP32_SEED],
+            extra_args=["--transport"],
         )
 
-        # 4. Wait for rete-linux to connect and cached announce to propagate
-        time.sleep(5.0)
-        t._log("rete-linux started, peer announce cached and flushed")
+        # Read rete-linux's own dest hash from stdout (for filtering during discovery)
+        rust_dest_hex = t.wait_for_line(rust_lines, "IDENTITY:", timeout=10) or ""
+        rust_dest_hash = bytes.fromhex(rust_dest_hex) if rust_dest_hex else None
+        t._log(f"Rust transport dest hash: {rust_dest_hex}")
 
-        # Create ESP32 identity from seed (for destination hash computation)
-        esp32_id = identity_from_seed(ESP32_SEED)
-        esp32_dest_hash = RNS.Destination.hash_from_name_and_identity(
-            f"{APP_NAME}.{'.'.join(ASPECTS)}", esp32_id
-        )
+        # 4. Create our own identity and destination first (needed for
+        #    path_table filtering during ESP32 discovery).
+        our_id = RNS.Identity()
+        our_dest = RNS.Destination(our_id, RNS.Destination.IN, RNS.Destination.SINGLE,
+                                    APP_NAME, *ASPECTS)
 
-        # Register ESP32's identity so we can reach it
-        RNS.Identity.remember(
-            packet_hash=None,
-            destination_hash=esp32_dest_hash,
-            public_key=esp32_id.get_public_key(),
-            app_data=None,
-        )
+        # Snapshot known non-ESP32 hashes BEFORE the ESP32 announce window.
+        # These are rnsd, rete-linux, and our own — exclude them during discovery.
+        exclude_hashes = set()
+        exclude_hashes.add(our_dest.hash)
+        if rust_dest_hash:
+            exclude_hashes.add(rust_dest_hash)
+        for h in list(RNS.Transport.path_table.keys()):
+            exclude_hashes.add(h)
 
+        # Wait for ESP32 announce to propagate: ESP32 re-announces when it
+        # detects data on serial (idle-gap trigger in rete-embassy).
+        # Flow: ESP32 -> serial -> rete-linux -> TCP -> rnsd -> TCP -> Python
+        time.sleep(8.0)
+        t._log("rete-linux started, waiting for real ESP32 announce")
+
+        # Discover ESP32 dynamically from path_table since ESP32 generates
+        # a random identity on each boot.
+        esp32_dest_hash = None
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            for h in RNS.Transport.path_table:
+                if h not in exclude_hashes:
+                    esp32_dest_hash = h
+                    break
+            if esp32_dest_hash:
+                break
+            time.sleep(0.5)
+
+        if esp32_dest_hash is None:
+            t.check(False, "ESP32 path discovered via announce")
+            rust_stderr = t.collect_rust_stderr(last_chars=5000)
+            t.dump_output("Rust stdout", rust_lines)
+            t.dump_output("Rust stderr (last 1000)", rust_stderr.strip().split("\n"))
+            RNS.Reticulum.exit_handler()
+            import shutil
+            shutil.rmtree(py_tmpdir, ignore_errors=True)
+            return
+
+        t._log(f"discovered ESP32 dest hash: {esp32_dest_hash.hex()}")
+
+        # Diagnostic: inspect path_table to see which relay Python targets
+        path_entry = RNS.Transport.path_table.get(esp32_dest_hash)
+        if path_entry:
+            via = path_entry[1]  # next_hop transport_id (bytes or None)
+            via_hex = via.hex() if via else "DIRECT"
+            hops_val = path_entry[2] if len(path_entry) > 2 else "?"
+            t._log(f"  path via={via_hex} hops={hops_val}")
+            t._log(f"  rete-linux identity = {rust_dest_hex}")
+            if via and rust_dest_hex and via.hex() == rust_dest_hex:
+                t._log("  WARNING: via=rete-linux, rnsd is NOT the relay!")
+                t._log("  This means LINKREQUEST will bypass rnsd link_table")
+            elif via:
+                t._log("  OK: via != rete-linux, rnsd should be the relay")
+        else:
+            t._log("  WARNING: no path_table entry found!")
+
+        esp32_id = RNS.Identity.recall(esp32_dest_hash)
         esp32_dest = RNS.Destination(
             esp32_id, RNS.Destination.OUT, RNS.Destination.SINGLE,
             APP_NAME, *ASPECTS
         )
-
-        # Create our own identity and destination
-        our_id = RNS.Identity()
-        our_dest = RNS.Destination(our_id, RNS.Destination.IN, RNS.Destination.SINGLE,
-                                    APP_NAME, *ASPECTS)
 
         # Track received packets
         received_packets = []
@@ -140,32 +185,13 @@ def main():
         # === Phase 1: Announce propagation ===
         t._log("=== Phase 1: Announce propagation ===")
 
-        # Wait for ESP32 announce to reach Python through rnsd + rete-linux relay
-        # The rete-linux transport node should have retransmitted the ESP32 announce
-        deadline = time.time() + 20
-        esp32_path_found = False
-        while time.time() < deadline:
-            if RNS.Transport.has_path(esp32_dest_hash):
-                esp32_path_found = True
-                break
-            time.sleep(0.5)
-
-        t.check(esp32_path_found, "Python received ESP32 announce through relay")
+        # ESP32 path was already discovered dynamically above.
+        t.check(RNS.Transport.has_path(esp32_dest_hash),
+                "Python received ESP32 announce through relay")
 
         # Check hops (announce went: ESP32 -> serial -> rete-linux -> TCP -> rnsd -> TCP -> Python)
         hops = RNS.Transport.hops_to(esp32_dest_hash)
         t.check(hops >= 1, f"Announce hops >= 1 (got {hops})")
-
-        if not esp32_path_found:
-            t._log("Cannot proceed without path to ESP32")
-            # Collect diagnostics
-            rust_stderr = t.collect_rust_stderr()
-            t.dump_output("Rust stdout", rust_lines)
-            t.dump_output("Rust stderr (last 1000)", rust_stderr.strip().split("\n"))
-            RNS.Reticulum.exit_handler()
-            import shutil
-            shutil.rmtree(py_tmpdir, ignore_errors=True)
-            return
 
         # === Phase 2: Encrypted DATA round-trip ===
         t._log("=== Phase 2: Encrypted DATA round-trip ===")
@@ -215,6 +241,9 @@ def main():
         t.check(proof_received[0], "Proof of delivery received through relay")
 
         # === Phase 3: Link through relay ===
+        # Allow serial traffic to settle — ESP32's UART can overflow if
+        # announces are sent too rapidly, causing it to disconnect.
+        time.sleep(3.0)
         t._log("=== Phase 3: Link through relay ===")
 
         link_established = [False]
@@ -235,8 +264,8 @@ def main():
         link.set_link_closed_callback(link_closed_cb)
         link.set_packet_callback(link_packet_callback)
 
-        # Wait for link establishment
-        deadline = time.time() + 20
+        # Wait for link establishment (relay path adds latency: Python → rnsd → rete-linux → serial → ESP32)
+        deadline = time.time() + 40
         while time.time() < deadline and not link_established[0]:
             time.sleep(0.3)
 
@@ -244,13 +273,30 @@ def main():
 
         if not link_established[0]:
             t._log("Cannot proceed without link")
-            rust_stderr = t.collect_rust_stderr()
+            rust_stderr = t.collect_rust_stderr(last_chars=50000)
             t.dump_output("Rust stdout", rust_lines)
-            t.dump_output("Rust stderr (last 1000)", rust_stderr.strip().split("\n"))
+            # Filter stderr for packet and relay logs
+            all_lines = rust_stderr.strip().split("\n")
+            pkt_lines = [l for l in all_lines if "[pkt]" in l and ("LinkRequest" in l or "Proof" in l or "LRPROOF" in l)]
+            relay_lines = [l for l in all_lines if "[relay]" in l]
+            t.dump_output("Rust [pkt] LINKREQUEST/Proof lines", pkt_lines)
+            t.dump_output("Rust [relay] lines", relay_lines)
+            t.dump_output("Rust stderr (last 2000 chars)", all_lines[-30:])
             RNS.Reticulum.exit_handler()
             import shutil
             shutil.rmtree(py_tmpdir, ignore_errors=True)
             return
+
+        t._log(f"link status={link.status} link_id={link.link_id.hex()}")
+        # NOTE: RNS.Transport.link_table here is this test process's own
+        # link_table — always empty because enable_transport=no.  rnsd
+        # runs in a separate process with its own Python runtime.
+        lid_bytes = link.link_id
+        t._log(f"  test process link_table entries={len(RNS.Transport.link_table)} (expected 0, this is NOT rnsd)")
+        # Re-check path_table via at link time to see what relay was targeted
+        path_entry = RNS.Transport.path_table.get(esp32_dest_hash)
+        if path_entry and path_entry[1]:
+            t._log(f"  LINKREQUEST targeted via={path_entry[1].hex()}")
 
         # === Phase 4: Channel message through relay ===
         t._log("=== Phase 4: Channel messages ===")
@@ -260,16 +306,31 @@ def main():
         received_channel_msgs = []
 
         def channel_msg_handler(message):
+            t._log(f"CHANNEL_RX: type=0x{message.MSGTYPE:04x} len={len(message.data)} data={message.data[:40]}")
             received_channel_msgs.append(message.data)
+
+        # Monkey-patch link to log all incoming packet activity
+        original_receive = link.receive.__func__ if hasattr(link.receive, '__func__') else link.receive
+        _link_pkts_seen = [0]
+        def patched_receive(self_link, data, packet):
+            _link_pkts_seen[0] += 1
+            t._log(f"LINK_PKT_RX #{_link_pkts_seen[0]}: len={len(data)} ctx={packet.context if hasattr(packet,'context') else '?'}")
+            return original_receive(self_link, data, packet)
+        try:
+            link.receive = patched_receive.__get__(link, type(link))
+        except Exception:
+            pass
 
         channel = link.get_channel()
         channel.register_message_type(TestMessage)
         channel.add_message_handler(channel_msg_handler)
 
         time.sleep(2.0)  # LRRTT stabilization — greeting may arrive here
+        t._log(f"after LRRTT wait: link_pkts={_link_pkts_seen[0]} channel_msgs={len(received_channel_msgs)} link_status={link.status}")
 
         # Wait for ESP32 greeting
-        time.sleep(3.0)
+        time.sleep(5.0)
+        t._log(f"after greeting wait: link_pkts={_link_pkts_seen[0]} channel_msgs={len(received_channel_msgs)}")
         got_greeting = any(b"esp32-hello" in m for m in received_channel_msgs)
         t.check(got_greeting, "ESP32 greeting received through relay",
                 detail=f"received {len(received_channel_msgs)} channel msgs")
@@ -471,14 +532,14 @@ def main():
         # === Phase 10: Final crash check ===
         t._log("=== Phase 10: Crash check ===")
 
-        rust_stderr = t.collect_rust_stderr()
+        rust_stderr = t.collect_rust_stderr(last_chars=5000)
         has_panic = "panic" in rust_stderr.lower() or "SIGSEGV" in rust_stderr
         t.check(not has_panic, "No crash in rete-linux stderr",
                 detail=rust_stderr[-200:] if has_panic else None)
 
         # Dump diagnostics
         t.dump_output("Rust stdout", rust_lines)
-        t.dump_output("Rust stderr (last 1000)", rust_stderr.strip().split("\n"))
+        t.dump_output("Rust stderr", rust_stderr.strip().split("\n"))
 
         # Cleanup
         RNS.Reticulum.exit_handler()

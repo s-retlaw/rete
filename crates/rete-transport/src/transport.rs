@@ -599,6 +599,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         self.local_identity_hash = Some(hash);
     }
 
+    /// Get the local identity hash (transport node ID), if set.
+    pub fn local_identity_hash(&self) -> Option<[u8; TRUNCATED_HASH_LEN]> {
+        self.local_identity_hash
+    }
+
     /// Look up a reverse table entry by truncated packet hash.
     pub fn get_reverse(&self, hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&ReverseEntry> {
         self.reverse_table.get(hash)
@@ -847,6 +852,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         let mut dest = [0u8; TRUNCATED_HASH_LEN];
                         dest.copy_from_slice(pkt.destination_hash);
                         let is_link_request = pkt.packet_type == PacketType::LinkRequest;
+                        let is_link_dest = pkt.dest_type == DestType::Link;
                         let inbound_hops = pkt.hops;
 
                         // End pkt borrow on raw before mutating
@@ -892,6 +898,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
                         return match self.paths.get(&dest) {
                             Some(Path { via: Some(via), .. }) => {
+                                relay_log!(
+                                    "[relay] H2 FWD via={} dest={} iface={}",
+                                    hex_short(via),
+                                    hex_short(&dest),
+                                    iface,
+                                );
                                 raw[2..18].copy_from_slice(via);
                                 IngestResult::Forward {
                                     raw: &raw[..len],
@@ -899,6 +911,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                                 }
                             }
                             Some(_path) => {
+                                relay_log!(
+                                    "[relay] H2->H1 FWD direct dest={} iface={} len={}->{}",
+                                    hex_short(&dest),
+                                    iface,
+                                    len,
+                                    len - TRUNCATED_HASH_LEN,
+                                );
                                 let new_flags = raw[0] & 0x0F;
                                 raw[0] = new_flags;
                                 raw.copy_within(18..len, 2);
@@ -907,7 +926,56 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                                     source_iface: iface,
                                 }
                             }
-                            _ => IngestResult::Invalid,
+                            _ if is_link_dest => {
+                                // No path for this dest, but dest_type=Link:
+                                // route via link_table (dest = link_id).
+                                // This handles H2 link DATA, channel, keepalive,
+                                // etc. where the destination_hash is a link_id
+                                // (not in path_table).
+                                if let Some(lte) = self.link_table.get_mut(&dest) {
+                                    let max_hops = lte
+                                        .inbound_hops
+                                        .saturating_add(lte.outbound_hops)
+                                        .saturating_add(2);
+                                    if raw[1] <= max_hops {
+                                        lte.timestamp = now;
+                                        relay_log!(
+                                            "[relay] H2 link_table FWD lid={} iface={}",
+                                            hex_short(&dest),
+                                            iface,
+                                        );
+                                        // Convert H2→H1 and forward (link traffic
+                                        // goes directly to the link endpoint)
+                                        let new_flags = raw[0] & 0x0F;
+                                        raw[0] = new_flags;
+                                        raw.copy_within(18..len, 2);
+                                        IngestResult::Forward {
+                                            raw: &raw[..len - TRUNCATED_HASH_LEN],
+                                            source_iface: iface,
+                                        }
+                                    } else {
+                                        relay_log!(
+                                            "[relay] H2 link_table HOP_EXCEED lid={} hops={}",
+                                            hex_short(&dest),
+                                            raw[1],
+                                        );
+                                        IngestResult::Invalid
+                                    }
+                                } else {
+                                    relay_log!(
+                                        "[relay] H2 link_table MISS lid={}",
+                                        hex_short(&dest),
+                                    );
+                                    IngestResult::Invalid
+                                }
+                            }
+                            _ => {
+                                relay_log!(
+                                    "[relay] H2 NO_PATH dest={}",
+                                    hex_short(&dest),
+                                );
+                                IngestResult::Invalid
+                            }
                         };
                     }
                 }
@@ -1035,6 +1103,18 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 let mut dh = [0u8; TRUNCATED_HASH_LEN];
                 dh.copy_from_slice(pkt.destination_hash);
 
+                if pkt.context == CONTEXT_LRPROOF && pkt.dest_type == DestType::Link {
+                    relay_log!(
+                        "[relay] LRPROOF_IN lid={} hops={} plen={} local_link={} link_table={} reverse={}",
+                        hex_short(&dh),
+                        pkt.hops,
+                        pkt.payload.len(),
+                        self.links.contains_key(&dh),
+                        self.link_table.contains_key(&dh),
+                        self.reverse_table.contains_key(&dh),
+                    );
+                }
+
                 // Check for LRPROOF (link proof from responder to initiator).
                 // Only handle locally if we have a pending link for this link_id;
                 // otherwise fall through to reverse-table forwarding (relay case).
@@ -1133,6 +1213,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             {
                                 if let Ok(dest_id) = Identity::from_public_key(pub_key)
                                 {
+                                    relay_log!(
+                                        "[relay] LRPROOF_VALIDATE lid={} dest={} has_identity={}",
+                                        hex_short(&dh),
+                                        hex_short(&dest_hash_for_link),
+                                        true,
+                                    );
                                     if !self.validate_lrproof_relay(
                                         pkt.payload,
                                         &dh,
@@ -1145,6 +1231,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                                         );
                                         return IngestResult::Invalid;
                                     }
+                                    relay_log!(
+                                        "[relay] LRPROOF_VALID lid={} dest={}",
+                                        hex_short(&dh),
+                                        hex_short(&dest_hash_for_link),
+                                    );
                                 }
                                 // If identity can't be reconstructed, forward
                                 // anyway (graceful fallback).
@@ -1153,9 +1244,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         }
 
                         relay_log!(
-                            "[relay] PROOF link_table FORWARD dest={} ctx={:#04x}",
+                            "[relay] PROOF link_table FORWARD lid={} ctx={:#04x} raw[0..20]={:02x?}",
                             hex_short(&dh),
                             pkt.context,
+                            &raw[..core::cmp::min(20, raw.len())],
                         );
                         IngestResult::Forward {
                             raw,
