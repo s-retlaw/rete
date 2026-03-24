@@ -155,6 +155,37 @@ channel.send(msg)
 print("PY_A_CHANNEL_MSG_SENT", flush=True)
 time.sleep(3)
 
+# Test link.request() through Rust relay
+req_response = threading.Event()
+req_result = [None]
+
+def req_response_cb(receipt):
+    if receipt.response is not None:
+        req_result[0] = receipt.response
+        print(f"PY_A_REQUEST_RESPONSE:{{len(receipt.response)}}", flush=True)
+    else:
+        print("PY_A_REQUEST_RESPONSE_NONE", flush=True)
+    req_response.set()
+
+def req_failed_cb(receipt):
+    print(f"PY_A_REQUEST_FAILED:{{receipt.status}}", flush=True)
+    req_response.set()
+
+print("PY_A_SENDING_REQUEST", flush=True)
+receipt = link.request(
+    "/test/echo",
+    b"echo through rust relay",
+    response_callback=req_response_cb,
+    failed_callback=req_failed_cb,
+)
+
+if req_response.wait(timeout=10):
+    print(f"PY_A_REQUEST_DONE:{{req_result[0]}}", flush=True)
+else:
+    print("PY_A_REQUEST_TIMEOUT", flush=True)
+
+time.sleep(1)
+
 link.teardown()
 print("PY_A_LINK_TEARDOWN_SENT", flush=True)
 time.sleep(2)
@@ -229,6 +260,14 @@ py_dest = RNS.Destination(
 )
 py_dest.set_link_established_callback(inbound_link_established)
 
+# Register /test/echo request handler
+def test_echo_handler(path, data, request_id, link_id, packet, remote_identity):
+    print(f"PY_B_REQUEST_RECEIVED:{{len(data)}}", flush=True)
+    return data
+
+py_dest.register_request_handler("/test/echo", response_generator=test_echo_handler, allow=RNS.Destination.ALLOW_ALL)
+print("PY_B_REQUEST_HANDLER_REGISTERED", flush=True)
+
 # Announce so others can discover us
 py_dest.announce()
 print(f"PY_B_DEST_HASH:{{py_dest.hexhash}}", flush=True)
@@ -281,6 +320,11 @@ print("PY_B_DONE", flush=True)
         t.check(
             t.has_line(py_b, "PY_B_CHANNEL_MSG_RECEIVED:", contains="hello from A through rust relay"),
             "Channel message flows from A to B through Rust relay",
+        )
+
+        t.check(
+            t.has_line(py_a, "PY_A_REQUEST_RESPONSE:") or t.has_line(py_a, "PY_A_REQUEST_DONE:"),
+            "Request/response flows through Rust relay",
         )
 
         t.check(

@@ -930,6 +930,7 @@ dependencies = [
 name = "rete-tokio"
 version = "0.1.0"
 dependencies = [
+ "log",
  "rand",
  "rand_core",
  "rete-core",

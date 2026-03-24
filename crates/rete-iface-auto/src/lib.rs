@@ -172,11 +172,17 @@ impl DedupRing {
         let now = Instant::now();
 
         // Check if hash exists and is within TTL
-        for entry in &self.entries {
-            if entry.hash == hash && now.duration_since(entry.time).as_secs_f64() < DEDUP_TTL_SECS {
-                return true;
-            }
+        let found = self.entries.iter().any(|entry| {
+            entry.hash == hash && now.duration_since(entry.time).as_secs_f64() < DEDUP_TTL_SECS
+        });
+
+        if found {
+            return true;
         }
+
+        // Evict expired entries before adding a new one
+        self.entries
+            .retain(|e| now.duration_since(e.time).as_secs_f64() < DEDUP_TTL_SECS);
 
         // Not a duplicate — add it
         if self.entries.len() >= self.max_len {
@@ -356,6 +362,7 @@ impl Default for AutoInterfaceConfig {
 /// peers via UDP unicast, `recv()` receives data packets from any peer.
 ///
 /// Discovery runs in a background Tokio task, spawned on creation.
+/// Dropping the interface signals the background tasks to shut down.
 pub struct AutoInterface {
     /// UDP socket bound to the data port for sending/receiving packets.
     data_socket: Arc<UdpSocket>,
@@ -369,6 +376,8 @@ pub struct AutoInterface {
     _discovery_handle: tokio::task::JoinHandle<()>,
     /// Handle to the background peer-jobs task.
     _peer_jobs_handle: tokio::task::JoinHandle<()>,
+    /// Shutdown signal — send `true` to stop background tasks.
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl AutoInterface {
@@ -439,6 +448,8 @@ impl AutoInterface {
             })
             .collect();
 
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
         // Spawn discovery task: announces + listens for multicast & unicast discovery
         let discovery_handle = {
             let shared = shared.clone();
@@ -447,6 +458,7 @@ impl AutoInterface {
             let discovery_port = config.discovery_port;
             let our_addrs = our_addrs.clone();
             let iface_tokens = iface_tokens.clone();
+            let shutdown_rx = shutdown_rx.clone();
 
             tokio::spawn(discovery_loop(
                 shared,
@@ -458,6 +470,7 @@ impl AutoInterface {
                 iface_tokens,
                 discovery_port,
                 announce_interval,
+                shutdown_rx,
             ))
         };
 
@@ -477,6 +490,7 @@ impl AutoInterface {
                 peering_timeout,
                 reverse_interval,
                 discovery_port,
+                shutdown_rx,
             ))
         };
 
@@ -487,6 +501,7 @@ impl AutoInterface {
             interfaces,
             _discovery_handle: discovery_handle,
             _peer_jobs_handle: peer_jobs_handle,
+            shutdown_tx,
         })
     }
 
@@ -511,6 +526,12 @@ impl AutoInterface {
     }
 }
 
+impl Drop for AutoInterface {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+}
+
 impl ReteInterface for AutoInterface {
     type Error = std::io::Error;
 
@@ -532,13 +553,24 @@ impl ReteInterface for AutoInterface {
         };
 
         for (addr, peer) in &peers {
-            // Resolve scope_id from the interface name
-            let scope_id = self
+            // Resolve scope_id from the interface name — skip peer if interface
+            // vanished (scope_id 0 is invalid for link-local IPv6).
+            let scope_id = match self
                 .interfaces
                 .iter()
                 .find(|i| i.name == peer.ifname)
                 .map(|i| i.index)
-                .unwrap_or(0);
+            {
+                Some(id) => id,
+                None => {
+                    log::warn!(
+                        "AutoInterface: no interface '{}' for peer {}, skipping",
+                        peer.ifname,
+                        addr,
+                    );
+                    continue;
+                }
+            };
 
             let dest = SocketAddrV6::new(*addr, self.config.data_port, 0, scope_id);
             if let Err(e) = self.data_socket.send_to(frame, dest).await {
@@ -596,6 +628,7 @@ async fn discovery_loop(
     iface_tokens: Vec<(IfaceInfo, [u8; 32], String)>,
     discovery_port: u16,
     announce_interval: f64,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut announce_tick =
         tokio::time::interval(std::time::Duration::from_secs_f64(announce_interval));
@@ -629,6 +662,7 @@ async fn discovery_loop(
                                 handle_discovery_packet(
                                     &mcast_buf[..32],
                                     src_ip,
+                                    src_v6.scope_id(),
                                     &group_id,
                                     &iface_tokens,
                                     &shared,
@@ -649,6 +683,7 @@ async fn discovery_loop(
                                 handle_discovery_packet(
                                     &ucast_buf[..32],
                                     src_ip,
+                                    src_v6.scope_id(),
                                     &group_id,
                                     &iface_tokens,
                                     &shared,
@@ -656,6 +691,14 @@ async fn discovery_loop(
                             }
                         }
                     }
+                }
+            }
+
+            // Shutdown signal
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    log::info!("AutoInterface: discovery loop shutting down");
+                    return;
                 }
             }
         }
@@ -666,6 +709,7 @@ async fn discovery_loop(
 async fn handle_discovery_packet(
     data: &[u8],
     src_ip: Ipv6Addr,
+    scope_id: u32,
     group_id: &[u8],
     iface_tokens: &[(IfaceInfo, [u8; 32], String)],
     shared: &Arc<Mutex<SharedState>>,
@@ -678,11 +722,18 @@ async fn handle_discovery_packet(
         return;
     }
 
-    // Determine which interface this came from (best guess: first that matches)
-    let ifname = iface_tokens
-        .first()
-        .map(|(i, _, _)| i.name.clone())
-        .unwrap_or_default();
+    // Determine which interface this came from using the socket's scope_id.
+    // Falls back to first interface only when scope_id is 0 (kernel didn't set it).
+    let ifname = if scope_id != 0 {
+        iface_tokens
+            .iter()
+            .find(|(i, _, _)| i.index == scope_id)
+            .map(|(i, _, _)| i.name.clone())
+    } else {
+        None
+    }
+    .or_else(|| iface_tokens.first().map(|(i, _, _)| i.name.clone()))
+    .unwrap_or_default();
 
     let mut state = shared.lock().await;
     let now = Instant::now();
@@ -715,13 +766,22 @@ async fn peer_jobs_loop(
     peering_timeout: f64,
     reverse_interval: f64,
     discovery_port: u16,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut tick =
         tokio::time::interval(std::time::Duration::from_secs_f64(PEER_JOB_INTERVAL_SECS));
     tick.tick().await;
 
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = tick.tick() => {},
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    log::info!("AutoInterface: peer jobs loop shutting down");
+                    return;
+                }
+            }
+        }
 
         let now = Instant::now();
         let mut timed_out = Vec::new();

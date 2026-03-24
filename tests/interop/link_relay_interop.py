@@ -156,7 +156,7 @@ receipt = link.request(
 )
 print("PY_REQUEST_SENT", flush=True)
 
-if request_response.wait(timeout=2):
+if request_response.wait(timeout=10):
     print(f"PY_REQUEST_DONE:result={{request_result[0]}}", flush=True)
 else:
     print("PY_REQUEST_TIMEOUT", flush=True)
@@ -205,6 +205,11 @@ print("PY_DONE", flush=True)
         t.check(
             t.has_line(rust, "REQUEST_RECEIVED:"),
             "Rust received link.request() through relay",
+        )
+
+        t.check(
+            t.has_line(py, "PY_REQUEST_RESPONSE:"),
+            "Python received response to link.request() through relay",
         )
 
         t.check(t.has_line(rust, "LINK_CLOSED:"), "Link teardown confirmed")

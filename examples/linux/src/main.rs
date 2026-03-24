@@ -18,8 +18,8 @@ use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
 use rete_lxmf::{LXMessage, LxmfEvent, LxmfRouter};
-use rete_stack::OutboundPacket;
-use rete_tokio::local::{LocalClient, LocalServer};
+use rete_stack::{OutboundPacket, RequestHandler, RequestPolicy};
+use rete_tokio::local::{LocalServer, ReconnectingLocalClient};
 use rete_tokio::{interface_task, InboundMsg, NodeCommand, NodeEvent, TokioNode};
 
 use std::cell::RefCell;
@@ -553,6 +553,20 @@ async fn main() {
     // Print to stdout for interop test discovery (many tests wait for this line).
     println!("IDENTITY:{}", hex::encode(node.core.dest_hash()));
 
+    // Register /test/echo request handler for interop testing
+    {
+        let dh = *node.core.dest_hash();
+        node.core.register_request_handler(
+            &dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |_path, data, _request_id, _link_id| Some(data.to_vec()),
+                policy: RequestPolicy::AllowAll,
+            },
+        );
+        eprintln!("[rete] registered /test/echo request handler");
+    }
+
     // Register LXMF delivery destination
     let mut lxmf_router = LxmfRouter::register(&mut node.core);
 
@@ -643,16 +657,10 @@ async fn main() {
         .await;
     } else if let Some(ref client_name) = local_client_name {
         // Local client mode: connect to a shared instance server via Unix socket.
-        // Uses single-interface mode (ReteInterface trait).
+        // Uses ReconnectingLocalClient for automatic reconnection with backoff.
         eprintln!("[rete] connecting to local instance '{}' ...", client_name);
-        let mut iface = match LocalClient::connect(client_name).await {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("[rete] failed to connect to local instance: {e}");
-                std::process::exit(1);
-            }
-        };
-        eprintln!("[rete] connected to local instance '{}'", client_name);
+        let mut iface = ReconnectingLocalClient::new(client_name.clone());
+        eprintln!("[rete] local client ready for instance '{}'", client_name);
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,

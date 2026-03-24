@@ -50,25 +50,36 @@ pub struct LocalServer {
     iface_idx: u8,
     /// Connected clients (shared with the broadcast path).
     clients: Arc<tokio::sync::RwLock<Vec<LocalClientEntry>>>,
+    /// Per-client outbound channel capacity.
+    channel_capacity: usize,
 }
 
 impl LocalServer {
     /// Bind to an abstract-namespace Unix socket for the given instance name.
     ///
-    /// Returns the server and a sender that the main loop should use to
-    /// broadcast outbound packets to all local clients.
-    ///
-    /// The `inbound_tx` and `iface_idx` are used to forward client packets
-    /// into the node's multi-interface inbound channel.
+    /// Uses default channel capacity (64). See [`bind_with_config`](Self::bind_with_config)
+    /// for configurable capacity.
     pub fn bind(
         instance_name: &str,
         inbound_tx: mpsc::Sender<InboundMsg>,
         iface_idx: u8,
     ) -> io::Result<Self> {
-        // Abstract namespace socket: path starts with \0
-        let path = format!("\0rns/{}", instance_name);
+        Self::bind_with_config(
+            instance_name,
+            inbound_tx,
+            iface_idx,
+            LocalServerConfig::default(),
+        )
+    }
 
-        // tokio UnixListener::bind with abstract namespace
+    /// Bind with explicit configuration.
+    pub fn bind_with_config(
+        instance_name: &str,
+        inbound_tx: mpsc::Sender<InboundMsg>,
+        iface_idx: u8,
+        config: LocalServerConfig,
+    ) -> io::Result<Self> {
+        let path = format!("\0rns/{}", instance_name);
         let listener = UnixListener::bind(path)?;
 
         Ok(LocalServer {
@@ -76,6 +87,7 @@ impl LocalServer {
             inbound_tx,
             iface_idx,
             clients: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            channel_capacity: config.channel_capacity,
         })
     }
 
@@ -96,7 +108,7 @@ impl LocalServer {
                     let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
                     eprintln!("[rete-local] client {} connected", client_id);
 
-                    let (client_tx, client_rx) = mpsc::channel::<Vec<u8>>(64);
+                    let (client_tx, client_rx) = mpsc::channel::<Vec<u8>>(self.channel_capacity);
 
                     // Register client
                     {
@@ -111,17 +123,28 @@ impl LocalServer {
                     let (read_half, write_half) = stream.into_split();
 
                     // Write task: sends HDLC-framed packets to the client
-                    tokio::spawn(client_write_task(write_half, client_rx));
+                    let write_handle = tokio::spawn(client_write_task(write_half, client_rx));
 
                     // Read task: reads HDLC-framed packets from the client,
                     // forwards to the node inbound channel and broadcasts to
-                    // other clients
+                    // other clients.  We race the read against the write
+                    // handle so that a write failure immediately cancels the
+                    // read (no zombie half-connections).
                     let inbound_tx = self.inbound_tx.clone();
                     let iface_idx = self.iface_idx;
                     let clients = Arc::clone(&self.clients);
                     tokio::spawn(async move {
-                        client_read_task(read_half, inbound_tx, iface_idx, client_id, &clients)
-                            .await;
+                        let read_fut =
+                            client_read_task(read_half, inbound_tx, iface_idx, client_id, &clients);
+                        tokio::select! {
+                            _ = read_fut => {},
+                            _ = write_handle => {
+                                log::debug!(
+                                    "[rete-local] write task exited, terminating read for client {}",
+                                    client_id,
+                                );
+                            },
+                        }
 
                         // Client disconnected — remove from list
                         let mut clients = clients.write().await;
@@ -166,7 +189,9 @@ impl LocalBroadcaster {
         };
         let payload = data.to_vec();
         for tx in senders {
-            let _ = tx.send(payload.clone()).await;
+            if tx.send(payload.clone()).await.is_err() {
+                log::debug!("[rete-local] broadcast send to client failed (disconnected or full)");
+            }
         }
     }
 
@@ -186,10 +211,12 @@ async fn client_write_task(
     while let Some(data) = rx.recv().await {
         match hdlc::encode(&data, &mut encoded) {
             Ok(n) => {
-                if writer.write_all(&encoded[..n]).await.is_err() {
+                if let Err(e) = writer.write_all(&encoded[..n]).await {
+                    log::debug!("[rete-local] client write failed: {e}");
                     break;
                 }
-                if writer.flush().await.is_err() {
+                if let Err(e) = writer.flush().await {
+                    log::debug!("[rete-local] client flush failed: {e}");
                     break;
                 }
             }
@@ -245,7 +272,9 @@ async fn client_read_task(
                             .collect()
                     };
                     for tx in senders {
-                        let _ = tx.send(data.clone()).await;
+                        if tx.send(data.clone()).await.is_err() {
+                            log::debug!("[rete-local] relay send to peer client failed");
+                        }
                     }
                 }
             }
@@ -349,6 +378,138 @@ impl ReteInterface for LocalClient {
             }
             self.read_pos = 0;
             self.read_len = n;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReconnectingLocalClient — auto-reconnect wrapper
+// ---------------------------------------------------------------------------
+
+/// A [`LocalClient`] wrapper that reconnects with exponential backoff.
+///
+/// If the server restarts or the connection drops, this client will
+/// automatically re-establish the connection on the next send/recv.
+/// Gives up after `connect_timeout` (default: 2 minutes) and returns
+/// an error so the caller can decide what to do.
+pub struct ReconnectingLocalClient {
+    instance_name: String,
+    inner: Option<LocalClient>,
+    base_delay: std::time::Duration,
+    max_delay: std::time::Duration,
+    connect_timeout: std::time::Duration,
+}
+
+impl ReconnectingLocalClient {
+    /// Create a reconnecting client for the given shared instance name.
+    pub fn new(instance_name: String) -> Self {
+        Self {
+            instance_name,
+            inner: None,
+            base_delay: std::time::Duration::from_secs(1),
+            max_delay: std::time::Duration::from_secs(16),
+            connect_timeout: std::time::Duration::from_secs(120),
+        }
+    }
+
+    /// Attempt to connect (or reconnect) with exponential backoff.
+    ///
+    /// Returns an error if the connection cannot be established within
+    /// `connect_timeout`.
+    async fn ensure_connected(&mut self) -> Result<(), LocalError> {
+        if self.inner.is_some() {
+            return Ok(());
+        }
+
+        let deadline = tokio::time::Instant::now() + self.connect_timeout;
+        let mut delay = self.base_delay;
+        loop {
+            match LocalClient::connect(&self.instance_name).await {
+                Ok(client) => {
+                    log::info!(
+                        "[rete-local] connected to shared instance '{}'",
+                        self.instance_name,
+                    );
+                    self.inner = Some(client);
+                    return Ok(());
+                }
+                Err(e) => {
+                    if tokio::time::Instant::now() + delay > deadline {
+                        log::warn!(
+                            "[rete-local] connect to '{}' timed out after {:?}",
+                            self.instance_name,
+                            self.connect_timeout,
+                        );
+                        return Err(LocalError::Io(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "connect to '{}' timed out after {:?}",
+                                self.instance_name, self.connect_timeout,
+                            ),
+                        )));
+                    }
+                    log::debug!(
+                        "[rete-local] reconnect to '{}' failed: {e}, retrying in {:?}",
+                        self.instance_name,
+                        delay,
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(self.max_delay);
+                }
+            }
+        }
+    }
+}
+
+impl ReteInterface for ReconnectingLocalClient {
+    type Error = LocalError;
+
+    async fn send(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
+        self.ensure_connected().await?;
+        let client = self.inner.as_mut().unwrap();
+        match client.send(frame).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                log::debug!("[rete-local] send failed, will reconnect: {e}");
+                self.inner = None;
+                Err(e)
+            }
+        }
+    }
+
+    async fn recv<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a [u8], Self::Error> {
+        loop {
+            self.ensure_connected().await?;
+            let client = self.inner.as_mut().unwrap();
+            match client.recv(buf).await {
+                Ok(data) => {
+                    let len = data.len();
+                    return Ok(&buf[..len]);
+                }
+                Err(e) => {
+                    log::debug!("[rete-local] recv failed, will reconnect: {e}");
+                    self.inner = None;
+                    // Loop back to reconnect
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LocalServerConfig — configurable server parameters
+// ---------------------------------------------------------------------------
+
+/// Configuration for [`LocalServer`].
+pub struct LocalServerConfig {
+    /// Per-client outbound channel capacity (default: 64).
+    pub channel_capacity: usize,
+}
+
+impl Default for LocalServerConfig {
+    fn default() -> Self {
+        Self {
+            channel_capacity: 64,
         }
     }
 }
