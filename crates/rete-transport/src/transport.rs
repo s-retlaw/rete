@@ -353,6 +353,23 @@ pub struct Transport<
     announce_rate: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], AnnounceRateEntry, MAX_PATHS>,
     /// Path request throttling: dest_hash → last_request_time.
     path_request_times: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], u64, MAX_PATHS>,
+    /// Pending split resource segments waiting to be advertised.
+    /// When a split sender resource's proof is received, the next segment is
+    /// popped from here, processed, and advertised.
+    split_send_queue: alloc::vec::Vec<SplitSendEntry>,
+}
+
+/// Queued data for a pending split resource segment.
+struct SplitSendEntry {
+    link_id: [u8; TRUNCATED_HASH_LEN],
+    /// Group key: resource_hash of segment 1.
+    original_hash: [u8; 32],
+    /// 1-based index of the next segment to send.
+    next_segment: usize,
+    /// Total split segments.
+    split_total: usize,
+    /// Plaintext data (full). Each segment reads its slice at send time.
+    data: alloc::vec::Vec<u8>,
 }
 
 /// Per-destination announce rate tracking entry.
@@ -391,6 +408,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             link_table: FnvIndexMap::new(),
             announce_rate: FnvIndexMap::new(),
             path_request_times: FnvIndexMap::new(),
+            split_send_queue: alloc::vec::Vec::new(),
         }
     }
 
@@ -1781,13 +1799,33 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 }) {
                     let mut rh = [0u8; TRUNCATED_HASH_LEN];
                     rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
+                    let is_split = res.split_total > 1;
+                    let is_final_segment = res.split_index >= res.split_total;
+                    let original_hash = res.original_hash;
                     if res.handle_proof(decrypted) {
-                        IngestResult::ResourceComplete {
-                            link_id: *link_id,
-                            resource_hash: rh,
-                            data: alloc::vec::Vec::new(), // sender doesn't return data
+                        // For split resources: if non-final, advertise next segment
+                        if is_split && !is_final_segment {
+                            if let Some(adv_pkt) =
+                                self.advertise_next_split_segment(link_id, &original_hash, rng)
+                            {
+                                self.resource_outbound.push(adv_pkt);
+                            }
+                            // Return Duplicate so NodeCore doesn't emit ResourceComplete yet
+                            IngestResult::Duplicate
+                        } else {
+                            IngestResult::ResourceComplete {
+                                link_id: *link_id,
+                                resource_hash: rh,
+                                data: alloc::vec::Vec::new(), // sender doesn't return data
+                            }
                         }
                     } else {
+                        // Proof failed — clean up split queue
+                        if is_split {
+                            self.split_send_queue.retain(|e| {
+                                !(e.link_id == *link_id && e.original_hash == original_hash)
+                            });
+                        }
                         IngestResult::ResourceFailed {
                             link_id: *link_id,
                             resource_hash: rh,
@@ -2347,78 +2385,198 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         compressed: bool,
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
-        // Step 1: Check link is active, extract peer MTU, and encrypt data
-        let (encrypted, peer_mtu) = {
-            let link = self.links.get(link_id)?;
-            if !link.is_active() {
-                return None;
-            }
-            let mtu = decode_mtu(&link.signalling) as usize;
+        use crate::resource::MAX_EFFICIENT_SIZE;
 
-            // Prepend 4 random bytes (Python: self.data = os.urandom(4) + self.data)
-            let mut prepended = alloc::vec::Vec::with_capacity(4 + data.len());
-            let mut prepend_bytes = [0u8; 4];
-            rng.fill_bytes(&mut prepend_bytes);
-            prepended.extend_from_slice(&prepend_bytes);
-            prepended.extend_from_slice(data);
+        // Check if this needs to be split into multiple segments.
+        // Python splits based on original plaintext size (including metadata,
+        // but we don't use metadata). The split operates on pre-compression data.
+        if original_data.len() > MAX_EFFICIENT_SIZE {
+            return self.start_split_resource(link_id, original_data, rng);
+        }
 
-            // Encrypt via link Token (Python: self.data = self.link.encrypt(self.data))
-            // Token overhead: 16 (IV) + padding + 32 (HMAC)
-            let max_ct_len = 16 + ((prepended.len() / 16) + 1) * 16 + 32;
-            let mut ct_buf = alloc::vec![0u8; max_ct_len];
-            let ct_len = link.encrypt(&prepended, rng, &mut ct_buf).ok()?;
-            ct_buf.truncate(ct_len);
-            (ct_buf, mtu)
-        };
+        self.start_single_resource(link_id, data, original_data, compressed, rng)
+    }
 
-        // Step 2: Create Resource from the encrypted blob.
-        // SDU = link.mtu - HEADER_MAXSIZE(35) - IFAC_MIN_SIZE(1).
-        // Python: self.sdu = self.link.mtu - RNS.Reticulum.HEADER_MAXSIZE - RNS.Reticulum.IFAC_MIN_SIZE
-        // For TCP links (mtu=8192), SDU=8156. For radio (mtu=500), SDU=464.
+    /// Start a single (non-split) resource transfer.
+    fn start_single_resource<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+        original_data: &[u8],
+        compressed: bool,
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let (pkt, _) = self.prepare_and_advertise_segment(
+            link_id,
+            data,
+            original_data,
+            compressed,
+            None,
+            rng,
+        )?;
+        Some(pkt)
+    }
+
+    /// Start a split resource transfer (data > MAX_EFFICIENT_SIZE).
+    ///
+    /// Splits the input data into segments of MAX_EFFICIENT_SIZE bytes each,
+    /// processes segment 1 (prepend, encrypt, create Resource, advertise),
+    /// and queues remaining segments for later (advertised on proof receipt).
+    fn start_split_resource<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        original_data: &[u8],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        use crate::resource::MAX_EFFICIENT_SIZE;
+
+        let total_size = original_data.len();
+        let split_total = ((total_size - 1) / MAX_EFFICIENT_SIZE) + 1;
+
+        // Process segment 1 (uncompressed — split resources skip whole-blob compression)
+        let seg1_end = MAX_EFFICIENT_SIZE.min(total_size);
+        let seg1_data = &original_data[..seg1_end];
+
+        // For segment 1, pass [0;32] as original_hash — the helper will use
+        // segment 1's own resource_hash as the group key.
+        let (pkt, seg1_hash) = self.prepare_and_advertise_segment(
+            link_id,
+            seg1_data,
+            seg1_data,
+            false,
+            Some((1, split_total, [0u8; 32])),
+            rng,
+        )?;
+
+        // Queue remaining data for later segments (only the tail after segment 1)
+        self.split_send_queue.push(SplitSendEntry {
+            link_id: *link_id,
+            original_hash: seg1_hash,
+            next_segment: 2,
+            split_total,
+            data: original_data[seg1_end..].to_vec(),
+        });
+
+        Some(pkt)
+    }
+
+    /// Prepend 4 random bytes and encrypt data via link Token.
+    fn prepend_and_encrypt<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+        rng: &mut R,
+    ) -> Option<(alloc::vec::Vec<u8>, usize)> {
+        let link = self.links.get(link_id)?;
+        if !link.is_active() {
+            return None;
+        }
+        let mtu = decode_mtu(&link.signalling) as usize;
+
+        let mut prepended = alloc::vec::Vec::with_capacity(4 + data.len());
+        let mut prepend_bytes = [0u8; 4];
+        rng.fill_bytes(&mut prepend_bytes);
+        prepended.extend_from_slice(&prepend_bytes);
+        prepended.extend_from_slice(data);
+
+        let max_ct_len = 16 + ((prepended.len() / 16) + 1) * 16 + 32;
+        let mut ct_buf = alloc::vec![0u8; max_ct_len];
+        let ct_len = link.encrypt(&prepended, rng, &mut ct_buf).ok()?;
+        ct_buf.truncate(ct_len);
+        Some((ct_buf, mtu))
+    }
+
+    /// Compute SDU and link_mdu from peer MTU.
+    fn compute_sdu_and_link_mdu(peer_mtu: usize) -> (usize, usize) {
         let sdu = if peer_mtu > 36 { peer_mtu - 36 } else { 464 };
-        // Link MDU: largest plaintext fitting in one link-encrypted packet.
-        // Formula: floor((mtu - 1 - HEADER_1_OVERHEAD(19) - TOKEN_OVERHEAD(48)) / 16) * 16 - 1
-        // For radio (mtu=500) = 431; for TCP (mtu=8192) = 8111.
         let link_mdu = if peer_mtu > 68 {
             ((peer_mtu - 68) / 16) * 16 - 1
         } else {
             crate::link::LINK_MDU
         };
-        debug_assert!(
-            link_mdu > 0 && link_mdu <= peer_mtu,
-            "link_mdu={link_mdu} peer_mtu={peer_mtu}"
+        (sdu, link_mdu)
+    }
+
+    /// Override resource_hash to match Python convention: SHA-256(plaintext || random_hash).
+    /// Only sets `resource_hash`; caller is responsible for `original_hash`.
+    fn override_resource_hash(resource: &mut Resource, original_data: &[u8]) {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(original_data);
+        hasher.update(resource.random_hash);
+        resource.resource_hash = hasher.finalize().into();
+    }
+
+    /// Create an outbound Resource from data, encrypt it, build the
+    /// advertisement packet, and push the Resource to self.resources.
+    ///
+    /// `send_data` is what gets encrypted (may be compressed).
+    /// `original_data` is the uncompressed plaintext (used for resource_hash
+    /// and proof validation). For uncompressed resources, pass the same slice.
+    /// `split` optionally sets split metadata: (split_index, split_total, original_hash).
+    ///
+    /// Returns (advertisement_packet, resource_hash).
+    fn prepare_and_advertise_segment<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        send_data: &[u8],
+        original_data: &[u8],
+        compressed: bool,
+        split: Option<(usize, usize, [u8; 32])>,
+        rng: &mut R,
+    ) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
+        let (encrypted, peer_mtu) = self.prepend_and_encrypt(link_id, send_data, rng)?;
+        let (sdu, link_mdu) = Self::compute_sdu_and_link_mdu(peer_mtu);
+        let mut resource = Resource::new_outbound(
+            &encrypted,
+            *link_id,
+            sdu,
+            original_data.len(),
+            link_mdu,
+            rng,
         );
-        debug_assert!(sdu > 0 && sdu <= peer_mtu, "sdu={sdu} peer_mtu={peer_mtu}");
-        let original_size = original_data.len();
-        let mut resource =
-            Resource::new_outbound(&encrypted, *link_id, sdu, original_size, link_mdu, rng);
-        // Set the encrypted flag (Python: self.flags |= Resource.FLAG_ENCRYPTED)
         resource.flags.encrypted = true;
         resource.flags.compressed = compressed;
 
-        // Python computes resource_hash from the ORIGINAL PLAINTEXT (the `data`
-        // parameter of Resource.__init__), not the encrypted blob. Override the
-        // hash to match Python convention: SHA-256(plaintext || random_hash).
-        {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(original_data); // original plaintext
-            hasher.update(resource.random_hash);
-            resource.resource_hash = hasher.finalize().into();
-        }
-        // Also store the original plaintext in resource.data for proof validation.
-        // Python receiver proves with SHA-256(plaintext || resource_hash), so the
-        // sender needs the plaintext (not ciphertext) for handle_proof verification.
+        Self::override_resource_hash(&mut resource, original_data);
         resource.data = original_data.to_vec();
 
+        if let Some((split_index, split_total, original_hash)) = split {
+            resource.split_index = split_index;
+            resource.split_total = split_total;
+            resource.flags.is_split = true;
+            // For segment 1, original_hash == [0;32] means "use this segment's hash"
+            resource.original_hash = if original_hash == [0u8; 32] {
+                resource.resource_hash
+            } else {
+                original_hash
+            };
+        }
+
+        let resource_hash = resource.resource_hash;
         let adv = resource.build_advertisement();
+        let pkt = self.encrypt_and_build_adv(link_id, &adv, rng)?;
 
-        // Step 3: Encrypt advertisement and build packet
+        self.resources.push(resource);
+        Some((pkt, resource_hash))
+    }
+
+    /// Encrypt an advertisement payload and build the RESOURCE_ADV packet.
+    fn encrypt_and_build_adv<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        adv: &[u8],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
         let link = self.links.get(link_id)?;
-        let mut adv_ct_buf = [0u8; rete_core::MTU];
-        let adv_ct_len = link.encrypt(&adv, rng, &mut adv_ct_buf).ok()?;
+        let peer_mtu = decode_mtu(&link.signalling) as usize;
+        // Use peer MTU for buffer size: TCP links (MTU=8192) produce larger
+        // advertisements with more part hashes in the hashmap.
+        let buf_size = peer_mtu.max(rete_core::MTU);
+        let mut adv_ct_buf = alloc::vec![0u8; buf_size];
+        let adv_ct_len = link.encrypt(adv, rng, &mut adv_ct_buf).ok()?;
 
-        let mut pkt_buf = [0u8; rete_core::MTU];
+        let mut pkt_buf = alloc::vec![0u8; buf_size];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
@@ -2428,8 +2586,56 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             .build()
             .ok()?;
 
-        self.resources.push(resource);
         Some(pkt_buf[..pkt_len].to_vec())
+    }
+
+    /// Advertise the next split segment after proof receipt.
+    /// Returns the advertisement packet to send, or None if no more segments.
+    fn advertise_next_split_segment<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        original_hash: &[u8; 32],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        use crate::resource::MAX_EFFICIENT_SIZE;
+
+        let entry_idx = self
+            .split_send_queue
+            .iter()
+            .position(|e| e.link_id == *link_id && e.original_hash == *original_hash)?;
+
+        let seg_idx = self.split_send_queue[entry_idx].next_segment;
+        let split_total = self.split_send_queue[entry_idx].split_total;
+
+        if seg_idx > split_total {
+            self.split_send_queue.swap_remove(entry_idx);
+            return None;
+        }
+
+        // Queue data starts at segment 2, so offset from segment 2
+        let data_len = self.split_send_queue[entry_idx].data.len();
+        let seg_start = (seg_idx - 2) * MAX_EFFICIENT_SIZE;
+        let seg_end = (seg_start + MAX_EFFICIENT_SIZE).min(data_len);
+        let seg_data = self.split_send_queue[entry_idx].data[seg_start..seg_end].to_vec();
+        let oh = *original_hash;
+
+        let (pkt, _) = self.prepare_and_advertise_segment(
+            link_id,
+            &seg_data,
+            &seg_data,
+            false,
+            Some((seg_idx, split_total, oh)),
+            rng,
+        )?;
+
+        // Advance or remove queue entry
+        let entry = &mut self.split_send_queue[entry_idx];
+        entry.next_segment += 1;
+        if entry.next_segment > entry.split_total {
+            self.split_send_queue.swap_remove(entry_idx);
+        }
+
+        Some(pkt)
     }
 
     /// Accept a resource offer and build the first request.

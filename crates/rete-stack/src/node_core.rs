@@ -148,6 +148,19 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     packet_log_fn: Option<fn(&[u8], &str, u8)>,
     /// Optional ProveApp callback for per-packet proof decisions.
     prove_app_fn: Option<ProveAppFn>,
+    /// Buffer for partially-received split resources.
+    /// Each entry holds decrypted+decompressed data from completed non-final segments,
+    /// keyed by (link_id, original_hash). When the final segment arrives, all buffered
+    /// segment data is concatenated and delivered as ResourceComplete.
+    split_recv_buf: Vec<SplitRecvEntry>,
+}
+
+/// Buffer entry for a partially-received split resource.
+struct SplitRecvEntry {
+    link_id: [u8; TRUNCATED_HASH_LEN],
+    original_hash: [u8; 32],
+    /// Accumulated plaintext data from completed segments, in order.
+    data: Vec<u8>,
 }
 
 /// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
@@ -198,6 +211,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             compress_fn: None,
             packet_log_fn: None,
             prove_app_fn: None,
+            split_recv_buf: Vec::new(),
         }
     }
 
@@ -752,6 +766,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         rng: &mut R,
     ) -> Option<OutboundPacket> {
         use alloc::borrow::Cow;
+        use rete_transport::resource::MAX_EFFICIENT_SIZE;
+
+        // For split resources (data > MAX_EFFICIENT_SIZE), skip whole-blob
+        // compression. Each segment will be compressed independently by the
+        // transport layer. Compressed data can't be split at arbitrary boundaries.
+        if data.len() > MAX_EFFICIENT_SIZE {
+            let pkt = self
+                .transport
+                .start_resource(link_id, data, data, false, rng)?;
+            return Some(OutboundPacket::broadcast(pkt));
+        }
 
         let compressed = self
             .compress_fn
@@ -1121,17 +1146,20 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 let mut packets = Vec::new();
                 // If all parts received, assemble and send proof
                 if current == total && total > 0 {
-                    // Step 1: Assemble encrypted parts and get compressed flag
-                    let (assembly_result, is_compressed) = {
+                    // Step 1: Assemble encrypted parts, get flags and split metadata
+                    let (assembly_result, is_compressed, split_index, split_total, original_hash) = {
                         if let Some(res) = self.transport.get_resource_mut(&link_id, &resource_hash)
                         {
                             let compressed = res.flags.compressed;
+                            let si = res.split_index;
+                            let st = res.split_total;
+                            let oh = res.original_hash;
                             match res.assemble() {
-                                Ok(data) => (Some(Ok(data)), compressed),
-                                Err(_) => (Some(Err(())), compressed),
+                                Ok(data) => (Some(Ok(data)), compressed, si, st, oh),
+                                Err(_) => (Some(Err(())), compressed, si, st, oh),
                             }
                         } else {
-                            (None, false)
+                            (None, false, 1, 1, [0u8; 32])
                         }
                     };
 
@@ -1197,6 +1225,57 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         }
                         // Clean up completed receiver resource
                         self.transport.cleanup_resources();
+
+                        // Step 6: Handle split resources
+                        // Truncate original_hash to 16 bytes for NodeEvent resource_hash field
+                        let mut oh_trunc = [0u8; TRUNCATED_HASH_LEN];
+                        oh_trunc.copy_from_slice(&original_hash[..TRUNCATED_HASH_LEN]);
+
+                        if split_total > 1 && split_index < split_total {
+                            // Non-final split segment: buffer data, wait for next
+                            if let Some(entry) = self
+                                .split_recv_buf
+                                .iter_mut()
+                                .find(|e| e.link_id == link_id && e.original_hash == original_hash)
+                            {
+                                entry.data.extend_from_slice(&plaintext);
+                            } else {
+                                self.split_recv_buf.push(SplitRecvEntry {
+                                    link_id,
+                                    original_hash,
+                                    data: plaintext,
+                                });
+                            }
+                            return IngestOutcome {
+                                event: Some(NodeEvent::ResourceProgress {
+                                    link_id,
+                                    resource_hash: oh_trunc,
+                                    current: split_index,
+                                    total: split_total,
+                                }),
+                                packets,
+                            };
+                        } else if split_total > 1 && split_index == split_total {
+                            // Final split segment: concatenate all buffered data
+                            let mut full_data = Vec::new();
+                            if let Some(idx) = self.split_recv_buf.iter().position(|e| {
+                                e.link_id == link_id && e.original_hash == original_hash
+                            }) {
+                                let entry = self.split_recv_buf.swap_remove(idx);
+                                full_data = entry.data;
+                            }
+                            full_data.extend_from_slice(&plaintext);
+                            return IngestOutcome {
+                                event: Some(NodeEvent::ResourceComplete {
+                                    link_id,
+                                    resource_hash: oh_trunc,
+                                    data: full_data,
+                                }),
+                                packets,
+                            };
+                        }
+
+                        // Non-split resource: deliver directly
                         return IngestOutcome {
                             event: Some(NodeEvent::ResourceComplete {
                                 link_id,
@@ -1210,6 +1289,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                             packets.push(OutboundPacket::broadcast(pkt));
                         }
                         self.transport.cleanup_resources();
+
+                        // Clean up split buffer on failure
+                        if split_total > 1 {
+                            if let Some(idx) = self.split_recv_buf.iter().position(|e| {
+                                e.link_id == link_id && e.original_hash == original_hash
+                            }) {
+                                self.split_recv_buf.swap_remove(idx);
+                            }
+                        }
+
                         return IngestOutcome {
                             event: Some(NodeEvent::ResourceFailed {
                                 link_id,

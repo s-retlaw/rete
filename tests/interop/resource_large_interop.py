@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""E2E: Large resource transfer -- 10KB single-segment resource transfer.
+"""E2E: 50KB resource transfer with data integrity verification.
 
-Validates resource transfer with logically large data (10KB) that compresses
-to fit in a single resource segment. Multi-segment resource transfers are
-tracked as a known limitation (see GAP_ANALYSIS.md).
+Validates multi-segment resource transfer with incompressible binary data
+(bytes(range(256)) repeated). Exercises multiple HMU rounds and window growth.
 
 The test verifies:
   1. Path discovery
   2. Link establishment
-  3. 10KB resource transfer (compresses to ~160 bytes)
-  4. Data integrity check on Rust side
+  3. 50KB resource transfer completes (Python sender confirms)
+  4. Rust receiver confirms receipt
+  5. Data integrity: received size on Rust side matches sent size
 """
 
 import time
@@ -104,21 +104,27 @@ print("PY_DONE", flush=True)
         complete = t.wait_for_line(py, "PY_RESOURCE_COMPLETE", timeout=65)
         t.check(complete is not None, "50KB resource transfer completed (Python)")
 
-        # Verify Rust received it
+        # Verify Rust received it and check data integrity
+        # RESOURCE_COMPLETE format: RESOURCE_COMPLETE:<link_id>:<hash>:<data_hex>
+        # Binary data is hex-encoded, so 51200 bytes = 102400 hex chars
         resource_complete = t.wait_for_line(rust, "RESOURCE_COMPLETE", timeout=10)
         t.check(resource_complete is not None, "Rust confirmed resource receipt")
 
-        # Check data size on Rust side (50KB = 51200 bytes)
         rust_size_ok = False
+        received_size = 0
         for line in rust:
-            if "RESOURCE_COMPLETE" in line and "size=" in line:
-                try:
-                    size = int(line.split("size=")[1].split()[0])
-                    rust_size_ok = size >= 50000
-                except (ValueError, IndexError):
-                    pass
+            if "RESOURCE_COMPLETE:" in line:
+                parts = line.split(":", 3)
+                if len(parts) >= 4:
+                    data_hex = parts[3]
+                    received_size = len(data_hex) // 2  # hex -> bytes
+                    rust_size_ok = received_size >= 50000
                 break
-        t.check(rust_size_ok, "Resource data size verified on Rust side (>=50KB)")
+        t.check(
+            rust_size_ok,
+            "Resource data size verified on Rust side (>=50KB)",
+            detail=f"received {received_size} bytes" if not rust_size_ok else None,
+        )
 
         done = t.wait_for_line(py, "PY_DONE")
         t.check(done is not None, "Test completed")

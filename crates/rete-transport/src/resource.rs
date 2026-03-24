@@ -700,6 +700,22 @@ pub struct Resource {
     /// Last activity timestamp (monotonic seconds).
     pub last_activity: u64,
 
+    // -- Split resource fields --
+    // When a resource exceeds MAX_EFFICIENT_SIZE, it is split into multiple
+    // independent segment transfers. Each segment is a complete Resource with
+    // its own advertisement/parts/proof cycle. These fields track the split
+    // metadata. For non-split resources: split_index=1, split_total=1,
+    // original_hash=resource_hash.
+    /// 1-based index of this segment within a split resource group.
+    /// Advertisement field "i". Always 1 for non-split resources.
+    pub split_index: usize,
+    /// Total number of split segments in the group.
+    /// Advertisement field "l". Always 1 for non-split resources.
+    pub split_total: usize,
+    /// Group key for split resources: the resource_hash of segment 1.
+    /// Advertisement field "o". Equals resource_hash for non-split resources.
+    pub original_hash: [u8; 32],
+
     /// Optional metadata (filename, MIME type, etc.) — msgpack-encoded.
     /// Prepended to first segment when `flags.has_metadata` is set.
     pub metadata: Option<Vec<u8>>,
@@ -809,6 +825,9 @@ impl Resource {
             mdu,
             retries: 0,
             last_activity: 0,
+            split_index: 1,
+            split_total: 1,
+            original_hash: resource_hash,
             metadata: None,
             data: data.to_vec(),
             parts,
@@ -870,17 +889,17 @@ impl Resource {
         write_msgpack_fixstr1(&mut buf, b'r');
         write_msgpack_bin(&mut buf, &self.random_hash);
 
-        // "o" = original_hash (same as resource_hash for non-split resources)
+        // "o" = original_hash (group key for split resources, or resource_hash for non-split)
         write_msgpack_fixstr1(&mut buf, b'o');
-        write_msgpack_bin(&mut buf, &self.resource_hash);
+        write_msgpack_bin(&mut buf, &self.original_hash);
 
-        // "i" = segment_index (1 for non-split, matching Python RNS convention)
+        // "i" = split segment index (1-based, matching Python RNS convention)
         write_msgpack_fixstr1(&mut buf, b'i');
-        write_msgpack_uint(&mut buf, 1);
+        write_msgpack_uint(&mut buf, self.split_index as u64);
 
-        // "l" = total_segments for split (1 for non-split, matching Python RNS convention)
+        // "l" = total split segments (1 for non-split, matching Python RNS convention)
         write_msgpack_fixstr1(&mut buf, b'l');
-        write_msgpack_uint(&mut buf, 1);
+        write_msgpack_uint(&mut buf, self.split_total as u64);
 
         // "q" = request_id (None for normal resources)
         write_msgpack_fixstr1(&mut buf, b'q');
@@ -1110,9 +1129,9 @@ impl Resource {
         let mut num_parts: Option<usize> = None;
         let mut resource_hash_bytes: Option<[u8; 32]> = None;
         let mut random_hash_bytes: Option<[u8; RANDOM_HASH_SIZE]> = None;
-        let mut _original_hash: Option<[u8; 32]> = None;
-        let mut _segment_index: usize = 0;
-        let mut _total_split_segments: usize = 0;
+        let mut original_hash_parsed: Option<[u8; 32]> = None;
+        let mut split_index: usize = 1;
+        let mut split_total: usize = 1;
         let mut _request_id: Option<Vec<u8>> = None;
         let mut flags_byte: u8 = 0;
         let mut hashmap_raw: Option<&[u8]> = None;
@@ -1160,18 +1179,18 @@ impl Resource {
                         Some(oh) if oh.len() == 32 => {
                             let mut arr = [0u8; 32];
                             arr.copy_from_slice(oh);
-                            _original_hash = Some(arr);
+                            original_hash_parsed = Some(arr);
                         }
                         _ => {} // None or wrong size
                     }
                 }
                 b'i' => {
-                    _segment_index =
-                        read_msgpack_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(0) as usize;
+                    split_index =
+                        read_msgpack_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(1) as usize;
                 }
                 b'l' => {
-                    _total_split_segments =
-                        read_msgpack_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(0) as usize;
+                    split_total =
+                        read_msgpack_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(1) as usize;
                 }
                 b'q' => {
                     // request_id: can be nil, bin, or str
@@ -1222,6 +1241,10 @@ impl Resource {
             ph.copy_from_slice(&hashmap_bytes[start..start + MAPHASH_LEN]);
         }
 
+        // For split resources, original_hash is the group key (segment 1's hash).
+        // For non-split resources, default to this resource's own hash.
+        let original_hash = original_hash_parsed.unwrap_or(resource_hash);
+
         Ok(Resource {
             state: ResourceState::Transferring,
             is_sender: false,
@@ -1237,6 +1260,9 @@ impl Resource {
             mdu: 0, // receiver doesn't need to know the MDU
             retries: 0,
             last_activity: 0,
+            split_index,
+            split_total,
+            original_hash,
             metadata: None,
             data: Vec::new(),
             parts: vec![Vec::new(); total_segments],

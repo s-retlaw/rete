@@ -7,9 +7,9 @@ Topology:
   Python client connects as TCP client (with IFAC)
 
 Assertions:
-  1. Python sends 400-byte DATA through IFAC → Rust receives intact
-  2. Rust auto-replies with payload → Python receives
-  3. Rust reports IFAC enabled
+  1. Python sends 300-byte DATA through IFAC → Rust receives intact (all 300 bytes)
+  2. Rust auto-replies with payload → Python receives through IFAC
+  3. Full 300-byte payload verified (not truncated by IFAC overhead)
 
 Usage:
   cd tests/interop
@@ -145,26 +145,31 @@ print("PY_DONE", flush=True)
         t.dump_output("Python output", py)
         t.dump_output("Rust stdout", rust)
 
-        # --- Assertion 1: Rust received large packet through IFAC ---
-        # Check that Rust received data containing 300 'A's
+        # --- Assertion 1: Rust received the full 300-byte payload through IFAC ---
         rust_data_lines = [l for l in rust if l.startswith("DATA:")]
-        large_received = any("A" * 50 in l for l in rust_data_lines)  # At least 50 As
+        # Extract payload from DATA:<dest_hash>:<payload> format
+        received_payload = ""
+        for line in rust_data_lines:
+            parts = line.split(":", 2)
+            if len(parts) >= 3:
+                received_payload = parts[2]
+                break
         t.check(
-            large_received,
-            "Python sends 300-byte DATA through IFAC, Rust receives intact",
-            detail=f"Data lines: {rust_data_lines[:3]}" if not large_received else None,
+            received_payload == "A" * 300,
+            "Python sends 300-byte DATA through IFAC, Rust receives all 300 bytes intact",
+            detail=f"got {len(received_payload)} bytes" if received_payload != "A" * 300 else None,
         )
 
-        # --- Assertion 2: Python received auto-reply ---
+        # --- Assertion 2: Python received auto-reply with correct content ---
         t.check(
-            t.has_line(py, "PY_DATA_RECEIVED:"),
-            "Rust auto-replies with payload, Python receives through IFAC",
+            t.has_line(py, "PY_DATA_RECEIVED:large reply from rust"),
+            "Rust auto-replies with correct payload, Python receives through IFAC",
         )
 
-        # --- Assertion 3: Rust reports IFAC enabled ---
+        # --- Assertion 3: Bidirectional data integrity through IFAC ---
         t.check(
-            "IFAC enabled" in rust_stderr,
-            "Rust reports IFAC enabled",
+            t.has_line(py, "PY_DATA_RECV_OK"),
+            "Bidirectional IFAC transfer completed successfully",
         )
 
 
