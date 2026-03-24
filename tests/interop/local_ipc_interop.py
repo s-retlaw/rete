@@ -3,8 +3,8 @@
 
 Topology:
   Rust server: connects to rnsd via TCP AND listens on local Unix socket
-  Rust client1: connects to server's local socket
-  Rust client2: connects to server's local socket
+  Rust client1: connects to server's local socket (unique identity)
+  Rust client2: connects to server's local socket (unique identity)
 
 Assertions:
   1. Server starts and connects to rnsd
@@ -12,7 +12,7 @@ Assertions:
   3. Client2 connects to local socket and announces
   4. Client2 receives Client1's announce (relayed by server)
   5. Client1 receives Client2's announce (relayed by server)
-  6. rnsd sees both clients' announces (forwarded by server)
+  6. rnsd sees client announces (forwarded by server via TCP)
 
 Usage:
   cd tests/interop
@@ -39,9 +39,19 @@ def main():
 
         instance_name = f"test_{os.getpid()}"
 
+        # Each node gets a unique identity file so announces have distinct
+        # destination hashes and are not deduplicated.
+        server_id = os.path.join(t.tmpdir, "server_identity")
+        client1_id = os.path.join(t.tmpdir, "client1_identity")
+        client2_id = os.path.join(t.tmpdir, "client2_identity")
+
         # --- Start Rust server (TCP + local socket) ---
         server_lines = t.start_rust(
-            extra_args=["--local-server", instance_name, "--transport"],
+            extra_args=[
+                "--local-server", instance_name,
+                "--transport",
+                "--identity-file", server_id,
+            ],
         )
         time.sleep(3)
 
@@ -50,11 +60,19 @@ def main():
             "Server started and connected to rnsd",
         )
 
+        # Capture server dest hash to exclude from client announce checks
+        server_dest = None
+        for line in server_lines:
+            if line.startswith("IDENTITY:"):
+                server_dest = line.split(":", 1)[1].strip()
+                break
+
         # --- Start Rust client1 (manual Popen, since harness tracks one _rust_proc) ---
         client1_proc = subprocess.Popen(
             [
                 t.rust_binary,
                 "--local-client", instance_name,
+                "--identity-file", client1_id,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -80,6 +98,7 @@ def main():
             [
                 t.rust_binary,
                 "--local-client", instance_name,
+                "--identity-file", client2_id,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -103,11 +122,20 @@ def main():
         # Give time for announces to propagate between clients
         time.sleep(3)
 
-        # --- Assertion 6: rnsd sees both clients' announces ---
-        # Start the checker NOW so it's connected to rnsd before the
-        # Rust server's announce retransmission fires (backoff: 5*2=10s
-        # after first tx). The checker polls path_table until it finds
-        # the paths or times out.
+        # Capture client dest hashes
+        client1_dest = None
+        for line in client1_lines:
+            if line.startswith("IDENTITY:"):
+                client1_dest = line.split(":", 1)[1].strip()
+                break
+
+        client2_dest = None
+        for line in client2_lines:
+            if line.startswith("IDENTITY:"):
+                client2_dest = line.split(":", 1)[1].strip()
+                break
+
+        # --- Assertion 6: rnsd sees client announces ---
         py_check = t.start_py_helper(f"""\
 import RNS
 import os
@@ -168,23 +196,35 @@ print("PY_DONE", flush=True)
             t.dump_output("Client2 stderr (last 300)",
                           c2_stderr.decode(errors="replace")[-300:].strip().split("\n"))
 
+        t._log(f"Server dest:  {server_dest}")
+        t._log(f"Client1 dest: {client1_dest}")
+        t._log(f"Client2 dest: {client2_dest}")
+
         # --- Assertion 4: Client2 received Client1's announce ---
+        # Look for an ANNOUNCE line whose hash matches client1 (not server)
+        def has_announce_from(lines, target_dest):
+            """Check if lines contain an ANNOUNCE: with the target dest hash."""
+            if not target_dest:
+                return False
+            for line in lines:
+                if line.startswith("ANNOUNCE:") and target_dest in line:
+                    return True
+            return False
+
         t.check(
-            t.has_line(client2_lines, "ANNOUNCE:"),
-            "Client2 received announce(s) via local server",
+            has_announce_from(client2_lines, client1_dest),
+            "Client2 received Client1's announce via local server",
+            detail=f"looking for {client1_dest} in client2 output",
         )
 
         # --- Assertion 5: Client1 received Client2's announce ---
         t.check(
-            t.has_line(client1_lines, "ANNOUNCE:"),
-            "Client1 received announce(s) via local server",
+            has_announce_from(client1_lines, client2_dest),
+            "Client1 received Client2's announce via local server",
+            detail=f"looking for {client2_dest} in client1 output",
         )
 
         # --- Assertion 6 result ---
-        # Check that at least 1 client path reached rnsd. Ideally both paths
-        # would appear, but the second retransmission timing vs. the checker's
-        # connection window and rnsd's announce dedup means only 1 reliably
-        # arrives before the checker reads.
         path_lines = [l for l in py_check if l.startswith("PATH:")]
         t.check(
             len(path_lines) >= 1,
