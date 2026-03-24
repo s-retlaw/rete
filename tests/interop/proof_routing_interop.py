@@ -50,50 +50,10 @@ def main():
         rust_dest_hex = t.wait_for_line(rust, "IDENTITY:", timeout=10) or ""
         time.sleep(3)
 
-        # --- Python_B: receiver with PROVE_ALL (connects to rnsd_2) ---
-        py_b = t.start_py_helper(f"""\
-import RNS
-import time
-import os
-import threading
-
-config_dir = os.path.join("{t.tmpdir}", "py_b_config")
-os.makedirs(config_dir, exist_ok=True)
-with open(os.path.join(config_dir, "config"), "w") as cf:
-    cf.write(\"\"\"{t.py_rns_config(port=port2, transport=False)}\"\"\")
-
-reticulum = RNS.Reticulum(configdir=config_dir)
-
-data_received = threading.Event()
-
-def packet_callback(data, packet):
-    text = data.decode("utf-8", errors="replace")
-    print(f"PY_B_DATA_RECEIVED:{{text}}", flush=True)
-    data_received.set()
-
-identity = RNS.Identity()
-dest = RNS.Destination(
-    identity, RNS.Destination.IN, RNS.Destination.SINGLE,
-    "rete", "example", "v1",
-)
-dest.set_proof_strategy(RNS.Destination.PROVE_ALL)
-dest.set_packet_callback(packet_callback)
-dest.announce()
-
-print(f"PY_B_DEST_HASH:{{dest.hexhash}}", flush=True)
-print("PY_B_PROVE_ALL_SET", flush=True)
-
-if data_received.wait(timeout={t.timeout}):
-    print("PY_B_DATA_OK", flush=True)
-else:
-    print("PY_B_DATA_TIMEOUT", flush=True)
-
-# Keep alive for proof to propagate back
-time.sleep(5)
-print("PY_B_DONE", flush=True)
-""")
-
-        # --- Python_A: sender that expects a proof back (connects to rnsd_1) ---
+        # --- Start Python_A FIRST so it is already connected to rnsd_1
+        # when Python_B's announce propagates through the relay chain.
+        # This avoids a race where rnsd_1 forwards the announce before
+        # Python_A has connected. ---
         py_a = t.start_py_helper(f"""\
 import RNS
 import time
@@ -116,6 +76,7 @@ dest = RNS.Destination(
     "rete", "example", "v1",
 )
 dest.announce()
+print("PY_A_READY", flush=True)
 
 # Wait for Python_B's announce (relayed through Rust)
 deadline = time.time() + {t.timeout}
@@ -177,9 +138,56 @@ time.sleep(2)
 print("PY_A_DONE", flush=True)
 """)
 
+        # Wait for Python_A to be connected before starting Python_B
+        t.wait_for_line(py_a, "PY_A_READY", timeout=15)
+        time.sleep(1)
+
+        # --- Python_B: receiver with PROVE_ALL (connects to rnsd_2) ---
+        py_b = t.start_py_helper(f"""\
+import RNS
+import time
+import os
+import threading
+
+config_dir = os.path.join("{t.tmpdir}", "py_b_config")
+os.makedirs(config_dir, exist_ok=True)
+with open(os.path.join(config_dir, "config"), "w") as cf:
+    cf.write(\"\"\"{t.py_rns_config(port=port2, transport=False)}\"\"\")
+
+reticulum = RNS.Reticulum(configdir=config_dir)
+
+data_received = threading.Event()
+
+def packet_callback(data, packet):
+    text = data.decode("utf-8", errors="replace")
+    print(f"PY_B_DATA_RECEIVED:{{text}}", flush=True)
+    data_received.set()
+
+identity = RNS.Identity()
+dest = RNS.Destination(
+    identity, RNS.Destination.IN, RNS.Destination.SINGLE,
+    "rete", "example", "v1",
+)
+dest.set_proof_strategy(RNS.Destination.PROVE_ALL)
+dest.set_packet_callback(packet_callback)
+dest.announce()
+
+print(f"PY_B_DEST_HASH:{{dest.hexhash}}", flush=True)
+print("PY_B_PROVE_ALL_SET", flush=True)
+
+if data_received.wait(timeout={t.timeout}):
+    print("PY_B_DATA_OK", flush=True)
+else:
+    print("PY_B_DATA_TIMEOUT", flush=True)
+
+# Keep alive for proof to propagate back
+time.sleep(5)
+print("PY_B_DONE", flush=True)
+""")
+
         # Wait for both Python helpers to finish
-        t.wait_for_line(py_b, "PY_B_DONE", timeout=t.timeout + 15)
         t.wait_for_line(py_a, "PY_A_DONE", timeout=t.timeout + 15)
+        t.wait_for_line(py_b, "PY_B_DONE", timeout=t.timeout + 15)
 
         time.sleep(1)
         rust_stderr = t.collect_rust_stderr()

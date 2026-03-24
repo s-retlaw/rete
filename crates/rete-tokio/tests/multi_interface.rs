@@ -96,10 +96,14 @@ async fn run_multi_with_inbound(
     result
 }
 
-/// Run an async test on a thread with 4MB stack (HostedTransport needs it).
+/// Run an async test on a thread with 16MB stack.
+///
+/// HostedNodeCore contains large heapless collections (~700 KB inline).
+/// In debug builds `Box::new(T::new())` materialises the struct on the
+/// stack before moving it to the heap, so we need a generous stack.
 fn big_stack_test(f: fn()) {
     std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
+        .stack_size(16 * 1024 * 1024)
         .spawn(f)
         .unwrap()
         .join()

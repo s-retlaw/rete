@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# TODO: This test is currently excluded from test-esp32c6-all (10/17 checks pass).
+# The ingress_control=false fix resolved TCP announce propagation, but 7 checks
+# still fail due to serial timing in complex multi-hop scenarios (concurrent links,
+# reverse-direction traffic). Needs investigation: keepalive/timeout tuning for
+# serial interfaces or flow control improvements in the relay path.
 """ESP32-C6 3-node relay interop — Topology C (Python RNS <-> rete-linux relay <-> ESP32).
 
 Tests multi-hop relay through the Rust node:
@@ -76,6 +81,7 @@ def main():
     enabled = yes
     target_host = 127.0.0.1
     target_port = {RNSD_PORT}
+    ingress_control = false
 """)
 
         rns = RNS.Reticulum(configdir=py_tmpdir, loglevel=RNS.LOG_VERBOSE)

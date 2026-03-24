@@ -56,6 +56,7 @@ with open(os.path.join(config_dir, "config"), "w") as cf:
     enabled = yes
     target_host = 127.0.0.1
     target_port = {port}
+    ingress_control = false
 \"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)
@@ -91,10 +92,13 @@ print(f"{node_label.upper()}_IDENTITY_HASH:{{identity.hexhash}}", flush=True)
 dest.announce()
 print(f"{node_label.upper()}_ANNOUNCE_SENT", flush=True)
 
-# Wait for peer announce (skip our own hash and the transport relay)
+# Wait for peer announce (skip our own hash and the transport relay).
+# Re-announce every 5 seconds in case the first announce arrived before
+# the peer node connected to its rnsd instance.
 timeout = {timeout}
 deadline = time.time() + timeout
 peer_dest_hash = None
+last_announce = time.time()
 
 while time.time() < deadline:
     known = RNS.Transport.path_table
@@ -108,6 +112,9 @@ while time.time() < deadline:
         break
     if peer_dest_hash:
         break
+    if time.time() - last_announce > 5:
+        dest.announce()
+        last_announce = time.time()
     time.sleep(0.5)
 
 if peer_dest_hash:
@@ -169,13 +176,12 @@ def main():
         time.sleep(3)
 
         # --- Start Python nodes (connects to rnsd_1 and rnsd_2) ---
-        # Start both simultaneously; they each announce and wait for the
-        # other's announce to be relayed through Rust.
+        # Each node announces immediately and re-announces every 5 seconds
+        # if it hasn't found a peer yet. Small stagger avoids rnsd race.
         py_a = t.start_py_helper(_py_node_script(
             t.tmpdir, port1, "node_a", "hello from A to B",
             t.timeout, rust_dest_hex,
         ))
-        # Small stagger avoids rnsd race when two clients connect simultaneously
         time.sleep(1)
         py_b = t.start_py_helper(_py_node_script(
             t.tmpdir, port2, "node_b", "hello from B to A",

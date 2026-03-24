@@ -45,6 +45,7 @@ def main():
     enabled = yes
     target_host = 127.0.0.1
     target_port = {BRIDGE_PORT}
+    ingress_control = false
 """)
 
         rns = RNS.Reticulum(configdir=tmpdir, loglevel=RNS.LOG_VERBOSE)

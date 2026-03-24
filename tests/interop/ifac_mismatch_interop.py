@@ -56,6 +56,7 @@ def main():
     enabled = yes
     target_host = 127.0.0.1
     target_port = {t.port}
+    ingress_control = false
     networkname = alpha
 """)
 
@@ -160,6 +161,7 @@ print("PY_RIGHT_DONE", flush=True)
     enabled = yes
     target_host = 127.0.0.1
     target_port = {t.port}
+    ingress_control = false
     networkname = beta
 """)
 

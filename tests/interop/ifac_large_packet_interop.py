@@ -60,6 +60,7 @@ with open(os.path.join(config_dir, "config"), "w") as cf:
     enabled = yes
     target_host = 127.0.0.1
     target_port = {t.port}
+    ingress_control = false
     networkname = {IFAC_NETNAME}
 \"\"\")
 

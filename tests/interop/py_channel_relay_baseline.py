@@ -82,6 +82,7 @@ def _write_client_config(config_dir, port):
     enabled = yes
     target_host = 127.0.0.1
     target_port = {port}
+    ingress_control = false
 """)
     return config_dir
 

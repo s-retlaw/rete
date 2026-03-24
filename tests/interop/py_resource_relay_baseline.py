@@ -74,6 +74,7 @@ with open(os.path.join(config_dir, "config"), "w") as f:
     enabled = yes
     target_host = 127.0.0.1
     target_port = {port}
+    ingress_control = false
 """)
 
 rns = RNS.Reticulum(configdir=config_dir, loglevel=RNS.LOG_VERBOSE)
@@ -278,6 +279,7 @@ def main():
     enabled = yes
     target_host = 127.0.0.1
     target_port = {port}
+    ingress_control = false
 """)
 
         rns_a = RNS.Reticulum(configdir=pya_config_dir, loglevel=RNS.LOG_VERBOSE)

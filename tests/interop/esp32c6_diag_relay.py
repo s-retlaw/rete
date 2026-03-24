@@ -70,6 +70,7 @@ def main():
     enabled = yes
     target_host = 127.0.0.1
     target_port = {RNSD_PORT}
+    ingress_control = false
 """)
 
         rns = RNS.Reticulum(configdir=py_tmpdir, loglevel=RNS.LOG_VERBOSE)

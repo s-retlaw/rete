@@ -181,7 +181,8 @@ async fn client_write_task(
     mut writer: tokio::net::unix::OwnedWriteHalf,
     mut rx: mpsc::Receiver<Vec<u8>>,
 ) {
-    let mut encoded = [0u8; MAX_ENCODED];
+    // Box-allocate to avoid 16+ KB stack usage per spawned task.
+    let mut encoded = vec![0u8; MAX_ENCODED];
     while let Some(data) = rx.recv().await {
         match hdlc::encode(&data, &mut encoded) {
             Ok(n) => {
@@ -208,7 +209,8 @@ async fn client_read_task(
     client_id: usize,
     clients: &tokio::sync::RwLock<Vec<LocalClientEntry>>,
 ) {
-    let mut decoder: HdlcDecoder<{ MTU }> = HdlcDecoder::new();
+    // Box-allocate the decoder to avoid ~9 KB stack usage per spawned task.
+    let mut decoder: Box<HdlcDecoder<{ MTU }>> = Box::new(HdlcDecoder::new());
     let mut read_buf = [0u8; 1024];
 
     loop {

@@ -77,6 +77,7 @@ with open(os.path.join(config_dir, "config"), "w") as cf:
     enabled = yes
     target_host = 127.0.0.1
     target_port = {port1}
+    ingress_control = false
 \"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)
@@ -188,6 +189,7 @@ with open(os.path.join(config_dir, "config"), "w") as cf:
     enabled = yes
     target_host = 127.0.0.1
     target_port = {port2}
+    ingress_control = false
 \"\"\")
 
 reticulum = RNS.Reticulum(configdir=config_dir)

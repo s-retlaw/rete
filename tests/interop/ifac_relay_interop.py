@@ -165,6 +165,7 @@ def main():
     enabled = yes
     target_host = 127.0.0.1
     target_port = {port1}
+    ingress_control = false
     networkname = {IFAC}
 """)
 
@@ -186,6 +187,7 @@ def main():
     enabled = yes
     target_host = 127.0.0.1
     target_port = {port2}
+    ingress_control = false
     networkname = {IFAC}
 """)
 
