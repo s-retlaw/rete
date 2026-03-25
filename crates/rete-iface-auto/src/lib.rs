@@ -211,6 +211,10 @@ pub struct IfaceInfo {
     pub index: u32,
     /// IPv6 link-local address on this interface.
     pub link_local: Ipv6Addr,
+    /// Additional IPv6 addresses (ULA/GUA) on this interface.
+    /// In Docker containers, the kernel may use these as multicast source
+    /// instead of the link-local, so we also compute discovery tokens for them.
+    pub extra_addrs: Vec<Ipv6Addr>,
 }
 
 /// List network interfaces with IPv6 link-local addresses, filtering out
@@ -281,7 +285,34 @@ pub fn list_suitable_interfaces(
             name,
             index,
             link_local: ip,
+            extra_addrs: Vec::new(),
         });
+    }
+
+    // Second pass: collect non-link-local (ULA/GUA) addresses for each interface.
+    // In Docker containers, the kernel uses ULA addresses as multicast source,
+    // so we need discovery tokens for these too.
+    let addrs2 = match nix::ifaddrs::getifaddrs() {
+        Ok(a) => a,
+        Err(_) => return result,
+    };
+    for ifaddr in addrs2 {
+        let name = ifaddr.interface_name.clone();
+        let Some(addr) = ifaddr.address else {
+            continue;
+        };
+        let Some(sockaddr) = addr.as_sockaddr_in6() else {
+            continue;
+        };
+        let ip = sockaddr.ip();
+        if is_link_local(&ip) || ip.is_loopback() {
+            continue;
+        }
+        if let Some(info) = result.iter_mut().find(|r| r.name == name) {
+            if !info.extra_addrs.contains(&ip) {
+                info.extra_addrs.push(ip);
+            }
+        }
     }
 
     result
@@ -426,8 +457,7 @@ impl AutoInterface {
         let mut data_sockets = Vec::new();
         for iface in &interfaces {
             let specific = SocketAddrV6::new(iface.link_local, config.data_port, 0, iface.index);
-            let wildcard =
-                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.data_port, 0, 0);
+            let wildcard = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.data_port, 0, 0);
             let sock = Arc::new(UdpSocket::from_std(
                 bind_udp6(specific, true).or_else(|_| bind_udp6(wildcard, true))?,
             )?);
@@ -454,14 +484,10 @@ impl AutoInterface {
         let discovery_socket = {
             let mcast_bind =
                 SocketAddrV6::new(mcast_addr, config.discovery_port, 0, primary_iface.index);
-            let wildcard_bind = SocketAddrV6::new(
-                Ipv6Addr::UNSPECIFIED,
-                config.discovery_port,
-                0,
-                0,
-            );
-            let std_sock = bind_udp6(mcast_bind, true)
-                .or_else(|_| bind_udp6(wildcard_bind, true))?;
+            let wildcard_bind =
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.discovery_port, 0, 0);
+            let std_sock =
+                bind_udp6(mcast_bind, true).or_else(|_| bind_udp6(wildcard_bind, true))?;
             for iface in &interfaces {
                 join_multicast(&std_sock, &mcast_addr, iface.index)?;
             }
@@ -476,27 +502,33 @@ impl AutoInterface {
                 0,
                 primary_iface.index,
             );
-            let wildcard = SocketAddrV6::new(
-                Ipv6Addr::UNSPECIFIED,
-                config.discovery_port + 1,
-                0,
-                0,
-            );
+            let wildcard =
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.discovery_port + 1, 0, 0);
             Arc::new(UdpSocket::from_std(
                 bind_udp6(specific, false).or_else(|_| bind_udp6(wildcard, true))?,
             )?)
         };
 
-        // Collect our own link-local addresses (to ignore our own announcements)
-        let our_addrs: Vec<Ipv6Addr> = interfaces.iter().map(|i| i.link_local).collect();
+        // Collect our own addresses (link-local + ULA) to ignore our own packets
+        let our_addrs: Vec<Ipv6Addr> = interfaces
+            .iter()
+            .flat_map(|i| std::iter::once(i.link_local).chain(i.extra_addrs.iter().copied()))
+            .collect();
 
-        // Build per-interface discovery tokens and link-local address strings
-        let iface_tokens: Vec<(IfaceInfo, [u8; 32], String)> = interfaces
+        // Build per-interface discovery tokens. Each interface gets a token for
+        // its link-local address PLUS tokens for any ULA/GUA addresses. In Docker
+        // containers, the kernel uses ULA as multicast source instead of link-local,
+        // so we need to send tokens that match the actual source address.
+        let iface_tokens: Vec<(IfaceInfo, Vec<[u8; 32]>, String)> = interfaces
             .iter()
             .map(|i| {
                 let addr_str = normalize_link_local(&i.link_local);
-                let token = compute_discovery_token(&config.group_id, &addr_str);
-                (i.clone(), token, addr_str)
+                let mut tokens = vec![compute_discovery_token(&config.group_id, &addr_str)];
+                for extra in &i.extra_addrs {
+                    let extra_str = extra.to_string();
+                    tokens.push(compute_discovery_token(&config.group_id, &extra_str));
+                }
+                (i.clone(), tokens, addr_str)
             })
             .collect();
 
@@ -730,7 +762,7 @@ async fn discovery_loop(
     mcast_addr: Ipv6Addr,
     group_id: Vec<u8>,
     our_addrs: Vec<Ipv6Addr>,
-    iface_tokens: Vec<(IfaceInfo, [u8; 32], String)>,
+    iface_tokens: Vec<(IfaceInfo, Vec<[u8; 32]>, String)>,
     discovery_port: u16,
     announce_interval: f64,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -744,14 +776,15 @@ async fn discovery_loop(
 
     loop {
         tokio::select! {
-            // Periodic multicast announcement
+            // Periodic multicast announcement — send tokens for all addresses
             _ = announce_tick.tick() => {
-                for (iface, token, _) in &iface_tokens {
-                    // Create a per-announcement socket to set the outgoing interface
+                for (iface, tokens, _) in &iface_tokens {
                     if let Ok(sock) = make_announce_socket(iface.index).await {
                         let dest = SocketAddrV6::new(mcast_addr, discovery_port, 0, iface.index);
-                        if let Err(e) = sock.send_to(token, dest).await {
-                            log::debug!("AutoInterface: announce on {} failed: {e}", iface.name);
+                        for token in tokens {
+                            if let Err(e) = sock.send_to(token.as_slice(), dest).await {
+                                log::debug!("AutoInterface: announce on {} failed: {e}", iface.name);
+                            }
                         }
                     }
                 }
@@ -816,7 +849,7 @@ async fn handle_discovery_packet(
     src_ip: Ipv6Addr,
     scope_id: u32,
     group_id: &[u8],
-    iface_tokens: &[(IfaceInfo, [u8; 32], String)],
+    iface_tokens: &[(IfaceInfo, Vec<[u8; 32]>, String)],
     shared: &Arc<Mutex<SharedState>>,
 ) {
     let src_str = normalize_link_local(&src_ip);
@@ -867,7 +900,7 @@ async fn handle_discovery_packet(
 async fn peer_jobs_loop(
     shared: Arc<Mutex<SharedState>>,
     _group_id: Vec<u8>,
-    iface_tokens: Vec<(IfaceInfo, [u8; 32], String)>,
+    iface_tokens: Vec<(IfaceInfo, Vec<[u8; 32]>, String)>,
     peering_timeout: f64,
     reverse_interval: f64,
     discovery_port: u16,
@@ -920,15 +953,18 @@ async fn peer_jobs_loop(
         // Send reverse peering announcements (outside the lock)
         for (peer_addr, ifname) in &reverse_targets {
             // Find the interface info + token for this ifname
-            if let Some((iface, token, _)) = iface_tokens.iter().find(|(i, _, _)| i.name == *ifname)
+            if let Some((iface, tokens, _)) =
+                iface_tokens.iter().find(|(i, _, _)| i.name == *ifname)
             {
                 if let Ok(sock) = make_announce_socket(iface.index).await {
                     let dest = SocketAddrV6::new(*peer_addr, discovery_port + 1, 0, iface.index);
-                    if let Err(e) = sock.send_to(token, dest).await {
-                        log::debug!(
-                            "AutoInterface: reverse announce to {} failed: {e}",
-                            peer_addr
-                        );
+                    for token in tokens {
+                        if let Err(e) = sock.send_to(token.as_slice(), dest).await {
+                            log::debug!(
+                                "AutoInterface: reverse announce to {} failed: {e}",
+                                peer_addr
+                            );
+                        }
                     }
                 }
             }
