@@ -930,6 +930,25 @@ gen-vectors:
     python3 generate_test_vectors.py --out tests/interop/vectors.json
 
 # --------------------------------------------------------------------------
+# Docker-isolated topology tests (requires Docker)
+# --------------------------------------------------------------------------
+
+# Build Docker test images for topology tests
+docker-build-test-images:
+    docker build -t rete-test-rust:latest -f tests/docker/rust-node.Dockerfile tests/docker/
+    docker build -t rete-test-python:latest -f tests/docker/python-node.Dockerfile tests/docker/
+
+# E2E AutoInterface discovery via Docker containers (no soft-skip)
+test-docker-auto: docker-build-test-images
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python docker_auto_interop.py
+
+# All Docker-isolated topology tests
+test-docker-all: docker-build-test-images
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python docker_auto_interop.py
+
+# --------------------------------------------------------------------------
 # Cross-compilation checks (no hardware needed)
 # --------------------------------------------------------------------------
 

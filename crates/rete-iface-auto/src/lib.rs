@@ -421,10 +421,16 @@ impl AutoInterface {
         // Bind per-interface data sockets on each link-local address.
         // Matches Python RNS per-interface UDPServer instances. SO_REUSEPORT
         // is set for coexistence when Python and Rust share the same host.
+        // Falls back to wildcard [::] in environments where specific-address
+        // binding isn't supported (e.g., Docker containers).
         let mut data_sockets = Vec::new();
         for iface in &interfaces {
-            let addr = SocketAddrV6::new(iface.link_local, config.data_port, 0, iface.index);
-            let sock = Arc::new(UdpSocket::from_std(bind_udp6(addr, true)?)?);
+            let specific = SocketAddrV6::new(iface.link_local, config.data_port, 0, iface.index);
+            let wildcard =
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.data_port, 0, 0);
+            let sock = Arc::new(UdpSocket::from_std(
+                bind_udp6(specific, true).or_else(|_| bind_udp6(wildcard, true))?,
+            )?);
             data_sockets.push((iface.index, sock));
         }
 
@@ -442,25 +448,43 @@ impl AutoInterface {
         // Use the first interface for binding (matches common single-interface case).
         let primary_iface = &interfaces[0];
 
-        // Multicast discovery: bind to the multicast group address on the primary interface.
+        // Multicast discovery: try binding to the multicast group address first
+        // (matches Python RNS on bare metal), fall back to wildcard [::] for
+        // environments where multicast address binding isn't supported (Docker).
         let discovery_socket = {
-            let addr = SocketAddrV6::new(mcast_addr, config.discovery_port, 0, primary_iface.index);
-            let std_sock = bind_udp6(addr, true)?;
+            let mcast_bind =
+                SocketAddrV6::new(mcast_addr, config.discovery_port, 0, primary_iface.index);
+            let wildcard_bind = SocketAddrV6::new(
+                Ipv6Addr::UNSPECIFIED,
+                config.discovery_port,
+                0,
+                0,
+            );
+            let std_sock = bind_udp6(mcast_bind, true)
+                .or_else(|_| bind_udp6(wildcard_bind, true))?;
             for iface in &interfaces {
                 join_multicast(&std_sock, &mcast_addr, iface.index)?;
             }
             Arc::new(UdpSocket::from_std(std_sock)?)
         };
 
-        // Unicast discovery: bind to the specific link-local address (no reuse needed).
+        // Unicast discovery: try specific link-local first, fall back to wildcard.
         let unicast_disc_socket = {
-            let addr = SocketAddrV6::new(
+            let specific = SocketAddrV6::new(
                 primary_iface.link_local,
                 config.discovery_port + 1,
                 0,
                 primary_iface.index,
             );
-            Arc::new(UdpSocket::from_std(bind_udp6(addr, false)?)?)
+            let wildcard = SocketAddrV6::new(
+                Ipv6Addr::UNSPECIFIED,
+                config.discovery_port + 1,
+                0,
+                0,
+            );
+            Arc::new(UdpSocket::from_std(
+                bind_udp6(specific, false).or_else(|_| bind_udp6(wildcard, true))?,
+            )?)
         };
 
         // Collect our own link-local addresses (to ignore our own announcements)

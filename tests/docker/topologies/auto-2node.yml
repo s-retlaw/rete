@@ -1,0 +1,32 @@
+networks:
+  rete-lan:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd00:1e7e:a070::/64
+
+services:
+  rust-node:
+    build:
+      context: ..
+      dockerfile: rust-node.Dockerfile
+    networks:
+      - rete-lan
+    volumes:
+      - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
+    command: ["--auto", "--auto-group", "${AUTO_GROUP:-docker_autotest}"]
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+
+  python-node:
+    build:
+      context: ..
+      dockerfile: python-node.Dockerfile
+    networks:
+      - rete-lan
+    volumes:
+      - ../../interop:/opt/tests:ro
+    command: ["/opt/tests/docker_python_auto.py", "--group", "${AUTO_GROUP:-docker_autotest}"]
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
