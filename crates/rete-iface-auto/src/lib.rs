@@ -364,8 +364,12 @@ impl Default for AutoInterfaceConfig {
 /// Discovery runs in a background Tokio task, spawned on creation.
 /// Dropping the interface signals the background tasks to shut down.
 pub struct AutoInterface {
-    /// UDP socket bound to the data port for sending/receiving packets.
-    data_socket: Arc<UdpSocket>,
+    /// Per-interface UDP data sockets, each bound to a specific link-local address.
+    /// Matches Python RNS which creates per-interface UDPServer instances.
+    /// Key is interface scope_id for routing sends to the correct socket.
+    data_sockets: Vec<(u32, Arc<UdpSocket>)>,
+    /// Merged data receiver — background tasks forward packets from all data sockets.
+    data_rx: tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)>,
     /// Shared peer table and dedup state (accessed by background discovery task).
     shared: Arc<Mutex<SharedState>>,
     /// Configuration snapshot.
@@ -376,6 +380,8 @@ pub struct AutoInterface {
     _discovery_handle: tokio::task::JoinHandle<()>,
     /// Handle to the background peer-jobs task.
     _peer_jobs_handle: tokio::task::JoinHandle<()>,
+    /// Handles to the per-interface data recv tasks.
+    _data_recv_handles: Vec<tokio::task::JoinHandle<()>>,
     /// Shutdown signal — send `true` to stop background tasks.
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -412,28 +418,50 @@ impl AutoInterface {
             );
         }
 
-        // Bind the data socket on [::] with the data port.
-        // We use socket2 for fine-grained control.
-        let data_socket = bind_udp6_reuse(config.data_port, None)?;
-        let data_socket = Arc::new(UdpSocket::from_std(data_socket)?);
+        // Bind per-interface data sockets on each link-local address.
+        // Matches Python RNS per-interface UDPServer instances. SO_REUSEPORT
+        // is set for coexistence when Python and Rust share the same host.
+        let mut data_sockets = Vec::new();
+        for iface in &interfaces {
+            let addr = SocketAddrV6::new(iface.link_local, config.data_port, 0, iface.index);
+            let sock = Arc::new(UdpSocket::from_std(bind_udp6(addr, true)?)?);
+            data_sockets.push((iface.index, sock));
+        }
+
+        // Merge all data sockets into a single channel for recv()
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel(256);
 
         let shared = Arc::new(Mutex::new(SharedState {
             peers: HashMap::new(),
             dedup: DedupRing::new(DEDUP_LEN),
         }));
 
-        // Create discovery sockets — one multicast listener + per-interface announce
-        // We bind the multicast receiver on [::]:discovery_port and join the group
-        // on each interface.
-        let discovery_socket = bind_udp6_reuse(config.discovery_port, None)?;
-        for iface in &interfaces {
-            join_multicast(&discovery_socket, &mcast_addr, iface.index)?;
-        }
-        let discovery_socket = Arc::new(UdpSocket::from_std(discovery_socket)?);
+        // Create discovery sockets matching Python RNS's per-interface binding strategy.
+        // Python binds the multicast socket to the multicast group address (not [::]),
+        // and the unicast socket to the specific link-local address.
+        // Use the first interface for binding (matches common single-interface case).
+        let primary_iface = &interfaces[0];
 
-        // Create unicast discovery listener (reverse peering) on discovery_port + 1
-        let unicast_disc_socket = bind_udp6_reuse(config.discovery_port + 1, None)?;
-        let unicast_disc_socket = Arc::new(UdpSocket::from_std(unicast_disc_socket)?);
+        // Multicast discovery: bind to the multicast group address on the primary interface.
+        let discovery_socket = {
+            let addr = SocketAddrV6::new(mcast_addr, config.discovery_port, 0, primary_iface.index);
+            let std_sock = bind_udp6(addr, true)?;
+            for iface in &interfaces {
+                join_multicast(&std_sock, &mcast_addr, iface.index)?;
+            }
+            Arc::new(UdpSocket::from_std(std_sock)?)
+        };
+
+        // Unicast discovery: bind to the specific link-local address (no reuse needed).
+        let unicast_disc_socket = {
+            let addr = SocketAddrV6::new(
+                primary_iface.link_local,
+                config.discovery_port + 1,
+                0,
+                primary_iface.index,
+            );
+            Arc::new(UdpSocket::from_std(bind_udp6(addr, false)?)?)
+        };
 
         // Collect our own link-local addresses (to ignore our own announcements)
         let our_addrs: Vec<Ipv6Addr> = interfaces.iter().map(|i| i.link_local).collect();
@@ -494,13 +522,47 @@ impl AutoInterface {
             ))
         };
 
+        // Spawn per-socket recv tasks that forward data to the merged channel
+        let mut data_recv_handles = Vec::new();
+        let shutdown_rx_data = shutdown_tx.subscribe();
+        for (scope_id, sock) in &data_sockets {
+            let sock = sock.clone();
+            let tx = data_tx.clone();
+            let mut shutdown = shutdown_rx_data.clone();
+            let scope = *scope_id;
+            data_recv_handles.push(tokio::spawn(async move {
+                let mut buf = vec![0u8; HW_MTU + 64];
+                loop {
+                    tokio::select! {
+                        result = sock.recv_from(&mut buf) => {
+                            match result {
+                                Ok((n, src)) => {
+                                    if tx.send((buf[..n].to_vec(), src)).await.is_err() {
+                                        break; // channel closed
+                                    }
+                                }
+                                Err(e) => {
+                                    log::debug!("AutoInterface data recv error on scope {scope}: {e}");
+                                }
+                            }
+                        }
+                        _ = shutdown.changed() => break,
+                    }
+                }
+            }));
+        }
+        // Drop the sender clone so the channel closes when all tasks exit
+        drop(data_tx);
+
         Ok(Self {
-            data_socket,
+            data_sockets,
+            data_rx,
             shared,
             config,
             interfaces,
             _discovery_handle: discovery_handle,
             _peer_jobs_handle: peer_jobs_handle,
+            _data_recv_handles: data_recv_handles,
             shutdown_tx,
         })
     }
@@ -572,8 +634,14 @@ impl ReteInterface for AutoInterface {
                 }
             };
 
+            // Route through the socket bound to this peer's interface
+            let sock = match self.data_sockets.iter().find(|(sid, _)| *sid == scope_id) {
+                Some((_, s)) => s,
+                None => continue,
+            };
+
             let dest = SocketAddrV6::new(*addr, self.config.data_port, 0, scope_id);
-            if let Err(e) = self.data_socket.send_to(frame, dest).await {
+            if let Err(e) = sock.send_to(frame, dest).await {
                 log::debug!("AutoInterface: send to {} failed: {e}", addr);
             }
         }
@@ -583,7 +651,9 @@ impl ReteInterface for AutoInterface {
 
     async fn recv<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a [u8], Self::Error> {
         loop {
-            let (n, src) = self.data_socket.recv_from(buf).await?;
+            let (data, src) = self.data_rx.recv().await.ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "data channel closed")
+            })?;
 
             // Extract IPv6 address from source
             let src_addr = match src {
@@ -595,6 +665,17 @@ impl ReteInterface for AutoInterface {
             if self.interfaces.iter().any(|i| i.link_local == src_addr) {
                 continue;
             }
+
+            if data.len() > buf.len() {
+                log::warn!(
+                    "AutoInterface: packet ({} bytes) exceeds buffer ({} bytes), dropping",
+                    data.len(),
+                    buf.len()
+                );
+                continue;
+            }
+            let n = data.len();
+            buf[..n].copy_from_slice(&data);
 
             // Deduplication
             {
@@ -835,23 +916,24 @@ async fn peer_jobs_loop(
 // Socket helpers
 // ---------------------------------------------------------------------------
 
-/// Bind a UDP IPv6 socket with SO_REUSEADDR (and SO_REUSEPORT on supported platforms).
-fn bind_udp6_reuse(port: u16, scope_id: Option<u32>) -> std::io::Result<std::net::UdpSocket> {
+/// Create and bind a UDP IPv6 socket.
+///
+/// When `reuse` is true, sets SO_REUSEADDR + SO_REUSEPORT (for sockets that
+/// may coexist with Python RNS on the same host). When false, binds exclusively.
+fn bind_udp6(addr: SocketAddrV6, reuse: bool) -> std::io::Result<std::net::UdpSocket> {
     let socket = socket2::Socket::new(
         socket2::Domain::IPV6,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )?;
-
-    socket.set_reuse_address(true)?;
-    #[cfg(not(windows))]
-    socket.set_reuse_port(true)?;
+    if reuse {
+        socket.set_reuse_address(true)?;
+        #[cfg(not(windows))]
+        socket.set_reuse_port(true)?;
+    }
     socket.set_only_v6(true)?;
     socket.set_nonblocking(true)?;
-
-    let addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, scope_id.unwrap_or(0));
     socket.bind(&socket2::SockAddr::from(addr))?;
-
     Ok(socket.into())
 }
 

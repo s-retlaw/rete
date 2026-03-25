@@ -1422,7 +1422,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         let mut packets = self.flush_announces(now, rng);
 
         // Resource maintenance: send HMU for sender resources with unsent hashes
-        self.transport.tick_resources(rng);
+        self.transport.tick_resources(now, rng);
 
         // Drain any resource outbound packets queued during ingest or tick_resources
         for pkt in self.transport.drain_resource_outbound() {

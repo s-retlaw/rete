@@ -101,7 +101,7 @@ def main():
         for label, proc, stderr_text in [("A", rust_a_proc, a_stderr_text), ("B", rust_b_proc, b_stderr_text)]:
             if proc.poll() is not None:
                 if "Address already in use" in stderr_text:
-                    env_issue = "port conflict"
+                    env_issue = "same-host port conflict (needs network namespaces)"
                 elif "no suitable network interfaces" in stderr_text:
                     env_issue = "no suitable interfaces"
                 else:

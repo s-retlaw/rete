@@ -1270,7 +1270,7 @@ impl Resource {
             received: vec![false; total_segments],
             hashmap_cursor: initial_hashes,
             outstanding_parts: 0,
-            hashmap_max_len: HASHMAP_MAX_LEN_DEFAULT,
+            hashmap_max_len: initial_hashes,
         })
     }
 
@@ -1290,18 +1290,15 @@ impl Resource {
     }
 
     pub fn receive_part(&mut self, part_data: &[u8]) -> bool {
-        // Part hash = SHA-256(segment_data || random_hash)[0:4]
-        let mut hasher = Sha256::new();
-        hasher.update(part_data);
-        hasher.update(self.random_hash);
-        let hash: [u8; 32] = hasher.finalize().into();
-        let mut part_hash = [0u8; MAPHASH_LEN];
-        part_hash.copy_from_slice(&hash[..MAPHASH_LEN]);
+        let part_hash = self.compute_part_hash(part_data);
 
-        // Find matching index in known part hashes (only within hashmap_cursor
-        // range to avoid matching unfilled [0u8;4] sentinel slots).
+        // Search within window range starting from consecutive_completed,
+        // matching Python's `for map_hash in self.hashmap[cc:cc+window]`.
+        // Cap at hashmap_cursor to avoid matching unfilled sentinel slots.
+        let cc = self.consecutive_completed();
+        let search_end = (cc + self.window).min(self.hashmap_cursor);
         let mut matched = false;
-        for idx in 0..self.hashmap_cursor {
+        for idx in cc..search_end {
             if self.part_hashes[idx] == part_hash && !self.received[idx] {
                 self.parts[idx] = part_data.to_vec();
                 self.received[idx] = true;
@@ -1944,5 +1941,149 @@ mod tests {
         // Assemble and verify
         let assembled = receiver.assemble().unwrap();
         assert_eq!(assembled, encrypted);
+    }
+
+    #[test]
+    fn test_receiver_hashmap_max_len_matches_sender_tcp() {
+        // Bug 1a: Receiver hardcodes hashmap_max_len=74 (radio), but TCP sender
+        // uses ~1994. When HMU segment_index=1 arrives, placement is wrong.
+        //
+        // Use TCP-like MDU (8111) with enough segments to require HMU.
+        let tcp_mdu = 8111;
+        let sender_hml = hashmap_max_len(tcp_mdu);
+        assert_eq!(sender_hml, 1994, "TCP hashmap_max_len should be 1994");
+
+        // Create a resource with more segments than sender_hml (need >1994 segments).
+        // Each segment is tcp_mdu bytes, so we need >1994*8111 bytes.
+        // That's too large. Instead, test with a smaller MDU where the gap is visible.
+        //
+        // Use MDU=431 (radio) sender → MDU mismatch scenario:
+        // Actually the real bug is that from_advertisement() always uses 74.
+        // We can demonstrate with TCP MDU: create sender with tcp_mdu, parse on receiver.
+        let seg_count = 2500; // more than 1994 → needs HMU
+        let data: Vec<u8> = (0..seg_count * tcp_mdu).map(|i| (i % 256) as u8).collect();
+        let mut rng = rand::thread_rng();
+        let mut sender =
+            Resource::new_outbound(&data, [0x11; 16], tcp_mdu, data.len(), tcp_mdu, &mut rng);
+        assert_eq!(sender.total_segments, seg_count);
+
+        let adv = sender.build_advertisement();
+        let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+
+        // CRITICAL: receiver's hashmap_max_len must match sender's
+        assert_eq!(
+            receiver.hashmap_max_len, sender_hml,
+            "receiver hashmap_max_len must match sender (got {} expected {})",
+            receiver.hashmap_max_len, sender_hml
+        );
+        // Initial hashes in advertisement = min(1994, 2500) = 1994
+        assert_eq!(receiver.hashmap_cursor, sender_hml);
+    }
+
+    #[test]
+    fn test_tcp_hmu_placement_correctness() {
+        // Full HMU round-trip with TCP MDU: verify hashes are placed correctly
+        // when segment_index > 0.
+        let tcp_mdu = 8111;
+        let sender_hml = hashmap_max_len(tcp_mdu);
+        let seg_count = sender_hml + 100; // 2094 segments, needs 1 HMU
+        let data: Vec<u8> = (0..seg_count * tcp_mdu).map(|i| (i % 256) as u8).collect();
+        let mut rng = rand::thread_rng();
+        let mut sender =
+            Resource::new_outbound(&data, [0x11; 16], tcp_mdu, data.len(), tcp_mdu, &mut rng);
+        assert_eq!(sender.total_segments, seg_count);
+
+        let adv = sender.build_advertisement();
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        assert_eq!(receiver.hashmap_cursor, sender_hml); // first 1994 hashes
+
+        // Build HMU from sender (segment_index=1, hashes 1994..2094)
+        let hmu = sender
+            .build_hashmap_update()
+            .expect("sender should have unsent hashes");
+        receiver
+            .apply_hashmap_update(&hmu)
+            .expect("receiver should accept HMU");
+
+        // Receiver should now have all 2094 hashes
+        assert_eq!(receiver.hashmap_cursor, seg_count);
+
+        // Verify hash at index 1994 (first hash from HMU) matches sender
+        assert_eq!(
+            receiver.part_hashes[sender_hml], sender.part_hashes[sender_hml],
+            "hash at index {} must match after HMU",
+            sender_hml
+        );
+        // Verify last hash
+        assert_eq!(
+            receiver.part_hashes[seg_count - 1],
+            sender.part_hashes[seg_count - 1],
+            "last hash must match after HMU"
+        );
+    }
+
+    #[test]
+    fn test_split_resource_d_field_is_full_data_size() {
+        // Bug 1b: For split resources, the "d" field in the advertisement
+        // must be the full original data size, not just the segment size.
+        // A sender creates a resource for segment 1 of a 2MB file.
+        // The encrypted segment might be 1MB, but original_size should be 2MB.
+        let segment_data = vec![0xAA; 500]; // encrypted segment
+        let full_data_size = 2_000_000; // 2MB total
+        let mdu = 431;
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(
+            &segment_data,
+            [0x11; 16],
+            mdu,
+            full_data_size,
+            mdu,
+            &mut rng,
+        );
+
+        assert_eq!(sender.original_size, full_data_size);
+
+        let adv = sender.build_advertisement();
+        // Parse the advertisement and check the "d" field
+        let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        assert_eq!(
+            receiver.original_size,
+            full_data_size,
+            "receiver should see d={} (full data size), not segment size {}",
+            full_data_size,
+            segment_data.len()
+        );
+    }
+
+    #[test]
+    fn test_receive_part_within_window_range() {
+        // Bug 1c: receive_part should only search within
+        // consecutive_completed..consecutive_completed+window, not 0..hashmap_cursor.
+        let data = vec![0x42; 2000]; // 5 segments at MDU=431
+        let mdu = 431;
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let adv = sender.build_advertisement();
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+
+        // Get parts via handle_request
+        let req = receiver.build_request();
+        let result = sender.handle_request(&req);
+        assert!(!result.parts.is_empty());
+
+        // Feed first part
+        let (_, ref part0) = result.parts[0];
+        assert!(!receiver.receive_part(part0)); // not all received yet
+        assert_eq!(receiver.consecutive_completed(), 1);
+
+        // Feed second part
+        if result.parts.len() > 1 {
+            let (_, ref part1) = result.parts[1];
+            receiver.receive_part(part1);
+            assert_eq!(receiver.consecutive_completed(), 2);
+        }
+
+        // Parts should be stored at correct indices
+        assert!(receiver.received[0]);
     }
 }

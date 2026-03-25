@@ -212,7 +212,7 @@ print("PY_DONE", flush=True)
         env_issue = None
         if rust_proc.poll() is not None:
             if "Address already in use" in rust_stderr_text:
-                env_issue = "port conflict"
+                env_issue = "same-host port conflict (needs network namespaces)"
             elif "no suitable network interfaces" in rust_stderr_text:
                 env_issue = "no suitable interfaces"
             else:

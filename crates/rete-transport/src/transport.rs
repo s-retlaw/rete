@@ -85,6 +85,9 @@ pub const REVERSE_TIMEOUT: u64 = 480;
 /// Default receipt proof timeout in seconds.
 pub const RECEIPT_TIMEOUT: u64 = 30;
 
+/// Minimum seconds between retry REQs for stalled receiver resources.
+pub const RESOURCE_RETRY_THRESHOLD_SECS: u64 = 10;
+
 /// A receipt for a channel message awaiting proof-of-delivery.
 #[derive(Debug, Clone)]
 pub struct ChannelReceipt {
@@ -360,6 +363,14 @@ pub struct Transport<
 }
 
 /// Queued data for a pending split resource segment.
+/// Metadata for a split resource segment advertisement.
+struct SplitMeta {
+    split_index: usize,
+    split_total: usize,
+    original_hash: [u8; 32],
+    full_original_size: usize,
+}
+
 struct SplitSendEntry {
     link_id: [u8; TRUNCATED_HASH_LEN],
     /// Group key: resource_hash of segment 1.
@@ -368,7 +379,9 @@ struct SplitSendEntry {
     next_segment: usize,
     /// Total split segments.
     split_total: usize,
-    /// Plaintext data (full). Each segment reads its slice at send time.
+    /// Full original plaintext size (all segments combined).
+    full_original_size: usize,
+    /// Remaining plaintext data (after segment 1). Each segment reads its slice at send time.
     data: alloc::vec::Vec<u8>,
 }
 
@@ -2433,18 +2446,20 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         let total_size = original_data.len();
         let split_total = ((total_size - 1) / MAX_EFFICIENT_SIZE) + 1;
 
-        // Process segment 1 (uncompressed — split resources skip whole-blob compression)
         let seg1_end = MAX_EFFICIENT_SIZE.min(total_size);
         let seg1_data = &original_data[..seg1_end];
 
-        // For segment 1, pass [0;32] as original_hash — the helper will use
-        // segment 1's own resource_hash as the group key.
         let (pkt, seg1_hash) = self.prepare_and_advertise_segment(
             link_id,
             seg1_data,
             seg1_data,
             false,
-            Some((1, split_total, [0u8; 32])),
+            Some(SplitMeta {
+                split_index: 1,
+                split_total,
+                original_hash: [0u8; 32],
+                full_original_size: total_size,
+            }),
             rng,
         )?;
 
@@ -2454,6 +2469,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             original_hash: seg1_hash,
             next_segment: 2,
             split_total,
+            full_original_size: total_size,
             data: original_data[seg1_end..].to_vec(),
         });
 
@@ -2522,34 +2538,32 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         send_data: &[u8],
         original_data: &[u8],
         compressed: bool,
-        split: Option<(usize, usize, [u8; 32])>,
+        split: Option<SplitMeta>,
         rng: &mut R,
     ) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
         let (encrypted, peer_mtu) = self.prepend_and_encrypt(link_id, send_data, rng)?;
         let (sdu, link_mdu) = Self::compute_sdu_and_link_mdu(peer_mtu);
-        let mut resource = Resource::new_outbound(
-            &encrypted,
-            *link_id,
-            sdu,
-            original_data.len(),
-            link_mdu,
-            rng,
-        );
+        let original_size = split
+            .as_ref()
+            .map(|s| s.full_original_size)
+            .unwrap_or(original_data.len());
+        let mut resource =
+            Resource::new_outbound(&encrypted, *link_id, sdu, original_size, link_mdu, rng);
         resource.flags.encrypted = true;
         resource.flags.compressed = compressed;
 
         Self::override_resource_hash(&mut resource, original_data);
         resource.data = original_data.to_vec();
 
-        if let Some((split_index, split_total, original_hash)) = split {
-            resource.split_index = split_index;
-            resource.split_total = split_total;
+        if let Some(meta) = split {
+            resource.split_index = meta.split_index;
+            resource.split_total = meta.split_total;
             resource.flags.is_split = true;
             // For segment 1, original_hash == [0;32] means "use this segment's hash"
-            resource.original_hash = if original_hash == [0u8; 32] {
+            resource.original_hash = if meta.original_hash == [0u8; 32] {
                 resource.resource_hash
             } else {
-                original_hash
+                meta.original_hash
             };
         }
 
@@ -2617,6 +2631,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         let seg_start = (seg_idx - 2) * MAX_EFFICIENT_SIZE;
         let seg_end = (seg_start + MAX_EFFICIENT_SIZE).min(data_len);
         let seg_data = self.split_send_queue[entry_idx].data[seg_start..seg_end].to_vec();
+        let full_original_size = self.split_send_queue[entry_idx].full_original_size;
         let oh = *original_hash;
 
         let (pkt, _) = self.prepare_and_advertise_segment(
@@ -2624,7 +2639,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             &seg_data,
             &seg_data,
             false,
-            Some((seg_idx, split_total, oh)),
+            Some(SplitMeta {
+                split_index: seg_idx,
+                split_total,
+                original_hash: oh,
+                full_original_size,
+            }),
             rng,
         )?;
 
@@ -2713,19 +2733,21 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     /// Python doesn't proactively send HMU — it only sends in response to
     /// RESOURCE_REQ with HASHMAP_IS_EXHAUSTED. The receiver retries via its
     /// watchdog/timeout. Matching that behavior: no proactive HMU sending.
-    pub fn tick_resources<R: RngCore + CryptoRng>(&mut self, rng: &mut R) {
+    pub fn tick_resources<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) {
         // Retry follow-up requests for stalled receiver resources.
-        // This prevents deadlocks where a REQ was lost or the sender
-        // is waiting for a REQ that was never sent.
-        // Only retry when outstanding_parts == 0 (not waiting for in-flight parts).
+        // Only retry when outstanding_parts == 0 (not waiting for in-flight parts)
+        // AND enough time has passed since last activity (time-gated to avoid
+        // spamming REQs before the sender has time to respond).
         let mut req_packets = alloc::vec::Vec::new();
         for res in &mut self.resources {
-            if !res.is_sender && !res.received.iter().all(|&r| r) && res.outstanding_parts == 0 {
-                // Resource has unreceived parts and no in-flight window — retry REQ
+            if !res.is_sender
+                && !res.received.iter().all(|&r| r)
+                && res.outstanding_parts == 0
+                && now.saturating_sub(res.last_activity) >= RESOURCE_RETRY_THRESHOLD_SECS
+            {
                 let req_payload = res.build_request();
-                let mut link_id = [0u8; TRUNCATED_HASH_LEN];
-                link_id.copy_from_slice(&res.link_id);
-                req_packets.push((link_id, req_payload));
+                req_packets.push((res.link_id, req_payload));
+                res.touch_activity(now);
             }
         }
         // Encrypt REQ packets via the link (separate loop to avoid borrow conflict)
@@ -2741,9 +2763,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         for res in &mut self.resources {
             if res.is_sender && res.needs_hashmap_update() {
                 if let Some(hmu) = res.build_hashmap_update() {
-                    let mut lid = [0u8; TRUNCATED_HASH_LEN];
-                    lid.copy_from_slice(&res.link_id);
-                    hmu_items.push((lid, hmu));
+                    hmu_items.push((res.link_id, hmu));
                 }
             }
         }

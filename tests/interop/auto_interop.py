@@ -111,10 +111,10 @@ def main():
         if rust_proc.poll() is not None:
             # Rust node exited — check if it's a known environment issue
             if "Address already in use" in rust_stderr_text:
-                t._log("Rust AutoInterface port conflict (rnsd already bound multicast port)")
-                t._log("This is a known issue when both run on the same host without SO_REUSEPORT support")
-                t.check(True, "AutoInterface skipped (port conflict, environment limitation)")
-                t.check(True, "Announce check skipped (port conflict)")
+                t._log("AutoInterface port conflict: both nodes share same link-local address")
+                t._log("Same-host AutoInterface testing requires separate network namespaces")
+                t.check(True, "AutoInterface skipped (same-host port conflict)")
+                t.check(True, "Announce check skipped (same-host)")
                 return
             elif "no suitable network interfaces" in rust_stderr_text:
                 t._log("No suitable network interfaces for AutoInterface (expected in CI)")
