@@ -41,6 +41,7 @@ class DockerTopologyTest:
         self._stop = threading.Event()
         self._log_threads = []
         self._service_lines: dict[str, list[str]] = {}
+        self._stdin_pipes: dict[str, subprocess.Popen] = {}
         self._started = False
 
         if not os.path.exists(self.compose_file):
@@ -198,10 +199,93 @@ class DockerTopologyTest:
             print(f"[{self.name}] SOME TESTS FAILED")
             sys.exit(1)
 
+    # -- container management --
+
+    def _get_container_id(self, service: str) -> str:
+        """Get the Docker container ID for a running service."""
+        result = subprocess.run(
+            ["docker", "compose", "-f", self.compose_file,
+             "-p", self.project_name, "ps", "-q", service],
+            capture_output=True, text=True,
+        )
+        return result.stdout.strip()
+
+    def send_to_stdin(self, service: str, text: str):
+        """Send a line of text to a running container's stdin.
+
+        The compose service must have ``stdin_open: true``.  Uses a
+        persistent ``docker attach`` pipe per service.
+        """
+        if service not in self._stdin_pipes:
+            container_id = self._get_container_id(service)
+            if not container_id:
+                self._log(f"WARNING: no container found for {service}")
+                return
+            proc = subprocess.Popen(
+                ["docker", "attach", "--sig-proxy=false", container_id],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._stdin_pipes[service] = proc
+
+        pipe = self._stdin_pipes[service]
+        try:
+            pipe.stdin.write(f"{text}\n".encode())
+            pipe.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            self._log(f"WARNING: stdin pipe broken for {service}: {e}")
+
+    def stop_service(self, service: str):
+        """Stop a single service without tearing down the stack."""
+        subprocess.run(
+            ["docker", "compose", "-f", self.compose_file,
+             "-p", self.project_name, "stop", "-t", "5", service],
+            capture_output=True, timeout=15,
+        )
+
+    def up_service(self, service: str, env: dict[str, str] | None = None):
+        """Bring up a specific service (possibly for the first time)."""
+        cmd_env = os.environ.copy()
+        if env:
+            cmd_env.update(env)
+        subprocess.run(
+            ["docker", "compose", "-f", self.compose_file,
+             "-p", self.project_name, "up", "-d", service],
+            cwd=_REPO_ROOT,
+            env=cmd_env,
+            capture_output=True,
+            timeout=30,
+        )
+        # Reset log lines for this service and start streaming
+        self._service_lines[service] = []
+        self._start_log_stream(service)
+
+    def get_host_port(self, service: str, container_port: int) -> int | None:
+        """Get the host-mapped port for a container's published port."""
+        result = subprocess.run(
+            ["docker", "compose", "-f", self.compose_file,
+             "-p", self.project_name, "port", service, str(container_port)],
+            capture_output=True, text=True,
+        )
+        output = result.stdout.strip()
+        if not output:
+            return None
+        _, _, port_str = output.rpartition(":")
+        return int(port_str)
+
     # -- cleanup --
 
     def _cleanup(self):
         self._stop.set()
+        for pipe in self._stdin_pipes.values():
+            try:
+                pipe.stdin.close()
+                pipe.terminate()
+                pipe.wait(timeout=3)
+            except Exception:
+                pass
+        self._stdin_pipes.clear()
         if self._started:
             self._log("tearing down compose stack...")
             subprocess.run(

@@ -1,0 +1,80 @@
+networks:
+  rete-lan:
+    driver: bridge
+
+services:
+  rnsd-1:
+    build:
+      context: ..
+      dockerfile: rnsd-node.Dockerfile
+    networks:
+      - rete-lan
+    environment:
+      - RNSD_PORT=4242
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',4242),1); s.close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
+
+  rnsd-2:
+    build:
+      context: ..
+      dockerfile: rnsd-node.Dockerfile
+    networks:
+      - rete-lan
+    environment:
+      - RNSD_PORT=4242
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',4242),1); s.close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
+
+  rust-transport:
+    build:
+      context: ..
+      dockerfile: rust-node.Dockerfile
+    networks:
+      - rete-lan
+    stdin_open: true
+    volumes:
+      - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
+    command: ["--connect", "rnsd-1:4242", "--connect", "rnsd-2:4242", "--transport"]
+    depends_on:
+      rnsd-1:
+        condition: service_healthy
+      rnsd-2:
+        condition: service_healthy
+
+  python-a:
+    build:
+      context: ..
+      dockerfile: python-node.Dockerfile
+    networks:
+      - rete-lan
+    volumes:
+      - ../../interop:/opt/tests:ro
+    command: ${PY_A_CMD:-/opt/tests/docker_py_helpers/relay_node.py --host rnsd-1 --port 4242 --label NODE_A --send-msg 'hello from A to B'}
+    profiles:
+      - nodes
+    depends_on:
+      rnsd-1:
+        condition: service_healthy
+
+  python-b:
+    build:
+      context: ..
+      dockerfile: python-node.Dockerfile
+    networks:
+      - rete-lan
+    volumes:
+      - ../../interop:/opt/tests:ro
+    command: ${PY_B_CMD:-/opt/tests/docker_py_helpers/relay_node.py --host rnsd-2 --port 4242 --label NODE_B --send-msg 'hello from B to A'}
+    profiles:
+      - nodes
+    depends_on:
+      rnsd-2:
+        condition: service_healthy

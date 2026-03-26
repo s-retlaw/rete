@@ -481,6 +481,11 @@ impl AutoInterface {
         // Multicast discovery: try binding to the multicast group address first
         // (matches Python RNS on bare metal), fall back to wildcard [::] for
         // environments where multicast address binding isn't supported (Docker).
+        //
+        // These sockets are kept as std::net::UdpSocket (blocking) and handed
+        // to dedicated OS threads in discovery_loop(). This bypasses tokio's
+        // epoll, which can fail to wake recv_from() for multicast on wildcard-
+        // bound sockets in Docker bridge network namespaces.
         let discovery_socket = {
             let mcast_bind =
                 SocketAddrV6::new(mcast_addr, config.discovery_port, 0, primary_iface.index);
@@ -488,10 +493,21 @@ impl AutoInterface {
                 SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.discovery_port, 0, 0);
             let std_sock =
                 bind_udp6(mcast_bind, true).or_else(|_| bind_udp6(wildcard_bind, true))?;
+            log::info!(
+                "AutoInterface: multicast socket bound to {:?}",
+                std_sock.local_addr()
+            );
             for iface in &interfaces {
                 join_multicast(&std_sock, &mcast_addr, iface.index)?;
+                log::info!(
+                    "AutoInterface: joined multicast {} on if_index {}",
+                    mcast_addr,
+                    iface.index
+                );
             }
-            Arc::new(UdpSocket::from_std(std_sock)?)
+            // Keep as blocking std socket — discovery_loop will use OS threads
+            std_sock.set_nonblocking(false)?;
+            std_sock
         };
 
         // Unicast discovery: try specific link-local first, fall back to wildcard.
@@ -504,9 +520,10 @@ impl AutoInterface {
             );
             let wildcard =
                 SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.discovery_port + 1, 0, 0);
-            Arc::new(UdpSocket::from_std(
-                bind_udp6(specific, false).or_else(|_| bind_udp6(wildcard, true))?,
-            )?)
+            let std_sock = bind_udp6(specific, false).or_else(|_| bind_udp6(wildcard, true))?;
+            // Keep as blocking std socket — discovery_loop will use OS threads
+            std_sock.set_nonblocking(false)?;
+            std_sock
         };
 
         // Collect our own addresses (link-local + ULA) to ignore our own packets
@@ -757,8 +774,8 @@ impl ReteInterface for AutoInterface {
 #[allow(clippy::too_many_arguments)]
 async fn discovery_loop(
     shared: Arc<Mutex<SharedState>>,
-    mcast_socket: Arc<UdpSocket>,
-    unicast_socket: Arc<UdpSocket>,
+    mcast_socket: std::net::UdpSocket,
+    unicast_socket: std::net::UdpSocket,
     mcast_addr: Ipv6Addr,
     group_id: Vec<u8>,
     our_addrs: Vec<Ipv6Addr>,
@@ -771,8 +788,79 @@ async fn discovery_loop(
         tokio::time::interval(std::time::Duration::from_secs_f64(announce_interval));
     announce_tick.tick().await; // consume immediate tick
 
-    let mut mcast_buf = [0u8; 64];
-    let mut ucast_buf = [0u8; 64];
+    // Spawn blocking OS threads for multicast and unicast discovery recv.
+    // Tokio's epoll-based recv_from() can fail to wake for multicast on
+    // wildcard-bound sockets in Docker bridge network namespaces. Blocking
+    // recv on a dedicated thread bypasses epoll entirely and is proven to
+    // work (validated by raw socket tests).
+    let (mcast_tx, mut mcast_rx) =
+        tokio::sync::mpsc::channel::<(Vec<u8>, std::net::SocketAddr)>(64);
+    mcast_socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .ok();
+    std::thread::Builder::new()
+        .name("auto-mcast-recv".into())
+        .spawn(move || {
+            let mut buf = [0u8; 64];
+            loop {
+                match mcast_socket.recv_from(&mut buf) {
+                    Ok((n, src)) => {
+                        if mcast_tx.blocking_send((buf[..n].to_vec(), src)).is_err() {
+                            break; // channel closed — shutdown
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        // Read timeout — check if channel is still open
+                        if mcast_tx.is_closed() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("AutoInterface: mcast recv error: {e}");
+                        break;
+                    }
+                }
+            }
+            log::debug!("AutoInterface: mcast recv thread exiting");
+        })
+        .expect("failed to spawn mcast recv thread");
+
+    let (ucast_tx, mut ucast_rx) =
+        tokio::sync::mpsc::channel::<(Vec<u8>, std::net::SocketAddr)>(64);
+    unicast_socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .ok();
+    std::thread::Builder::new()
+        .name("auto-ucast-recv".into())
+        .spawn(move || {
+            let mut buf = [0u8; 64];
+            loop {
+                match unicast_socket.recv_from(&mut buf) {
+                    Ok((n, src)) => {
+                        if ucast_tx.blocking_send((buf[..n].to_vec(), src)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        if ucast_tx.is_closed() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("AutoInterface: ucast recv error: {e}");
+                        break;
+                    }
+                }
+            }
+            log::debug!("AutoInterface: ucast recv thread exiting");
+        })
+        .expect("failed to spawn ucast recv thread");
 
     loop {
         tokio::select! {
@@ -790,43 +878,39 @@ async fn discovery_loop(
                 }
             }
 
-            // Multicast discovery reception
-            result = mcast_socket.recv_from(&mut mcast_buf) => {
-                if let Ok((n, src)) = result {
-                    if n == 32 {
-                        if let std::net::SocketAddr::V6(src_v6) = src {
-                            let src_ip = *src_v6.ip();
-                            if !our_addrs.contains(&src_ip) {
-                                handle_discovery_packet(
-                                    &mcast_buf[..32],
-                                    src_ip,
-                                    src_v6.scope_id(),
-                                    &group_id,
-                                    &iface_tokens,
-                                    &shared,
-                                ).await;
-                            }
+            // Multicast discovery reception (from blocking thread)
+            Some((data, src)) = mcast_rx.recv() => {
+                if data.len() == 32 {
+                    if let std::net::SocketAddr::V6(src_v6) = src {
+                        let src_ip = *src_v6.ip();
+                        if !our_addrs.contains(&src_ip) {
+                            handle_discovery_packet(
+                                &data,
+                                src_ip,
+                                src_v6.scope_id(),
+                                &group_id,
+                                &iface_tokens,
+                                &shared,
+                            ).await;
                         }
                     }
                 }
             }
 
-            // Unicast discovery reception (reverse peering)
-            result = unicast_socket.recv_from(&mut ucast_buf) => {
-                if let Ok((n, src)) = result {
-                    if n == 32 {
-                        if let std::net::SocketAddr::V6(src_v6) = src {
-                            let src_ip = *src_v6.ip();
-                            if !our_addrs.contains(&src_ip) {
-                                handle_discovery_packet(
-                                    &ucast_buf[..32],
-                                    src_ip,
-                                    src_v6.scope_id(),
-                                    &group_id,
-                                    &iface_tokens,
-                                    &shared,
-                                ).await;
-                            }
+            // Unicast discovery reception (from blocking thread)
+            Some((data, src)) = ucast_rx.recv() => {
+                if data.len() == 32 {
+                    if let std::net::SocketAddr::V6(src_v6) = src {
+                        let src_ip = *src_v6.ip();
+                        if !our_addrs.contains(&src_ip) {
+                            handle_discovery_packet(
+                                &data,
+                                src_ip,
+                                src_v6.scope_id(),
+                                &group_id,
+                                &iface_tokens,
+                                &shared,
+                            ).await;
                         }
                     }
                 }
@@ -836,6 +920,9 @@ async fn discovery_loop(
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
                     log::info!("AutoInterface: discovery loop shutting down");
+                    // Dropping mcast_rx and ucast_rx closes channels,
+                    // which causes the blocking threads to exit on their
+                    // next send attempt (after the 1s read timeout).
                     return;
                 }
             }

@@ -1,0 +1,48 @@
+networks:
+  rete-lan:
+    driver: bridge
+
+services:
+  rnsd:
+    build:
+      context: ..
+      dockerfile: rnsd-node.Dockerfile
+    networks:
+      - rete-lan
+    environment:
+      - RNSD_PORT=4242
+    ports:
+      - "0:4242"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',4242),1); s.close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
+
+  rust-node:
+    build:
+      context: ..
+      dockerfile: rust-node.Dockerfile
+    networks:
+      - rete-lan
+    volumes:
+      - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
+    command: ["--connect", "rnsd:4242"]
+    depends_on:
+      rnsd:
+        condition: service_healthy
+
+  python-valid:
+    build:
+      context: ..
+      dockerfile: python-node.Dockerfile
+    networks:
+      - rete-lan
+    stdin_open: true
+    volumes:
+      - ../../interop:/opt/tests:ro
+    command: ["/opt/tests/docker_py_helpers/robustness_valid.py", "--host", "rnsd", "--port", "4242", "--timeout", "120"]
+    depends_on:
+      rnsd:
+        condition: service_healthy

@@ -53,65 +53,65 @@ test-unit:
     echo "═══════════════════════════════════════════════════"
     exit $RC
 
-# E2E interop against Python RNS (requires uv + rns)
+# E2E interop against Python RNS (Docker-isolated containers)
 test-e2e:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python live_interop.py
+    cd tests/interop && uv run python docker_live_interop.py
 
-# E2E relay interop (3-node topology)
+# E2E relay interop (3-node topology, Docker)
 test-e2e-relay:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python relay_interop.py
+    cd tests/interop && uv run python docker_relay_interop.py
 
-# E2E transport relay interop (Rust as multi-interface transport relay)
+# E2E transport relay interop (Rust as multi-interface transport relay, Docker)
 test-e2e-transport-relay:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python transport_relay_interop.py
+    cd tests/interop && uv run python docker_transport_relay_interop.py
 
-# E2E path request interop (Rust responds to path requests)
+# E2E path request interop (Rust responds to path requests, Docker)
 test-e2e-path-request:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python path_request_interop.py
+    cd tests/interop && uv run python docker_path_request_interop.py
 
-# E2E proof routing interop (proofs route back through Rust relay)
+# E2E proof routing interop (proofs route back through Rust relay, Docker)
 test-e2e-proof-routing:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python proof_routing_interop.py
+    cd tests/interop && uv run python docker_proof_routing_interop.py
 
-# E2E link interop (Python establishes Link to Rust)
+# E2E link interop (Python establishes Link to Rust, Docker)
 test-e2e-link:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python link_interop.py
+    cd tests/interop && uv run python docker_link_interop.py
 
-# E2E channel interop (Python sends Channel messages to Rust via Link)
+# E2E channel interop (Python sends Channel messages to Rust via Link, Docker)
 test-e2e-channel:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python channel_interop.py
+    cd tests/interop && uv run python docker_channel_interop.py
 
-# E2E resource interop (Python transfers Resource to/from Rust via Link)
+# E2E resource interop (Python transfers Resource to/from Rust via Link, Docker)
 test-e2e-resource:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python resource_interop.py
+    cd tests/interop && uv run python docker_resource_interop.py
 
-# E2E IFAC interop (Interface Access Control)
+# E2E IFAC interop (Interface Access Control, Docker)
 test-e2e-ifac:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python ifac_interop.py
+    cd tests/interop && uv run python docker_ifac_interop.py
 
-# E2E local IPC interop (shared instance Unix socket)
+# E2E local IPC interop (shared instance Unix socket — subprocess, no Docker)
 test-e2e-local-ipc:
     cargo build -p rete-example-linux
     cd tests/interop && uv run python local_ipc_interop.py
 
-# E2E robustness interop (edge cases and error handling)
+# E2E robustness interop (malformed packets, Docker)
 test-e2e-robustness:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python robustness_interop.py
+    cd tests/interop && uv run python docker_robustness_interop.py
 
-# E2E auto interface interop (mDNS peer discovery)
+# E2E auto interface interop (mDNS peer discovery, Docker)
 test-e2e-auto:
     cargo build -p rete-example-linux
-    cd tests/interop && uv run python auto_interop.py
+    cd tests/interop && uv run python docker_auto_interop.py
 
 # CONVENTION: When adding a new interop test:
 #   1. Add an individual recipe (test-e2e-<name>)
@@ -374,14 +374,14 @@ test-all:
         echo ""
     }
 
-    # Core (7)
-    run_e2e LIVE live_interop.py
-    run_e2e LINK link_interop.py
-    run_e2e CHANNEL channel_interop.py
-    run_e2e RELAY relay_interop.py
-    run_e2e PATHREQ path_request_interop.py
-    run_e2e PROOF proof_routing_interop.py
-    run_e2e ROBUSTNESS robustness_interop.py
+    # Core (7) — Docker-isolated
+    run_e2e LIVE docker_live_interop.py
+    run_e2e LINK docker_link_interop.py
+    run_e2e CHANNEL docker_channel_interop.py
+    run_e2e RELAY docker_relay_interop.py
+    run_e2e PATHREQ docker_path_request_interop.py
+    run_e2e PROOF docker_proof_routing_interop.py
+    run_e2e ROBUSTNESS docker_robustness_interop.py
 
     # Link advanced (8)
     run_e2e LINKINIT link_initiate_interop.py
@@ -393,23 +393,23 @@ test-all:
     run_e2e CONCURRENT concurrent_links_interop.py
     run_e2e TEARDOWN link_teardown_race_interop.py
 
-    # IFAC (5)
-    run_e2e IFAC ifac_interop.py
+    # IFAC (5) — base IFAC Docker-isolated
+    run_e2e IFAC docker_ifac_interop.py
     run_e2e IFACMISMATCH ifac_mismatch_interop.py
     run_e2e IFACRELAY ifac_relay_interop.py
     run_e2e IFACLINK ifac_link_interop.py
     run_e2e IFACLARGE ifac_large_packet_interop.py
 
-    # Transport/relay (6)
-    run_e2e TRANSPORT transport_relay_interop.py
+    # Transport/relay (6) — base transport Docker-isolated
+    run_e2e TRANSPORT docker_transport_relay_interop.py
     run_e2e DUAL dual_interface_interop.py
     run_e2e MULTIHOP multi_hop_relay_interop.py
     run_e2e CHANRELAY channel_relay_interop.py
     run_e2e RESRELAY resource_relay_interop.py
     run_e2e RESINITRELAY resource_initiate_relay_interop.py
 
-    # Auto/mDNS (3)
-    run_e2e AUTO auto_interop.py
+    # Auto/mDNS (3) — base auto Docker-isolated
+    run_e2e AUTO docker_auto_interop.py
     run_e2e AUTODATA auto_data_interop.py
     run_e2e AUTOGROUP auto_group_isolation_interop.py
 
@@ -433,8 +433,8 @@ test-all:
     run_e2e TCPDISC tcp_disconnect_interop.py
     run_e2e HDLC hdlc_recovery_interop.py
 
-    # Resource (5)
-    run_e2e RESOURCE resource_interop.py
+    # Resource (5) — base resource Docker-isolated
+    run_e2e RESOURCE docker_resource_interop.py
     run_e2e RESCONCUR resource_concurrent_interop.py
     run_e2e RESMULTISEG resource_multiseg_interop.py
     run_e2e RESMULTI resource_multiwindow_interop.py
@@ -930,23 +930,14 @@ gen-vectors:
     python3 generate_test_vectors.py --out tests/interop/vectors.json
 
 # --------------------------------------------------------------------------
-# Docker-isolated topology tests (requires Docker)
+# Docker utilities
 # --------------------------------------------------------------------------
 
 # Build Docker test images for topology tests
 docker-build-test-images:
     docker build -t rete-test-rust:latest -f tests/docker/rust-node.Dockerfile tests/docker/
     docker build -t rete-test-python:latest -f tests/docker/python-node.Dockerfile tests/docker/
-
-# E2E AutoInterface discovery via Docker containers (no soft-skip)
-test-docker-auto: docker-build-test-images
-    cargo build -p rete-example-linux
-    cd tests/interop && uv run python docker_auto_interop.py
-
-# All Docker-isolated topology tests
-test-docker-all: docker-build-test-images
-    cargo build -p rete-example-linux
-    cd tests/interop && uv run python docker_auto_interop.py
+    docker build -t rete-test-rnsd:latest -f tests/docker/rnsd-node.Dockerfile tests/docker/
 
 # --------------------------------------------------------------------------
 # Cross-compilation checks (no hardware needed)

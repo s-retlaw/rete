@@ -87,12 +87,11 @@ def main():
         "example",
         "v1",
     )
-    dest.announce()
     print(f"PY_IDENTITY:{identity.hexhash}", flush=True)
     print(f"PY_DEST_HASH:{dest.hexhash}", flush=True)
-    print("PY_ANNOUNCE_SENT", flush=True)
 
-    # Discover peers
+    # Discover peers FIRST — AutoInterface sends data to known peers only,
+    # so announcing before we have any peers means the announce goes nowhere.
     discovered = set()
     deadline = time.time() + args.timeout
     while time.time() < deadline:
@@ -109,9 +108,12 @@ def main():
     else:
         print("PY_NO_PEERS_FOUND", flush=True)
 
-    # Stay alive so Rust can also discover us via multicast
-    # Python's AutoInterface re-announces periodically (~1.6s interval)
-    time.sleep(15)
+    # Now announce — peers are known, so the announce reaches them
+    dest.announce()
+    print("PY_ANNOUNCE_SENT", flush=True)
+
+    # Stay alive briefly so Rust can process the announce
+    time.sleep(5)
     print("PY_DONE", flush=True)
 
 
