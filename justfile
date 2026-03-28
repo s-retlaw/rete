@@ -618,8 +618,11 @@ ci-full: test-unit lint fmt-check test-e2e
 # ESP32-C6 (serial — no WiFi needed, just USB cable)
 # --------------------------------------------------------------------------
 
+esp32c3_target := "riscv32imc-unknown-none-elf"
 esp32c6_target := "riscv32imac-unknown-none-elf"
+esp32s3_target := "xtensa-esp32s3-none-elf"
 esp32c6_dir := "examples/esp32c6"
+esp32s3_dir := "examples/esp32s3"
 serial_port := env("SERIAL_PORT", "/dev/ttyUSB0")
 
 # Build the ESP32-C6 serial firmware
@@ -656,6 +659,66 @@ build-esp32c6-wifi:
 flash-esp32c6-wifi: build-esp32c6-wifi
     espflash flash --port {{serial_port}} \
         {{esp32c6_dir}}/target/{{esp32c6_target}}/release/rete-esp32c6
+
+# --------------------------------------------------------------------------
+# ESP32-C3 (RISC-V — shares crate with C6 via feature flag)
+# --------------------------------------------------------------------------
+
+# Build the ESP32-C3 serial firmware
+build-esp32c3:
+    cd {{esp32c6_dir}} && cargo +nightly build --release \
+        --features esp32c3 --bin rete-esp32c6-serial \
+        --target {{esp32c3_target}}
+
+# Build the ESP32-C3 test firmware
+build-esp32c3-test:
+    cd {{esp32c6_dir}} && cargo +nightly build --release \
+        --features esp32c3 --bin rete-esp32c6-serial-test \
+        --target {{esp32c3_target}}
+
+# Flash the ESP32-C3 serial firmware
+flash-esp32c3: build-esp32c3
+    espflash flash --port {{serial_port}} \
+        {{esp32c6_dir}}/target/{{esp32c3_target}}/release/rete-esp32c6-serial
+
+# Flash the ESP32-C3 test firmware
+flash-esp32c3-test: build-esp32c3-test
+    espflash flash --port {{serial_port}} \
+        {{esp32c6_dir}}/target/{{esp32c3_target}}/release/rete-esp32c6-serial-test
+
+# Build the ESP32-C3 WiFi firmware
+build-esp32c3-wifi:
+    cd {{esp32c6_dir}} && SSID="${SSID:-YOUR_SSID}" PASSWORD="${PASSWORD:-YOUR_PASSWORD}" \
+        RNSD_HOST="${RNSD_HOST:-192.168.1.100}" RNSD_PORT="${RNSD_PORT:-4242}" \
+        cargo +nightly build --release \
+        --features esp32c3,wifi --bin rete-esp32c6 \
+        --target {{esp32c3_target}}
+
+# Flash the ESP32-C3 WiFi firmware
+flash-esp32c3-wifi: build-esp32c3-wifi
+    espflash flash --port {{serial_port}} \
+        {{esp32c6_dir}}/target/{{esp32c3_target}}/release/rete-esp32c6
+
+# --------------------------------------------------------------------------
+# ESP32-S3 (Xtensa — uses esp toolchain fork)
+# --------------------------------------------------------------------------
+
+# Build the ESP32-S3 firmware
+build-esp32s3:
+    cd {{esp32s3_dir}} && cargo +esp build --release \
+        --target {{esp32s3_target}}
+
+# Flash the ESP32-S3 firmware
+flash-esp32s3: build-esp32s3
+    espflash flash --port {{serial_port}} \
+        {{esp32s3_dir}}/target/{{esp32s3_target}}/release/rete-esp32s3
+
+# --------------------------------------------------------------------------
+# ESP32 — build all targets (no flash, just compile check)
+# --------------------------------------------------------------------------
+
+# Build all ESP32 variants
+build-esp32-all: build-esp32c3 build-esp32c6 build-esp32s3
 
 # --------------------------------------------------------------------------
 # Linux example
@@ -952,4 +1015,4 @@ check-embassy:
     cargo check -p rete-embassy
 
 # Check all cross-compilation targets
-check-all: check check-embassy check-rp2040 build-esp32c6
+check-all: check check-embassy check-rp2040 build-esp32-all
