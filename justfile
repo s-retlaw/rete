@@ -891,7 +891,7 @@ test-esp32c6-all: flash-esp32c6-test
             SUMMARY_LINES+=("$(printf '  FAIL  %-40s %s/%s checks' "esp32c6_${name} (${topo})" "$p_str" "$t_str")")
         fi
         # DTR reset between tests to reboot ESP32 (ensures fresh announce on next test)
-        python3 tests/interop/reset_esp32.py {{serial_port}} 2>/dev/null || true
+        (cd tests/interop && uv run python3 reset_esp32.py {{serial_port}}) || true
         sleep 4
     }
     for t in "${TOPO_A[@]}"; do

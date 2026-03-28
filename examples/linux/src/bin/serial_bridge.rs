@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let (stream, addr) = listener.accept().await?;
+        stream.set_nodelay(true)?;
         eprintln!("[bridge] client connected from {addr}");
 
         let (tcp_read, tcp_write) = tokio::io::split(stream);
