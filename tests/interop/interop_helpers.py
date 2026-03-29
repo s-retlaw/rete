@@ -103,6 +103,7 @@ class InteropTest:
         self._stop = threading.Event()
         self.passed = 0
         self.failed = 0
+        self.skipped = 0
         self._total_checks = 0
         self._rust_proc = None
 
@@ -384,6 +385,10 @@ class InteropTest:
                 print(f"  {detail}")
             self.failed += 1
 
+    def skip(self, description, reason):
+        """Record a skipped check with an explanation."""
+        self.skipped += 1
+        self._log(f"SKIP: {description} — {reason}")
 
     # -- output collection --
 
@@ -428,7 +433,8 @@ class InteropTest:
 
     def _print_summary(self):
         total = self.passed + self.failed
-        print(f"\n[{self.name}] Results: {self.passed}/{total} passed, {self.failed}/{total} failed")
+        skip_str = f", {self.skipped} skipped" if self.skipped else ""
+        print(f"\n[{self.name}] Results: {self.passed}/{total} passed, {self.failed}/{total} failed{skip_str}")
         if self.failed > 0:
             sys.exit(1)
         else:

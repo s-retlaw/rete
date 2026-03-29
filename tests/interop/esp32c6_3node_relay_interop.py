@@ -339,19 +339,14 @@ def main():
         t.check(got_greeting, "ESP32 greeting received through relay",
                 detail=f"received {len(received_channel_msgs)} channel msgs")
 
-        # SKIPPED: Channel echo on first link.
-        # Python RNS TCPClientInterface disconnects ~30s into the test under
-        # heavy announce retransmission traffic.  rnsd tears down the
-        # link_table entry on reconnect, so the echo response from ESP32
-        # can no longer be forwarded.  This is a Python RNS stability issue.
-        t._log("SKIP [7]: Channel echo (Python RNS TCP reconnect drops rnsd link_table)")
-
-        # SKIPPED: Phase 5 (request/response) and Phase 6 (resource transfer).
-        # Both depend on the same link that is disrupted by the Python RNS
-        # TCPClientInterface reconnect described above.  Same root cause as
-        # the channel echo skip.
-        t._log("SKIP [8]: Request/response (same TCP reconnect issue)")
-        t._log("SKIP [9]: Resource transfer (same TCP reconnect issue)")
+        # Skipped: channel echo, request/response, and resource transfer on
+        # the first link.  Python RNS TCPClientInterface disconnects ~30s
+        # into the test under heavy announce retransmission traffic.  rnsd
+        # tears down the link_table entry on reconnect, so responses from
+        # ESP32 can no longer be forwarded.  This is a Python RNS issue.
+        t.skip("Channel echo on first link", "Python RNS TCP reconnect drops rnsd link_table")
+        t.skip("Request/response through relay", "same TCP reconnect issue")
+        t.skip("Resource transfer through relay", "same TCP reconnect issue")
 
         # === (Phase 6 skipped — see above) ===
 
@@ -397,11 +392,10 @@ def main():
 
         t.check(len(links) == 4, f"All 4 link slots filled through relay (got {len(links)})")
 
-        # SKIPPED: Channel echo on all 4 concurrent links.
-        # At 115200 baud with 4 simultaneous links, serial throughput
-        # contention causes 1 of 4 echo responses to arrive after the
-        # timeout.  This is a serial bandwidth limitation, not a relay bug.
-        t._log("SKIP: Channel echo on 4 concurrent links (serial throughput contention)")
+        # Skipped: at 115200 baud with 4 simultaneous links, serial
+        # throughput contention causes 1 of 4 echo responses to arrive
+        # after the timeout.  This is a serial bandwidth limitation.
+        t.skip("Channel echo on 4 concurrent links", "serial throughput contention at 115200 baud")
 
         # Tear down all 4
         for lnk in links:

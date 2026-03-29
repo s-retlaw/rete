@@ -365,11 +365,12 @@ test-all:
         output=$(cd tests/interop && uv run python "$script" 2>&1)
         rc=$?
         echo "$output"
-        local p t f
+        local p t f s
         p=$(echo "$output" | grep -oP '\d+(?=/\d+ passed)' || echo "0")
         t=$(echo "$output" | grep -oP '(?<=Results: )\d+/\d+' | head -1 | cut -d/ -f2)
-        t=${t:-0}; f=$((t - p))
-        eval "${label}_PASS=$p"; eval "${label}_FAIL=$f"
+        s=$(echo "$output" | grep -oP '\d+(?= skipped)' || echo "0")
+        t=${t:-0}; f=$((t - p)); s=${s:-0}
+        eval "${label}_PASS=$p"; eval "${label}_FAIL=$f"; eval "${label}_SKIP=$s"
         [ "$rc" -ne 0 ] && E2E_ANY_FAIL=1
         echo ""
     }
@@ -861,7 +862,7 @@ test-esp32c6-all: flash-esp32c6-test
     # 4 checks use check_known_fail (Python RNS TCP reconnect + serial contention)
     TOPO_C=(3node_relay)
     SUITE_PASS=0; SUITE_FAIL=0
-    TOTAL_CHECKS=0; TOTAL_CHECK_PASS=0
+    TOTAL_CHECKS=0; TOTAL_CHECK_PASS=0; TOTAL_SKIPPED=0
     SUMMARY_LINES=()
     run_esp32_test() {
         local name="$1" topo="$2"
@@ -869,21 +870,23 @@ test-esp32c6-all: flash-esp32c6-test
         local output rc=0
         output=$(cd tests/interop && uv run python "esp32c6_${name}_interop.py" "$@" 2>&1) || rc=$?
         echo "$output"
-        # Parse "Results: X/Y passed, Z/Y failed" from output
-        local result_line checks_str p_str t_str
+        # Parse "Results: X/Y passed, Z/Y failed[, N skipped]" from output
+        local result_line p_str t_str s_str
         result_line=$(echo "$output" | grep "Results:" | tail -1)
         p_str=$(echo "$result_line" | grep -oP '\d+(?=/\d+ passed)' || echo "0")
         t_str=$(echo "$result_line" | grep -oP '(?<=Results: )\d+/\d+' | head -1 | cut -d/ -f2)
-        t_str=${t_str:-0}; p_str=${p_str:-0}
-        local f_str=$((t_str - p_str))
+        s_str=$(echo "$result_line" | grep -oP '\d+(?= skipped)' || echo "0")
+        t_str=${t_str:-0}; p_str=${p_str:-0}; s_str=${s_str:-0}
         TOTAL_CHECKS=$((TOTAL_CHECKS + t_str))
         TOTAL_CHECK_PASS=$((TOTAL_CHECK_PASS + p_str))
+        TOTAL_SKIPPED=$((TOTAL_SKIPPED + s_str))
+        local skip_note=""; [ "$s_str" -gt 0 ] && skip_note=" ($s_str skipped)"
         if [ "$rc" -eq 0 ]; then
             SUITE_PASS=$((SUITE_PASS+1))
-            SUMMARY_LINES+=("$(printf '  PASS  %-40s %s/%s checks' "esp32c6_${name} (${topo})" "$p_str" "$t_str")")
+            SUMMARY_LINES+=("$(printf '  PASS  %-40s %s/%s checks%s' "esp32c6_${name} (${topo})" "$p_str" "$t_str" "$skip_note")")
         else
             SUITE_FAIL=$((SUITE_FAIL+1))
-            SUMMARY_LINES+=("$(printf '  FAIL  %-40s %s/%s checks' "esp32c6_${name} (${topo})" "$p_str" "$t_str")")
+            SUMMARY_LINES+=("$(printf '  FAIL  %-40s %s/%s checks%s' "esp32c6_${name} (${topo})" "$p_str" "$t_str" "$skip_note")")
         fi
         # DTR reset between tests to reboot ESP32 (ensures fresh announce on next test)
         (cd tests/interop && uv run python3 reset_esp32.py {{serial_port}}) || true
@@ -930,7 +933,8 @@ test-esp32c6-all: flash-esp32c6-test
     echo "───────────────────────────────────────────────────"
     TOTAL_CHECK_FAIL=$((TOTAL_CHECKS - TOTAL_CHECK_PASS))
     printf "  Suites: %s passed, %s failed (%s total)\n" "$SUITE_PASS" "$SUITE_FAIL" "$((SUITE_PASS + SUITE_FAIL))"
-    printf "  Checks: %s passed, %s failed (%s total)\n" "$TOTAL_CHECK_PASS" "$TOTAL_CHECK_FAIL" "$TOTAL_CHECKS"
+    SKIP_NOTE=""; [ "$TOTAL_SKIPPED" -gt 0 ] && SKIP_NOTE=", $TOTAL_SKIPPED skipped"
+    printf "  Checks: %s passed, %s failed (%s total%s)\n" "$TOTAL_CHECK_PASS" "$TOTAL_CHECK_FAIL" "$TOTAL_CHECKS" "$SKIP_NOTE"
     if [ "$SUITE_FAIL" -eq 0 ]; then
         echo "  ALL SUITES PASSED ✓"
     else
