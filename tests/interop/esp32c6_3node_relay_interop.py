@@ -1,16 +1,53 @@
 #!/usr/bin/env python3
-# 4 checks are SKIPPED (not run) due to external issues:
 #
-#   Channel echo on first link, request/response, resource transfer:
-#     Python RNS TCPClientInterface disconnects ~30s into the test under
-#     heavy announce retransmission traffic.  rnsd tears down the
-#     link_table entry on reconnect, so responses from ESP32 can no
-#     longer be forwarded.  This is a Python RNS stability issue, not a
-#     rete relay bug.
+# Skipped checks (4 of 17)
+# ========================
 #
-#   Channel echo on 4 concurrent links:
-#     Serial throughput contention at 115200 baud with 4 simultaneous
-#     links causes 1 of 4 echo responses to arrive after the timeout.
+# SKIP 1-3: Channel echo, request/response, resource transfer on first link
+#
+#   Root cause: Python RNS TCPClientInterface TCP disconnect
+#
+#   About 30 seconds into the test, Python RNS's TCPClientInterface
+#   connection to rnsd resets ([Errno 104] Connection reset by peer).
+#   rnsd logs the sequence:
+#
+#     [00:19:47] Link request proof validated for transport   ← link works
+#     [00:19:59] Connection reset by peer on <Python port>    ← TCP dies
+#     [00:19:59] Tunnel endpoint reappeared. Restoring paths  ← reconnects
+#     [00:20:03] Released 1 link                              ← link_table gone
+#
+#   The reset happens during heavy announce retransmission traffic (ESP32
+#   re-announces every 10s, each retransmitted by rete-linux and rnsd).
+#   When rnsd tears down the old client interface on reconnect, it also
+#   releases the link_table entry that was routing link traffic.  After
+#   that, echo responses / request responses / resource data from ESP32
+#   can no longer be forwarded through rnsd to Python.
+#
+#   This is confirmed to NOT be a rete relay bug.  Full packet logging
+#   on rete-linux shows all link data (greeting, echo, keepalive) is
+#   correctly forwarded in both directions through the link_table.  The
+#   greeting (channel seq=0) arrives and is delivered to Python.  The
+#   failure only occurs after rnsd drops the link_table entry.
+#
+#   Likely trigger: Python RNS TCPClientInterface watchdog/keepalive
+#   timeout under GIL contention between the interface read thread and
+#   the test's main thread, or HDLC buffer pressure from announce floods.
+#
+#   Potential workarounds (not yet attempted):
+#   - Increase ESP32 announce interval from 10s to 60s (less traffic)
+#   - Set ingress_control=true on Python's TCPClientInterface
+#   - File upstream bug: rnsd should preserve link_table across reconnect
+#
+# SKIP 4: Channel echo on 4 concurrent links (3/4 pass, 1 times out)
+#
+#   Root cause: serial bandwidth limitation
+#
+#   At 115200 baud (~11.5 KB/s), 4 simultaneous links generate enough
+#   concurrent traffic (keepalives + channel messages + proofs) that one
+#   of the 4 echo responses consistently arrives after the 5-second
+#   timeout.  The serial interface is the bottleneck — all 4 links share
+#   a single UART.  This is not a relay logic bug.
+#
 """ESP32-C6 3-node relay interop — Topology C (Python RNS <-> rete-linux relay <-> ESP32).
 
 Tests multi-hop relay through the Rust node:
