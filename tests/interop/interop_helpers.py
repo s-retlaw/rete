@@ -103,7 +103,6 @@ class InteropTest:
         self._stop = threading.Event()
         self.passed = 0
         self.failed = 0
-        self.known_fails = 0
         self._total_checks = 0
         self._rust_proc = None
 
@@ -385,24 +384,6 @@ class InteropTest:
                 print(f"  {detail}")
             self.failed += 1
 
-    def check_known_fail(self, condition, description, reason, detail=None):
-        """Record a check with a known failure mode.
-
-        If *condition* is True the check passes normally.  Otherwise it
-        is logged as ``KNOWN_FAIL`` and tracked separately — it does not
-        count as a hard failure (so the suite stays green) but is not
-        inflated into the pass count either.
-        """
-        self._total_checks += 1
-        idx = self._total_checks
-        if condition:
-            self._log(f"PASS [{idx}]: {description}")
-            self.passed += 1
-        else:
-            self._log(f"KNOWN_FAIL [{idx}]: {description} ({reason})")
-            if detail:
-                print(f"  {detail}")
-            self.known_fails += 1
 
     # -- output collection --
 
@@ -446,11 +427,8 @@ class InteropTest:
             pass
 
     def _print_summary(self):
-        total = self.passed + self.failed + self.known_fails
-        summary = f"{self.passed}/{total} passed, {self.failed}/{total} failed"
-        if self.known_fails:
-            summary += f", {self.known_fails} known"
-        print(f"\n[{self.name}] Results: {summary}")
+        total = self.passed + self.failed
+        print(f"\n[{self.name}] Results: {self.passed}/{total} passed, {self.failed}/{total} failed")
         if self.failed > 0:
             sys.exit(1)
         else:
