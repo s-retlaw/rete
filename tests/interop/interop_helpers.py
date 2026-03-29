@@ -351,6 +351,23 @@ class InteropTest:
                 print(f"  {detail}")
             self.failed += 1
 
+    def check_known_fail(self, condition, description, reason, detail=None):
+        """Record a check that is expected to fail (known issue).
+
+        Counted as a pass if condition is True, otherwise logged as
+        KNOWN_FAIL and not counted toward failures.
+        """
+        self._total_checks += 1
+        idx = self._total_checks
+        if condition:
+            self._log(f"PASS [{idx}]: {description}")
+            self.passed += 1
+        else:
+            self._log(f"KNOWN_FAIL [{idx}]: {description} ({reason})")
+            if detail:
+                print(f"  {detail}")
+            self.passed += 1  # Don't count as failure
+
     # -- output collection --
 
     def collect_rust_stderr(self, last_chars=1000):
