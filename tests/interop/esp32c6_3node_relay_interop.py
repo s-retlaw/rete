@@ -269,9 +269,6 @@ def main():
         link_closed = [False]
         received_link_data = []
 
-        def link_established_cb(link):
-            link_established[0] = True
-
         def link_closed_cb(link):
             link_closed[0] = True
 
@@ -326,7 +323,6 @@ def main():
         # NOTE: RNS.Transport.link_table here is this test process's own
         # link_table — always empty because enable_transport=no.  rnsd
         # runs in a separate process with its own Python runtime.
-        lid_bytes = link.link_id
         t._log(f"  test process link_table entries={len(RNS.Transport.link_table)} (expected 0, this is NOT rnsd)")
         # Re-check path_table via at link time to see what relay was targeted
         path_entry = RNS.Transport.path_table.get(esp32_dest_hash)
@@ -336,7 +332,7 @@ def main():
         # === Phase 4: Channel message through relay ===
         t._log("=== Phase 4: Channel messages ===")
 
-        # Channel + handler already registered in link_established_with_channel above
+        # get_channel() returns the same Channel object initialized in the callback
         channel = link.get_channel()
 
         time.sleep(2.0)  # LRRTT stabilization — greeting may arrive here
@@ -451,7 +447,7 @@ def main():
             time.sleep(1.5)  # LRRTT stabilization
             links.append(lnk)
 
-            # Channel already set up in _est_cb
+            # Returns the same Channel initialized in _est_cb (needed for channels list)
             ch = lnk.get_channel()
             channels.append((ch, msgs_i))
 
@@ -519,7 +515,7 @@ def main():
         t.check(inbound_link_established[0], "ESP32-initiated link established through relay")
 
         if inbound_link_established[0] and inbound_link[0]:
-            # Channel already set up in inbound_link_cb
+            # Returns the same Channel initialized in inbound_link_cb
             inbound_ch = inbound_link[0].get_channel()
 
             # Wait for ESP32 greeting through channel
@@ -561,7 +557,6 @@ def main():
         # Dump diagnostics
         t.dump_output("Rust stdout", rust_lines)
         t.dump_output("Rust stderr", rust_stderr.strip().split("\n"))
-
 
         # Cleanup
         RNS.Reticulum.exit_handler()

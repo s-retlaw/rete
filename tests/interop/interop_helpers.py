@@ -103,6 +103,7 @@ class InteropTest:
         self._stop = threading.Event()
         self.passed = 0
         self.failed = 0
+        self.known_fails = 0
         self._total_checks = 0
         self._rust_proc = None
 
@@ -336,6 +337,39 @@ class InteropTest:
             self._rust_proc.stdin.write(f"{command}\n".encode())
             self._rust_proc.stdin.flush()
 
+    # -- discovery --
+
+    def discover_esp32_path(self, our_dest, app_name, aspects, timeout=None):
+        """Discover an ESP32 destination from the RNS path_table.
+
+        Polls ``RNS.Transport.path_table`` for entries whose recalled
+        identity, combined with *app_name*/*aspects*, reconstructs to
+        the same destination hash.  This filters out secondary
+        destinations (e.g. ``rete/test/secondary``) that share the
+        same identity but have different aspects.
+
+        Returns the destination hash (bytes) or ``None`` on timeout.
+        """
+        import RNS
+        timeout = timeout or self.timeout
+        self._log("waiting for ESP32 announce (path discovery)...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for h in list(RNS.Transport.path_table):
+                if h == our_dest.hash:
+                    continue
+                recalled = RNS.Identity.recall(h)
+                if recalled:
+                    candidate = RNS.Destination(
+                        recalled, RNS.Destination.OUT,
+                        RNS.Destination.SINGLE, app_name, *aspects,
+                    )
+                    if candidate.hash == h:
+                        self._log(f"discovered ESP32 dest hash: {h.hex()}")
+                        return h
+            time.sleep(0.5)
+        return None
+
     # -- assertions --
 
     def check(self, condition, description, detail=None):
@@ -352,10 +386,12 @@ class InteropTest:
             self.failed += 1
 
     def check_known_fail(self, condition, description, reason, detail=None):
-        """Record a check that is expected to fail (known issue).
+        """Record a check with a known failure mode.
 
-        Counted as a pass if condition is True, otherwise logged as
-        KNOWN_FAIL and not counted toward failures.
+        If *condition* is True the check passes normally.  Otherwise it
+        is logged as ``KNOWN_FAIL`` and tracked separately — it does not
+        count as a hard failure (so the suite stays green) but is not
+        inflated into the pass count either.
         """
         self._total_checks += 1
         idx = self._total_checks
@@ -366,7 +402,7 @@ class InteropTest:
             self._log(f"KNOWN_FAIL [{idx}]: {description} ({reason})")
             if detail:
                 print(f"  {detail}")
-            self.passed += 1  # Don't count as failure
+            self.known_fails += 1
 
     # -- output collection --
 
@@ -410,8 +446,11 @@ class InteropTest:
             pass
 
     def _print_summary(self):
-        total = self.passed + self.failed
-        print(f"\n[{self.name}] Results: {self.passed}/{total} passed, {self.failed}/{total} failed")
+        total = self.passed + self.failed + self.known_fails
+        summary = f"{self.passed}/{total} passed, {self.failed}/{total} failed"
+        if self.known_fails:
+            summary += f", {self.known_fails} known"
+        print(f"\n[{self.name}] Results: {summary}")
         if self.failed > 0:
             sys.exit(1)
         else:

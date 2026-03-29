@@ -59,28 +59,7 @@ def main():
         t._log("sending Python announce...")
         our_dest.announce()
 
-        # Wait for ESP32 announce — discover dynamically from path_table
-        # since ESP32 generates a random identity on each boot.
-        # Filter by matching APP_NAME/ASPECTS to avoid picking up the
-        # secondary destination (rete/test/secondary) registered by the
-        # ESP32 firmware for multi-dest testing.
-        t._log("waiting for ESP32 announce (path discovery)...")
-        esp32_dest_hash = None
-        deadline = time.time() + t.timeout
-        while time.time() < deadline:
-            for h in list(RNS.Transport.path_table):
-                if h == our_dest.hash:
-                    continue
-                recalled = RNS.Identity.recall(h)
-                if recalled:
-                    candidate = RNS.Destination(recalled, RNS.Destination.OUT,
-                                                RNS.Destination.SINGLE, APP_NAME, *ASPECTS)
-                    if candidate.hash == h:
-                        esp32_dest_hash = h
-                        break
-            if esp32_dest_hash:
-                break
-            time.sleep(0.5)
+        esp32_dest_hash = t.discover_esp32_path(our_dest, APP_NAME, ASPECTS)
 
         t.check(esp32_dest_hash is not None, "ESP32 path discovered via announce")
 
