@@ -869,16 +869,15 @@ test-esp32c6-all: flash-esp32c6-test
         local output rc=0
         output=$(cd tests/interop && uv run python "esp32c6_${name}_interop.py" "$@" 2>&1) || rc=$?
         echo "$output"
-        # Parse "Results: X/Y passed, Z/Y failed[, N known]" from output
-        local result_line p_str t_str k_str
+        # Parse "Results: X/Y passed, Z/Y failed" from output
+        local result_line checks_str p_str t_str
         result_line=$(echo "$output" | grep "Results:" | tail -1)
         p_str=$(echo "$result_line" | grep -oP '\d+(?=/\d+ passed)' || echo "0")
         t_str=$(echo "$result_line" | grep -oP '(?<=Results: )\d+/\d+' | head -1 | cut -d/ -f2)
-        k_str=$(echo "$result_line" | grep -oP '\d+(?= known)' || echo "0")
-        t_str=${t_str:-0}; p_str=${p_str:-0}; k_str=${k_str:-0}
-        # known_fails don't count as hard failures in the summary
+        t_str=${t_str:-0}; p_str=${p_str:-0}
+        local f_str=$((t_str - p_str))
         TOTAL_CHECKS=$((TOTAL_CHECKS + t_str))
-        TOTAL_CHECK_PASS=$((TOTAL_CHECK_PASS + p_str + k_str))
+        TOTAL_CHECK_PASS=$((TOTAL_CHECK_PASS + p_str))
         if [ "$rc" -eq 0 ]; then
             SUITE_PASS=$((SUITE_PASS+1))
             SUMMARY_LINES+=("$(printf '  PASS  %-40s %s/%s checks' "esp32c6_${name} (${topo})" "$p_str" "$t_str")")
