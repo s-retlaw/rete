@@ -1098,13 +1098,26 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                                     raw,
                                     source_iface: iface,
                                 };
+                            } else {
+                                relay_log!(
+                                    "[relay] link_table HOP_FAIL lid={} ctx={:#04x} iface={} hops={} in_hops={} out_hops={} rcvd={} out={}",
+                                    hex_short(&dh),
+                                    pkt.context,
+                                    iface,
+                                    pkt.hops,
+                                    lte.inbound_hops,
+                                    lte.outbound_hops,
+                                    lte.received_on,
+                                    lte.outbound_to,
+                                );
                             }
+                        } else {
+                            relay_log!(
+                                "[relay] link_table MISS lid={} ctx={:#04x} (no entry)",
+                                hex_short(&dh),
+                                pkt.context,
+                            );
                         }
-                        relay_log!(
-                            "[relay] link_table MISS lid={} ctx={:#04x} (no entry)",
-                            hex_short(&dh),
-                            pkt.context,
-                        );
                     }
                     // Fall through: non-transport node or no link_table entry.
                     // Try local handling (will return Invalid if link not found).

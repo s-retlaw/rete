@@ -266,9 +266,25 @@ def main():
             received_link_data.append(message)
 
         link = RNS.Link(esp32_dest)
-        link.set_link_established_callback(link_established_cb)
         link.set_link_closed_callback(link_closed_cb)
         link.set_packet_callback(link_packet_callback)
+
+        # Register channel handler + message type IN the established callback
+        # so the ESP32 greeting (sent immediately on LinkEstablished) isn't
+        # silently dropped.  Python RNS Link.receive() checks
+        # `if self._channel:` and skips if None, and also needs the MSGTYPE
+        # registered before the greeting arrives.
+        received_channel_msgs = []
+        def channel_msg_handler(message):
+            t._log(f"CHANNEL_RX: type=0x{message.MSGTYPE:04x} len={len(message.data)} data={message.data[:40]}")
+            received_channel_msgs.append(message.data)
+
+        def link_established_with_channel(lnk):
+            ch = lnk.get_channel()
+            ch.register_message_type(TestMessage)
+            ch.add_message_handler(channel_msg_handler)
+            link_established[0] = True
+        link.set_link_established_callback(link_established_with_channel)
 
         # Wait for link establishment (relay path adds latency: Python → rnsd → rete-linux → serial → ESP32)
         deadline = time.time() + 40
@@ -279,7 +295,7 @@ def main():
 
         if not link_established[0]:
             t._log("Cannot proceed without link")
-            rust_stderr = t.collect_rust_stderr(last_chars=50000)
+            rust_stderr = t.collect_rust_stderr(last_chars=5000)
             t.dump_output("Rust stdout", rust_lines)
             # Filter stderr for packet and relay logs
             all_lines = rust_stderr.strip().split("\n")
@@ -307,36 +323,15 @@ def main():
         # === Phase 4: Channel message through relay ===
         t._log("=== Phase 4: Channel messages ===")
 
-        # Register channel handler BEFORE LRRTT stabilization so the ESP32
-        # greeting (sent once link is established) is captured during the wait.
-        received_channel_msgs = []
-
-        def channel_msg_handler(message):
-            t._log(f"CHANNEL_RX: type=0x{message.MSGTYPE:04x} len={len(message.data)} data={message.data[:40]}")
-            received_channel_msgs.append(message.data)
-
-        # Monkey-patch link to log all incoming packet activity
-        original_receive = link.receive.__func__ if hasattr(link.receive, '__func__') else link.receive
-        _link_pkts_seen = [0]
-        def patched_receive(self_link, data, packet):
-            _link_pkts_seen[0] += 1
-            t._log(f"LINK_PKT_RX #{_link_pkts_seen[0]}: len={len(data)} ctx={packet.context if hasattr(packet,'context') else '?'}")
-            return original_receive(self_link, data, packet)
-        try:
-            link.receive = patched_receive.__get__(link, type(link))
-        except Exception:
-            pass
-
+        # Channel + handler already registered in link_established_with_channel above
         channel = link.get_channel()
-        channel.register_message_type(TestMessage)
-        channel.add_message_handler(channel_msg_handler)
 
         time.sleep(2.0)  # LRRTT stabilization — greeting may arrive here
-        t._log(f"after LRRTT wait: link_pkts={_link_pkts_seen[0]} channel_msgs={len(received_channel_msgs)} link_status={link.status}")
+        t._log(f"after LRRTT wait: channel_msgs={len(received_channel_msgs)} link_status={link.status}")
 
         # Wait for ESP32 greeting
         time.sleep(5.0)
-        t._log(f"after greeting wait: link_pkts={_link_pkts_seen[0]} channel_msgs={len(received_channel_msgs)}")
+        t._log(f"after greeting wait: channel_msgs={len(received_channel_msgs)}")
         got_greeting = any(b"esp32-hello" in m for m in received_channel_msgs)
         t.check(got_greeting, "ESP32 greeting received through relay",
                 detail=f"received {len(received_channel_msgs)} channel msgs")
@@ -422,8 +417,14 @@ def main():
 
         for i in range(4):
             ev = [False]
+            msgs_i = []
             lnk = RNS.Link(esp32_dest)
-            lnk.set_link_established_callback(lambda l, e=ev: e.__setitem__(0, True))
+            def _est_cb(l, e=ev, m=msgs_i):
+                ch = l.get_channel()
+                ch.register_message_type(TestMessage)
+                ch.add_message_handler(lambda msg, acc=m: acc.append(msg.data))
+                e.__setitem__(0, True)
+            lnk.set_link_established_callback(_est_cb)
             # Wait for establishment (30s per link, serial relay adds latency)
             deadline = time.time() + 30
             while time.time() < deadline and not ev[0]:
@@ -434,11 +435,8 @@ def main():
             time.sleep(1.5)  # LRRTT stabilization
             links.append(lnk)
 
-            # Set up channel on this link
+            # Channel already set up in _est_cb
             ch = lnk.get_channel()
-            ch.register_message_type(TestMessage)
-            msgs_i = []
-            ch.add_message_handler(lambda m, acc=msgs_i: acc.append(m.data))
             channels.append((ch, msgs_i))
 
         t.check(len(links) == 4, f"All 4 link slots filled through relay (got {len(links)})")
@@ -480,8 +478,15 @@ def main():
         inbound_link = [None]
         inbound_link_established = [False]
 
+        inbound_channel_msgs = []
+        def inbound_channel_handler(message):
+            inbound_channel_msgs.append(message.data)
+
         def inbound_link_cb(link):
             inbound_link[0] = link
+            ch = link.get_channel()
+            ch.register_message_type(TestMessage)
+            ch.add_message_handler(inbound_channel_handler)
             inbound_link_established[0] = True
 
         our_dest.set_link_established_callback(inbound_link_cb)
@@ -497,15 +502,8 @@ def main():
         t.check(inbound_link_established[0], "ESP32-initiated link established through relay")
 
         if inbound_link_established[0] and inbound_link[0]:
-            # Set up channel handler on the inbound link
-            inbound_channel_msgs = []
-
-            def inbound_channel_handler(message):
-                inbound_channel_msgs.append(message.data)
-
+            # Channel already set up in inbound_link_cb
             inbound_ch = inbound_link[0].get_channel()
-            inbound_ch.register_message_type(TestMessage)
-            inbound_ch.add_message_handler(inbound_channel_handler)
 
             # Wait for ESP32 greeting through channel
             time.sleep(2.0)  # LRRTT stabilization
@@ -546,6 +544,7 @@ def main():
         # Dump diagnostics
         t.dump_output("Rust stdout", rust_lines)
         t.dump_output("Rust stderr", rust_stderr.strip().split("\n"))
+
 
         # Cleanup
         RNS.Reticulum.exit_handler()
