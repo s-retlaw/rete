@@ -117,6 +117,22 @@ impl IngestOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// NodeStats
+// ---------------------------------------------------------------------------
+
+/// Aggregated node statistics, suitable for export to a dashboard or CLI tool.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct NodeStats {
+    /// Transport-layer counters (packets, announces, links, paths, crypto).
+    pub transport: rete_transport::TransportStats,
+    /// Seconds since the node started receiving/sending traffic.
+    pub uptime_secs: u64,
+    /// Identity hash of this node, hex-encoded.
+    pub identity_hash: alloc::string::String,
+}
+
+// ---------------------------------------------------------------------------
 // NodeCore
 // ---------------------------------------------------------------------------
 
@@ -228,6 +244,26 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     /// Returns our destination hash.
     pub fn dest_hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
         self.primary_dest.hash()
+    }
+
+    /// Snapshot of current node statistics.
+    ///
+    /// `now` is the current time in seconds (same epoch as passed to `handle_ingest`
+    /// and `handle_tick`). Used to compute `uptime_secs`.
+    pub fn stats(&self, now: u64) -> NodeStats {
+        let transport = self.transport.stats().clone();
+        let uptime = now.saturating_sub(transport.started_at);
+        let hash = self.identity.hash();
+        use core::fmt::Write as _;
+        let mut identity_hash = alloc::string::String::with_capacity(32);
+        for byte in hash {
+            let _ = write!(identity_hash, "{:02x}", byte);
+        }
+        NodeStats {
+            transport,
+            uptime_secs: uptime,
+            identity_hash,
+        }
     }
 
     /// Returns a reference to the node's identity (for signing, etc.).
@@ -448,8 +484,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .transport
             .recall_identity(dest_hash)
             .ok_or(SendError::UnknownDestination)?;
-        let recipient =
-            Identity::from_public_key(&pub_key).map_err(SendError::Crypto)?;
+        let recipient = Identity::from_public_key(&pub_key).map_err(SendError::Crypto)?;
         let mut ct_buf = [0u8; MTU];
         let ct_len = recipient
             .encrypt(plaintext, rng, &mut ct_buf)
@@ -753,8 +788,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         // Compute request_id from the packet's truncated hash — must match
         // how the receiver computes it (transport.rs uses pkt_hash[..16]).
         // Python RNS Link.py: RequestReceipt uses packet_receipt.truncated_hash.
-        let parsed =
-            rete_core::Packet::parse(&pkt).map_err(SendError::PacketBuild)?;
+        let parsed = rete_core::Packet::parse(&pkt).map_err(SendError::PacketBuild)?;
         let pkt_hash = parsed.compute_hash();
         let mut req_id = [0u8; TRUNCATED_HASH_LEN];
         req_id.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);

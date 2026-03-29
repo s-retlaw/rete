@@ -124,7 +124,7 @@ impl TokioNode {
             NodeCommand::SendData { dest_hash, payload } => {
                 match self.core.build_data_packet(&dest_hash, &payload, rng, now) {
                     Ok(pkt) => {
-                        eprintln!("[rete] cmd: sent DATA to {}", hex::encode(&dest_hash));
+                        eprintln!("[rete] cmd: sent DATA to {}", hex::encode(dest_hash));
                         (vec![OutboundPacket::broadcast(pkt)], true, None)
                     }
                     Err(e) => {
@@ -138,8 +138,8 @@ impl TokioNode {
                     Ok((outbound, link_id)) => {
                         eprintln!(
                             "[rete] cmd: initiated link {} to {}",
-                            hex::encode(&link_id),
-                            hex::encode(&dest_hash)
+                            hex::encode(link_id),
+                            hex::encode(dest_hash)
                         );
                         (vec![outbound], true, None)
                     }
@@ -166,19 +166,19 @@ impl TokioNode {
                 }
             }
             NodeCommand::RequestPath { dest_hash } => {
-                eprintln!("[rete] cmd: requesting path to {}", hex::encode(&dest_hash));
+                eprintln!("[rete] cmd: requesting path to {}", hex::encode(dest_hash));
                 (vec![self.core.request_path(&dest_hash)], true, None)
             }
             NodeCommand::SendLinkData { link_id, payload } => {
                 match self.core.send_link_data(&link_id, &payload, rng) {
                     Ok(outbound) => {
-                        eprintln!("[rete] cmd: sent link data on {}", hex::encode(&link_id));
+                        eprintln!("[rete] cmd: sent link data on {}", hex::encode(link_id));
                         (vec![outbound], true, None)
                     }
                     Err(e) => {
                         eprintln!(
                             "[rete] cmd: link data send failed (link {}): {e}",
-                            hex::encode(&link_id)
+                            hex::encode(link_id)
                         );
                         (vec![], true, None)
                     }
@@ -189,14 +189,14 @@ impl TokioNode {
                     Ok(pkt) => {
                         eprintln!(
                             "[rete] cmd: started resource transfer on link {}",
-                            hex::encode(&link_id)
+                            hex::encode(link_id)
                         );
                         (vec![pkt], true, None)
                     }
                     Err(e) => {
                         eprintln!(
                             "[rete] cmd: resource send failed (link {}): {e}",
-                            hex::encode(&link_id)
+                            hex::encode(link_id)
                         );
                         (vec![], true, None)
                     }
@@ -206,9 +206,9 @@ impl TokioNode {
                 let (pkt, event) = self.core.close_link(&link_id, rng);
                 let packets = pkt.into_iter().collect();
                 if event.is_some() {
-                    eprintln!("[rete] cmd: closed link {}", hex::encode(&link_id));
+                    eprintln!("[rete] cmd: closed link {}", hex::encode(link_id));
                 } else {
-                    eprintln!("[rete] cmd: close failed (link {})", hex::encode(&link_id));
+                    eprintln!("[rete] cmd: close failed (link {})", hex::encode(link_id));
                 }
                 (packets, true, event)
             }
@@ -216,22 +216,20 @@ impl TokioNode {
                 link_id,
                 path,
                 payload,
-            } => {
-                match self.core.send_request(&link_id, &path, &payload, now, rng) {
-                    Ok((outbound, request_id)) => {
-                        eprintln!(
-                            "[rete] cmd: sent request on link {} (req_id={})",
-                            hex::encode(&link_id),
-                            hex::encode(&request_id)
-                        );
-                        (vec![outbound], true, None)
-                    }
-                    Err(e) => {
-                        eprintln!("[rete] cmd: request send failed: {e}");
-                        (vec![], true, None)
-                    }
+            } => match self.core.send_request(&link_id, &path, &payload, now, rng) {
+                Ok((outbound, request_id)) => {
+                    eprintln!(
+                        "[rete] cmd: sent request on link {} (req_id={})",
+                        hex::encode(link_id),
+                        hex::encode(request_id)
+                    );
+                    (vec![outbound], true, None)
                 }
-            }
+                Err(e) => {
+                    eprintln!("[rete] cmd: request send failed: {e}");
+                    (vec![], true, None)
+                }
+            },
             NodeCommand::Announce { app_data } => {
                 self.core.queue_announce(app_data.as_deref(), rng, now);
                 eprintln!("[rete] cmd: queued announce");
@@ -342,12 +340,12 @@ impl TokioNode {
                 } else {
                     eprintln!(
                         "[rete] sent initial DATA to {}: {}",
-                        hex::encode(&dest),
+                        hex::encode(dest),
                         String::from_utf8_lossy(&data)
                     );
                     println!(
                         "DATA_SENT:{}:{}",
-                        hex::encode(&dest),
+                        hex::encode(dest),
                         String::from_utf8_lossy(&data)
                     );
                 }
@@ -620,4 +618,3 @@ pub fn current_time_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
-

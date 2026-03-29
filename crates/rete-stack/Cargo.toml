@@ -11,10 +11,12 @@ categories.workspace = true
 [features]
 default = ["alloc"]
 alloc = []
+serde = ["dep:serde", "rete-transport/serde"]
 
 [dependencies]
 rete-core = { workspace = true }
 rete-transport = { workspace = true }
+serde = { workspace = true, optional = true }
 embedded-io-async = { workspace = true }
 rand_core = { workspace = true }
 heapless = { workspace = true }

@@ -190,7 +190,9 @@ impl LxmfRouter {
         R: rand_core::RngCore + rand_core::CryptoRng,
     {
         let payload = Self::pack_opportunistic(msg);
-        let pkt_data = core.build_data_packet(&msg.destination_hash, &payload, rng, now).ok()?;
+        let pkt_data = core
+            .build_data_packet(&msg.destination_hash, &payload, rng, now)
+            .ok()?;
         Some(OutboundPacket::broadcast(pkt_data))
     }
 

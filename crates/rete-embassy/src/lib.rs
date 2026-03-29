@@ -295,4 +295,3 @@ impl EmbassyNode {
         }
     }
 }
-

@@ -351,6 +351,53 @@ pub struct TickResult {
 }
 
 // ---------------------------------------------------------------------------
+// TransportStats
+// ---------------------------------------------------------------------------
+
+/// Cumulative counters for transport-layer activity.
+///
+/// All counters are monotonically increasing `u64` values. They are never
+/// reset — callers can snapshot and diff to compute rates.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TransportStats {
+    /// Total packets received and parsed (excludes parse failures).
+    pub packets_received: u64,
+    /// Total packets sent (announces via pending_outbound).
+    pub packets_sent: u64,
+    /// Packets forwarded on behalf of other nodes (relay traffic).
+    pub packets_forwarded: u64,
+    /// Packets dropped because they were seen before (dedup window).
+    pub packets_dropped_dedup: u64,
+    /// Packets dropped as invalid (parse failure, unknown dest, crypto error, etc.).
+    pub packets_dropped_invalid: u64,
+    /// Valid announces received and processed.
+    pub announces_received: u64,
+    /// Announces sent (first transmission of locally-queued announces).
+    pub announces_sent: u64,
+    /// Announce retransmissions (subsequent sends of the same announce).
+    pub announces_retransmitted: u64,
+    /// Announces suppressed by the announce rate limiter.
+    pub announces_rate_limited: u64,
+    /// Links that reached Active state (LRRTT or LRPROOF exchange completed).
+    pub links_established: u64,
+    /// Links closed (LINKCLOSE received or keepalive timeout).
+    pub links_closed: u64,
+    /// Link handshake failures (crypto errors during establishment).
+    pub links_failed: u64,
+    /// Link requests received (before LRPROOF sent).
+    pub link_requests_received: u64,
+    /// Paths learned or updated in the path table.
+    pub paths_learned: u64,
+    /// Paths expired and removed from the path table.
+    pub paths_expired: u64,
+    /// Cryptographic failures (decrypt/verify errors).
+    pub crypto_failures: u64,
+    /// Timestamp of first activity (seconds, caller-provided). 0 until first use.
+    pub started_at: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
 
@@ -402,6 +449,8 @@ pub struct Transport<
     /// When a split sender resource's proof is received, the next segment is
     /// popped from here, processed, and advertised.
     split_send_queue: alloc::vec::Vec<SplitSendEntry>,
+    /// Cumulative transport-layer counters.
+    stats: TransportStats,
 }
 
 /// Queued data for a pending split resource segment.
@@ -464,7 +513,31 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             announce_rate: FnvIndexMap::new(),
             path_request_times: FnvIndexMap::new(),
             split_send_queue: alloc::vec::Vec::new(),
+            stats: TransportStats {
+                packets_received: 0,
+                packets_sent: 0,
+                packets_forwarded: 0,
+                packets_dropped_dedup: 0,
+                packets_dropped_invalid: 0,
+                announces_received: 0,
+                announces_sent: 0,
+                announces_retransmitted: 0,
+                announces_rate_limited: 0,
+                links_established: 0,
+                links_closed: 0,
+                links_failed: 0,
+                link_requests_received: 0,
+                paths_learned: 0,
+                paths_expired: 0,
+                crypto_failures: 0,
+                started_at: 0,
+            },
         }
+    }
+
+    /// Return a reference to the cumulative transport counters.
+    pub fn stats(&self) -> &TransportStats {
+        &self.stats
     }
 
     /// Register a destination hash as belonging to this node.
@@ -905,11 +978,21 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     ) -> IngestResult<'a> {
         let len = raw.len();
 
+        // Lazy-init started_at on first ingest
+        if self.stats.started_at == 0 {
+            self.stats.started_at = now;
+        }
+
         // Parse
         let pkt = match Packet::parse(raw) {
             Ok(p) => p,
-            Err(_) => return IngestResult::Invalid,
+            Err(_) => {
+                self.stats.packets_dropped_invalid += 1;
+                return IngestResult::Invalid;
+            }
         };
+
+        self.stats.packets_received += 1;
 
         // Compute packet hash for dedup
         let pkt_hash = pkt.compute_hash();
@@ -922,6 +1005,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 pkt.packet_type,
                 pkt.dest_type,
             );
+            self.stats.packets_dropped_dedup += 1;
             return IngestResult::Duplicate;
         }
 
@@ -988,7 +1072,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             }
                         }
 
-                        return match self.paths.get(&dest) {
+                        let h2_result = match self.paths.get(&dest) {
                             Some(Path { via: Some(via), .. }) => {
                                 relay_log!(
                                     "[relay] H2 FWD via={} dest={} iface={}",
@@ -1074,6 +1158,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                                 IngestResult::Invalid
                             }
                         };
+                        match &h2_result {
+                            IngestResult::Forward { .. } => self.stats.packets_forwarded += 1,
+                            IngestResult::Invalid => self.stats.packets_dropped_invalid += 1,
+                            _ => {}
+                        }
+                        return h2_result;
                     }
                 }
             }
@@ -1085,7 +1175,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // Re-parse after hops increment
         let pkt = match Packet::parse(raw) {
             Ok(p) => p,
-            Err(_) => return IngestResult::Invalid,
+            Err(_) => {
+                self.stats.packets_dropped_invalid += 1;
+                return IngestResult::Invalid;
+            }
         };
 
         match pkt.packet_type {
@@ -1140,6 +1233,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                                     iface,
                                     pkt.hops,
                                 );
+                                self.stats.packets_forwarded += 1;
                                 return IngestResult::Forward {
                                     raw,
                                     source_iface: iface,
@@ -1199,6 +1293,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         hex_short(&dh),
                         hex_short(&trunc_hash),
                     );
+                    self.stats.packets_forwarded += 1;
                     return IngestResult::Forward {
                         raw: &raw[..len],
                         source_iface: iface,
@@ -1215,6 +1310,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         packet_hash: pkt_hash,
                     }
                 } else {
+                    self.stats.packets_dropped_invalid += 1;
                     IngestResult::Invalid
                 }
             }
@@ -1310,6 +1406,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             hex_short(&dh),
                             pkt.context,
                         );
+                        self.stats.packets_forwarded += 1;
                         IngestResult::Forward {
                             raw,
                             source_iface: iface,
@@ -1337,6 +1434,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                                             hex_short(&dh),
                                             hex_short(&dest_hash_for_link),
                                         );
+                                        self.stats.packets_dropped_invalid += 1;
                                         return IngestResult::Invalid;
                                     }
                                     relay_log!(
@@ -1357,14 +1455,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             pkt.context,
                             &raw[..core::cmp::min(20, raw.len())],
                         );
+                        self.stats.packets_forwarded += 1;
                         IngestResult::Forward {
                             raw,
                             source_iface: iface,
                         }
                     } else {
+                        self.stats.packets_dropped_invalid += 1;
                         IngestResult::Invalid
                     }
                 } else {
+                    self.stats.packets_forwarded += 1;
                     IngestResult::Forward {
                         raw,
                         source_iface: iface,
@@ -1407,6 +1508,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             );
                         }
                     }
+                    self.stats.packets_forwarded += 1;
                     IngestResult::Forward {
                         raw,
                         source_iface: iface,
@@ -1437,14 +1539,22 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         let mut link = match Link::from_request(link_id, payload, rng, now) {
             Ok(l) => l,
-            Err(_) => return IngestResult::Invalid,
+            Err(_) => {
+                self.stats.links_failed += 1;
+                self.stats.crypto_failures += 1;
+                return IngestResult::Invalid;
+            }
         };
         link.destination_hash = *dest_hash;
 
         // Build LRPROOF
         let proof_payload = match link.build_proof(identity) {
             Ok(p) => p,
-            Err(_) => return IngestResult::Invalid,
+            Err(_) => {
+                self.stats.links_failed += 1;
+                self.stats.crypto_failures += 1;
+                return IngestResult::Invalid;
+            }
         };
 
         // Build LRPROOF packet: Proof type, Link dest_type, dest=link_id, context=LRPROOF
@@ -1463,6 +1573,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         let _ = self.links.insert(link_id, link);
 
+        self.stats.link_requests_received += 1;
         IngestResult::LinkRequestReceived {
             link_id,
             proof_raw: proof_buf[..proof_len].to_vec(),
@@ -1529,10 +1640,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         let dest_identity = match Identity::from_public_key(&pub_key) {
             Ok(id) => id,
-            Err(_) => return IngestResult::Invalid,
+            Err(_) => {
+                self.stats.links_failed += 1;
+                self.stats.crypto_failures += 1;
+                return IngestResult::Invalid;
+            }
         };
 
         if link.validate_proof(proof_payload, &dest_identity).is_err() {
+            self.stats.links_failed += 1;
+            self.stats.crypto_failures += 1;
             return IngestResult::Invalid;
         }
 
@@ -1546,6 +1663,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // Initiator activates after proof validation (will send LRRTT next)
         link.activate(now);
 
+        self.stats.links_established += 1;
         IngestResult::LinkEstablished { link_id: *link_id }
     }
 
@@ -1602,7 +1720,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 link.touch_inbound(now);
                 match link.decrypt(ciphertext, &mut dec_buf) {
                     Ok(n) => n,
-                    Err(_) => return IngestResult::Invalid,
+                    Err(_) => {
+                        self.stats.crypto_failures += 1;
+                        return IngestResult::Invalid;
+                    }
                 }
             };
             // self.links borrow is released. Now we can use self.resources.
@@ -1618,7 +1739,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         let mut dec_buf = alloc::vec![0u8; core::cmp::max(ciphertext.len(), rete_core::MTU)];
         let dec_len = match link.decrypt(ciphertext, &mut dec_buf) {
             Ok(n) => n,
-            Err(_) => return IngestResult::Invalid,
+            Err(_) => {
+                self.stats.crypto_failures += 1;
+                return IngestResult::Invalid;
+            }
         };
 
         match context {
@@ -1631,6 +1755,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 let rtt = if raw_rtt <= 0.0 { 0.001 } else { raw_rtt };
                 link.update_keepalive(rtt);
                 link.activate(now);
+                self.stats.links_established += 1;
                 IngestResult::LinkEstablished { link_id: *link_id }
             }
             CONTEXT_KEEPALIVE => {
@@ -1648,6 +1773,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 let lid = *link_id;
                 if link.handle_close(&dec_buf[..dec_len]) {
                     self.links.remove(&lid);
+                    self.stats.links_closed += 1;
                     IngestResult::LinkClosed { link_id: lid }
                 } else {
                     IngestResult::Invalid
@@ -1956,6 +2082,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     let mut dh_dup = [0u8; TRUNCATED_HASH_LEN];
                     dh_dup.copy_from_slice(pkt.destination_hash);
                     self.note_local_rebroadcast(&dh_dup, pkt.hops);
+                    self.stats.packets_dropped_dedup += 1;
                     return IngestResult::Duplicate;
                 }
                 let mut dh = [0u8; TRUNCATED_HASH_LEN];
@@ -1999,6 +2126,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     }
                 };
                 if rate_blocked {
+                    self.stats.announces_rate_limited += 1;
                     return IngestResult::Duplicate;
                 }
 
@@ -2025,6 +2153,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     path.announce_raw = Some(raw.to_vec());
                     path.received_on = Some(iface);
                     let _ = self.insert_path(dh, path);
+                    self.stats.paths_learned += 1;
                 }
 
                 let mut pk = [0u8; 64];
@@ -2073,6 +2202,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     }
                 }
 
+                self.stats.announces_received += 1;
                 IngestResult::AnnounceReceived {
                     dest_hash: dh,
                     identity_hash: info.identity_hash,
@@ -2080,7 +2210,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     app_data: info.app_data,
                 }
             }
-            Err(_) => IngestResult::Invalid,
+            Err(_) => {
+                self.stats.packets_dropped_invalid += 1;
+                self.stats.crypto_failures += 1;
+                IngestResult::Invalid
+            }
         }
     }
 
@@ -2174,7 +2308,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             .channel
             .get_or_insert_with(crate::channel::Channel::new);
         let sequence = channel.next_tx_sequence();
-        let envelope_bytes = channel.send(message_type, payload).ok_or(SendError::WindowFull)?;
+        let envelope_bytes = channel
+            .send(message_type, payload)
+            .ok_or(SendError::WindowFull)?;
         channel.mark_sent(now);
         link.last_outbound = now;
         let raw = Self::build_link_packet(link, link_id, &envelope_bytes, CONTEXT_CHANNEL, rng)?;
@@ -2897,6 +3033,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
     /// Expire old paths, reverse entries, and stale links.
     pub fn tick(&mut self, now: u64) -> TickResult {
+        // Lazy-init started_at on first tick
+        if self.stats.started_at == 0 {
+            self.stats.started_at = now;
+        }
+
         // Expire old paths
         let mut expired = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
         for (dest, path) in self.paths.iter() {
@@ -2959,6 +3100,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             self.channel_receipts.remove(hash);
         }
 
+        self.stats.paths_expired += expired_count as u64;
+        self.stats.links_closed += closed_count as u64;
+
         TickResult {
             expired_paths: expired_count,
             closed_links: closed_count,
@@ -2985,6 +3129,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             }
             if ann.local || now >= ann.retransmit_timeout {
                 to_send.push(ann.raw.clone());
+                if ann.tx_count == 0 {
+                    self.stats.announces_sent += 1;
+                } else {
+                    self.stats.announces_retransmitted += 1;
+                }
+                self.stats.packets_sent += 1;
                 ann.tx_count += 1;
                 // Next retransmission: PATHFINDER_G + random jitter (0..PATHFINDER_RW_MS ms)
                 // Python: now + PATHFINDER_G + random.random() * PATHFINDER_RW
@@ -3732,5 +3882,83 @@ mod tests {
         assert_eq!(resp_pkt.dest_type, DestType::Link);
         assert_eq!(resp_pkt.context, CONTEXT_KEEPALIVE);
         assert_eq!(resp_pkt.destination_hash, &link_id);
+    }
+
+    #[test]
+    fn test_transport_stats_announce_ingest() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Sender identity — builds the announce
+        let sender = Identity::from_seed(b"stats-test-sender").unwrap();
+
+        // Build a raw announce packet
+        let mut announce_buf = [0u8; rete_core::MTU];
+        let announce_len = TestTransport::create_announce(
+            &sender,
+            "test",
+            &["stats"],
+            None,
+            &mut rng,
+            1000,
+            &mut announce_buf,
+        )
+        .expect("should build announce");
+
+        // Receiver transport — receives the announce
+        let receiver_identity = Identity::from_seed(b"stats-test-receiver").unwrap();
+        let mut transport = TestTransport::new();
+
+        // Before any ingest, all stats should be zero
+        assert_eq!(transport.stats().packets_received, 0);
+        assert_eq!(transport.stats().announces_received, 0);
+        assert_eq!(transport.stats().paths_learned, 0);
+        assert_eq!(transport.stats().packets_dropped_dedup, 0);
+        assert_eq!(transport.stats().packets_dropped_invalid, 0);
+
+        // Ingest the announce
+        let result = transport.ingest(
+            &mut announce_buf[..announce_len],
+            1000,
+            &mut rng,
+            &receiver_identity,
+        );
+        assert!(
+            matches!(result, IngestResult::AnnounceReceived { .. }),
+            "expected AnnounceReceived, got {:?}",
+            result,
+        );
+
+        // Verify counters were incremented
+        assert_eq!(transport.stats().packets_received, 1, "packets_received");
+        assert_eq!(
+            transport.stats().announces_received,
+            1,
+            "announces_received"
+        );
+        assert_eq!(transport.stats().paths_learned, 1, "paths_learned");
+        assert_eq!(transport.stats().packets_dropped_dedup, 0, "no dedup yet");
+        assert_eq!(transport.stats().packets_dropped_invalid, 0, "no invalid");
+        assert_eq!(transport.stats().started_at, 1000, "started_at");
+
+        // Rebuild the same announce (same raw bytes) and ingest again — should be dedup
+        let mut announce_buf2 = announce_buf;
+        let result2 = transport.ingest(
+            &mut announce_buf2[..announce_len],
+            1001,
+            &mut rng,
+            &receiver_identity,
+        );
+        assert!(
+            matches!(result2, IngestResult::Duplicate),
+            "expected Duplicate on second ingest",
+        );
+
+        // Parse succeeds before the dedup check, so packets_received increments; then dedup fires.
+        assert_eq!(transport.stats().packets_dropped_dedup, 1, "dedup counter");
+        // announces_received should stay at 1 (dedup fires before announce processing)
+        assert_eq!(transport.stats().announces_received, 1, "still 1 announce");
     }
 }

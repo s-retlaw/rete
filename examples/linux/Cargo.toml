@@ -15,7 +15,7 @@ path = "src/bin/serial_bridge.rs"
 [dependencies]
 rete-core         = { workspace = true }
 rete-transport    = { workspace = true, features = ["serde", "relay-debug"] }
-rete-stack        = { workspace = true }
+rete-stack        = { workspace = true, features = ["serde"] }
 rete-tokio        = { workspace = true }
 rete-iface-tcp    = { workspace = true }
 rete-iface-serial = { workspace = true }

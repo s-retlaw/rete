@@ -309,6 +309,11 @@ test-e2e-resource-initiate-relay:
 test-audit-constants:
     cd tests/interop && uv run python audit_constants_interop.py
 
+# E2E stats/metrics interop
+test-e2e-stats:
+    cargo build -p rete-example-linux
+    cd tests/interop && uv run python stats_interop.py
+
 # All software tests (unit + E2E, no hardware)
 test-all:
     #!/usr/bin/env bash
@@ -445,8 +450,9 @@ test-all:
     run_e2e KEEPALIVE keepalive_interop.py
     run_e2e STABILITY stability_interop.py
 
-    # Audit (1)
+    # Audit (2)
     run_e2e AUDITCONST audit_constants_interop.py
+    run_e2e STATS stats_interop.py
 
     # Hardening (10)
     run_e2e LINKSTALE link_stale_interop.py
@@ -536,6 +542,7 @@ test-all:
     printf "  %-30s %s passed, %s failed\n" "stability-interop" "$STABILITY_PASS" "$STABILITY_FAIL"
     echo "    Audit:"
     printf "  %-30s %s passed, %s failed\n" "audit-constants-interop" "$AUDITCONST_PASS" "$AUDITCONST_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "stats-interop" "$STATS_PASS" "$STATS_FAIL"
     echo "    Hardening:"
     printf "  %-30s %s passed, %s failed\n" "link-stale-interop" "$LINKSTALE_PASS" "$LINKSTALE_FAIL"
     printf "  %-30s %s passed, %s failed\n" "link-cycle-interop" "$LINKCYCLE_PASS" "$LINKCYCLE_FAIL"
@@ -553,7 +560,7 @@ test-all:
     E2E_PASS=$((LIVE_PASS + LINK_PASS + CHANNEL_PASS + RELAY_PASS + PATHREQ_PASS + PROOF_PASS + ROBUSTNESS_PASS \
         + LINKINIT_PASS + LINKRELAY_PASS + LINKRUSTRELAY_PASS + LINK3NODERELAY_PASS + LINKINITRELAY_PASS + LINKBURST_PASS + CONCURRENT_PASS + TEARDOWN_PASS \
         + IFAC_PASS + IFACMISMATCH_PASS + IFACRELAY_PASS + IFACLINK_PASS + IFACLARGE_PASS \
-        + AUDITCONST_PASS \
+        + AUDITCONST_PASS + STATS_PASS \
         + TRANSPORT_PASS + DUAL_PASS + MULTIHOP_PASS + CHANRELAY_PASS + RESRELAY_PASS + RESINITRELAY_PASS \
         + AUTO_PASS + AUTODATA_PASS + AUTOGROUP_PASS \
         + ANNAPPDATA_PASS + ANNDEDUP_PASS \
@@ -568,7 +575,7 @@ test-all:
     E2E_FAIL=$((LIVE_FAIL + LINK_FAIL + CHANNEL_FAIL + RELAY_FAIL + PATHREQ_FAIL + PROOF_FAIL + ROBUSTNESS_FAIL \
         + LINKINIT_FAIL + LINKRELAY_FAIL + LINKRUSTRELAY_FAIL + LINK3NODERELAY_FAIL + LINKINITRELAY_FAIL + LINKBURST_FAIL + CONCURRENT_FAIL + TEARDOWN_FAIL \
         + IFAC_FAIL + IFACMISMATCH_FAIL + IFACRELAY_FAIL + IFACLINK_FAIL + IFACLARGE_FAIL \
-        + AUDITCONST_FAIL \
+        + AUDITCONST_FAIL + STATS_FAIL \
         + TRANSPORT_FAIL + DUAL_FAIL + MULTIHOP_FAIL + CHANRELAY_FAIL + RESRELAY_FAIL + RESINITRELAY_FAIL \
         + AUTO_FAIL + AUTODATA_FAIL + AUTOGROUP_FAIL \
         + ANNAPPDATA_FAIL + ANNDEDUP_FAIL \
@@ -581,7 +588,7 @@ test-all:
         + CHANORDER_FAIL + CONCTRAF_FAIL + PATHEXP_FAIL + RESCANCEL_FAIL \
         + RESLARGE_FAIL + MIXSTRESS_FAIL + PROOFCHAIN_FAIL))
     echo ""
-    printf "  %-30s %s passed, %s failed\n" "e2e total (62 suites)" "$E2E_PASS" "$E2E_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "e2e total (63 suites)" "$E2E_PASS" "$E2E_FAIL"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))

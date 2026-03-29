@@ -923,6 +923,7 @@ dependencies = [
  "rand_core",
  "rete-core",
  "rete-transport",
+ "serde",
  "sha2",
 ]
 

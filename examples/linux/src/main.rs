@@ -373,10 +373,16 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             link_id: None,
             payload: vec![],
         }),
+        "stats" => Some(NodeCommand::AppCommand {
+            name: "stats".to_string(),
+            dest_hash: None,
+            link_id: None,
+            payload: vec![],
+        }),
         "quit" => Some(NodeCommand::Shutdown),
         _ => {
             eprintln!("[rete] unknown command: {line}");
-            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | close <link_id> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | request <link_id> <path> <data> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | lxmf-prop-announce | quit");
+            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | close <link_id> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | request <link_id> <path> <data> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | lxmf-prop-announce | stats | quit");
             None
         }
     }
@@ -927,13 +933,23 @@ async fn run_multi_with_local_server<F>(
             }
             cmd = cmd_rx.recv() => {
                 if let Some(cmd) = cmd {
-                    let (packets, cont, event) = node.handle_command(cmd, &mut rng);
-                    dispatch_with_local(&iface_senders, &packets, 0, &broadcaster, None).await;
-                    if let Some(e) = event {
-                        let extra = on_event(e, &mut node.core, &mut rng);
-                        dispatch_with_local(&iface_senders, &extra, 0, &broadcaster, None).await;
+                    if matches!(&cmd, NodeCommand::AppCommand { ref name, .. } if name == "stats") {
+                        let now = rete_tokio::current_time_secs();
+                        let stats = node.core.stats(now);
+                        if let Ok(json) = serde_json::to_string(&stats) {
+                            println!("STATS:{json}");
+                            use std::io::Write as _;
+                            std::io::stdout().flush().ok();
+                        }
+                    } else {
+                        let (packets, cont, event) = node.handle_command(cmd, &mut rng);
+                        dispatch_with_local(&iface_senders, &packets, 0, &broadcaster, None).await;
+                        if let Some(e) = event {
+                            let extra = on_event(e, &mut node.core, &mut rng);
+                            dispatch_with_local(&iface_senders, &extra, 0, &broadcaster, None).await;
+                        }
+                        if !cont { break; }
                     }
-                    if !cont { break; }
                 }
             }
             _ = announce_timer.tick() => {
@@ -1478,6 +1494,19 @@ fn handle_lxmf_command(
     };
 
     match name.as_str() {
+        "stats" => {
+            let now = rete_tokio::current_time_secs();
+            let stats = core.stats(now);
+            match serde_json::to_string(&stats) {
+                Ok(json) => {
+                    println!("STATS:{json}");
+                    use std::io::Write as _;
+                    std::io::stdout().flush().ok();
+                }
+                Err(e) => eprintln!("[rete] stats: serialize error: {e}"),
+            }
+            None
+        }
         "lxmf-send" => {
             let Some(dest_hash) = dest_hash else {
                 eprintln!("[rete] lxmf-send: missing dest_hash");

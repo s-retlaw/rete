@@ -29,6 +29,70 @@ pub trait ReteInterface {
     async fn recv<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a [u8], Self::Error>;
 }
 
+/// Per-interface byte and packet counters.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct InterfaceStats {
+    /// Total bytes received.
+    pub rxb: u64,
+    /// Total bytes transmitted.
+    pub txb: u64,
+    /// Total packets received.
+    pub rx_packets: u64,
+    /// Total packets transmitted.
+    pub tx_packets: u64,
+}
+
+/// A [`ReteInterface`] wrapper that counts bytes and packets on every send/recv.
+///
+/// Wraps any `I: ReteInterface` and maintains [`InterfaceStats`]. Call
+/// [`CountedInterface::stats`] to read current values.
+pub struct CountedInterface<I> {
+    inner: I,
+    stats: InterfaceStats,
+}
+
+impl<I> CountedInterface<I> {
+    /// Wrap an interface for counting.
+    pub fn new(inner: I) -> Self {
+        CountedInterface {
+            inner,
+            stats: InterfaceStats::default(),
+        }
+    }
+
+    /// Return a reference to the current stats.
+    pub fn stats(&self) -> &InterfaceStats {
+        &self.stats
+    }
+
+    /// Return a mutable reference to the inner interface.
+    pub fn inner_mut(&mut self) -> &mut I {
+        &mut self.inner
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl<I: ReteInterface> ReteInterface for CountedInterface<I> {
+    type Error = I::Error;
+
+    async fn send(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
+        let result = self.inner.send(frame).await;
+        if result.is_ok() {
+            self.stats.txb += frame.len() as u64;
+            self.stats.tx_packets += 1;
+        }
+        result
+    }
+
+    async fn recv<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a [u8], Self::Error> {
+        let data = self.inner.recv(buf).await?;
+        self.stats.rxb += data.len() as u64;
+        self.stats.rx_packets += 1;
+        Ok(data)
+    }
+}
+
 /// Proof generation strategy for incoming data packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProofStrategy {
@@ -182,8 +246,8 @@ pub use destination::{Destination, DestinationType, Direction};
 
 #[cfg(feature = "alloc")]
 pub use node_core::{
-    EmbeddedNodeCore, HostedNodeCore, IngestOutcome, NodeCore, OutboundPacket, PacketRouting,
-    ProveAppFn, RequestHandler, RequestHandlerFn, RequestPolicy,
+    EmbeddedNodeCore, HostedNodeCore, IngestOutcome, NodeCore, NodeStats, OutboundPacket,
+    PacketRouting, ProveAppFn, RequestHandler, RequestHandlerFn, RequestPolicy,
 };
 
 #[cfg(feature = "alloc")]
