@@ -324,6 +324,11 @@ test-all:
     cargo build -p rete-example-linux 2>&1
     echo ""
 
+    # --- Prune stale Docker resources from prior runs ---
+    docker container prune -f 2>/dev/null || true
+    docker image prune -f 2>/dev/null || true
+    echo ""
+
     # --- Unit tests ---
     UNIT_OUTPUT=$(cargo test --workspace 2>&1)
     UNIT_RC=$?

@@ -290,7 +290,8 @@ class DockerTopologyTest:
             self._log("tearing down compose stack...")
             subprocess.run(
                 ["docker", "compose", "-f", self.compose_file,
-                 "-p", self.project_name, "down", "-v", "--timeout", "5"],
+                 "-p", self.project_name, "down", "-v",
+                 "--rmi", "local", "--remove-orphans", "--timeout", "5"],
                 capture_output=True,
                 timeout=30,
             )
