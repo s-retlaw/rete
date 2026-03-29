@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{DestType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN};
 use rete_transport::{
-    IngestResult, PendingAnnounce, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,
+    IngestResult, PendingAnnounce, SendError, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,
 };
 
 use crate::destination::{Destination, DestinationType, Direction};
@@ -443,11 +443,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         plaintext: &[u8],
         rng: &mut R,
         now: u64,
-    ) -> Option<Vec<u8>> {
-        let pub_key = *self.transport.recall_identity(dest_hash)?;
-        let recipient = Identity::from_public_key(&pub_key).ok()?;
+    ) -> Result<Vec<u8>, SendError> {
+        let pub_key = *self
+            .transport
+            .recall_identity(dest_hash)
+            .ok_or(SendError::UnknownDestination)?;
+        let recipient =
+            Identity::from_public_key(&pub_key).map_err(SendError::Crypto)?;
         let mut ct_buf = [0u8; MTU];
-        let ct_len = recipient.encrypt(plaintext, rng, &mut ct_buf).ok()?;
+        let ct_len = recipient
+            .encrypt(plaintext, rng, &mut ct_buf)
+            .map_err(SendError::Crypto)?;
         let via = self.transport.get_path(dest_hash).and_then(|p| p.via);
         self.transport.touch_path(dest_hash, now);
         let mut pkt_buf = [0u8; MTU];
@@ -459,7 +465,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .payload(&ct_buf[..ct_len])
             .via(via.as_ref())
             .build()
-            .ok()?;
+            .map_err(SendError::PacketBuild)?;
 
         // Register receipt for proof tracking
         if let Ok(parsed) = Packet::parse(&pkt_buf[..pkt_len]) {
@@ -468,7 +474,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 .register_receipt(pkt_hash, pub_key, now, RECEIPT_TIMEOUT);
         }
 
-        Some(pkt_buf[..pkt_len].to_vec())
+        Ok(pkt_buf[..pkt_len].to_vec())
     }
 
     /// Build and return a raw announce packet for this node.
@@ -590,6 +596,26 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .collect()
     }
 
+    /// Queue the initial local announce and return all packets to dispatch on startup.
+    ///
+    /// Returns `(announce_packets, cached_announce_packets)` where:
+    /// - `announce_packets` — the freshly built announce (sent immediately + retransmit queued)
+    /// - `cached_announce_packets` — announces for paths already in the path table, useful for
+    ///   flushing to a newly-connected interface so it immediately learns known destinations
+    ///
+    /// Replaces the repeated queue_announce + flush_announces + cached_announces pattern
+    /// at the start of every runtime's event loop.
+    pub fn initial_announce<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        now: u64,
+    ) -> (Vec<OutboundPacket>, Vec<OutboundPacket>) {
+        self.queue_announce(None, rng, now);
+        let announces = self.flush_announces(now, rng);
+        let cached = self.cached_announces();
+        (announces, cached)
+    }
+
     /// Initiate a link to a destination.
     ///
     /// Returns the outbound LINKREQUEST packet and the link_id on success.
@@ -598,16 +624,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         dest_hash: [u8; TRUNCATED_HASH_LEN],
         now: u64,
         rng: &mut R,
-    ) -> Option<(OutboundPacket, [u8; TRUNCATED_HASH_LEN])> {
+    ) -> Result<(OutboundPacket, [u8; TRUNCATED_HASH_LEN]), SendError> {
         let (raw, link_id) = self
             .transport
             .initiate_link(dest_hash, &self.identity, rng, now)?;
-        Some((OutboundPacket::broadcast(raw), link_id))
+        Ok((OutboundPacket::broadcast(raw), link_id))
     }
 
     /// Send a channel message on a link.
     ///
-    /// Returns the outbound packet if the message was queued, or `None` if
+    /// Returns the outbound packet if the message was queued, or `Err` if
     /// the link is not active or the channel window is full.
     pub fn send_channel_message<R: RngCore + CryptoRng>(
         &mut self,
@@ -616,11 +642,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         payload: &[u8],
         now: u64,
         rng: &mut R,
-    ) -> Option<OutboundPacket> {
+    ) -> Result<OutboundPacket, SendError> {
         let raw = self
             .transport
             .send_channel_message(link_id, message_type, payload, now, rng)?;
-        Some(OutboundPacket::broadcast(raw))
+        Ok(OutboundPacket::broadcast(raw))
     }
 
     /// Send stream data on a link via channel.
@@ -635,7 +661,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         eof: bool,
         now: u64,
         rng: &mut R,
-    ) -> Option<OutboundPacket> {
+    ) -> Result<OutboundPacket, SendError> {
         let mut buf = [0u8; MTU];
         let n = rete_transport::StreamDataMessage::pack_into(stream_id, eof, false, data, &mut buf);
         self.send_channel_message(
@@ -657,7 +683,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
     ) -> (Option<OutboundPacket>, Option<NodeEvent>) {
-        let pkt = self.transport.build_linkclose_packet(link_id, rng);
+        let pkt = self.transport.build_linkclose_packet(link_id, rng).ok();
         let event = if pkt.is_some() {
             Some(NodeEvent::LinkClosed { link_id: *link_id })
         } else {
@@ -675,10 +701,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         &self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
-    ) -> Option<OutboundPacket> {
+    ) -> Result<OutboundPacket, SendError> {
         // Build identify payload: pub_key[64] || Ed25519_sig[64]
         let pub_key = self.identity.public_key();
-        let sig = self.identity.sign(&pub_key).ok()?;
+        let sig = self.identity.sign(&pub_key).map_err(SendError::Crypto)?;
         let mut payload = [0u8; 128];
         payload[..64].copy_from_slice(&pub_key);
         payload[64..128].copy_from_slice(&sig);
@@ -689,7 +715,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             rete_core::CONTEXT_LINKIDENTIFY,
             rng,
         )?;
-        Some(OutboundPacket::broadcast(pkt))
+        Ok(OutboundPacket::broadcast(pkt))
     }
 
     /// Send plain data over an established link.
@@ -698,16 +724,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         data: &[u8],
         rng: &mut R,
-    ) -> Option<OutboundPacket> {
+    ) -> Result<OutboundPacket, SendError> {
         let pkt =
             self.transport
                 .build_link_data_packet(link_id, data, rete_core::CONTEXT_NONE, rng)?;
-        Some(OutboundPacket::broadcast(pkt))
+        Ok(OutboundPacket::broadcast(pkt))
     }
 
     /// Send a link.request() on an established link.
     ///
-    /// Returns `(outbound_packet, request_id)` on success, or `None` if the link
+    /// Returns `(outbound_packet, request_id)` on success, or `Err` if the link
     /// is not active. The `request_id` can be used to correlate the eventual response.
     pub fn send_request<R: RngCore + CryptoRng>(
         &self,
@@ -716,7 +742,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         data: &[u8],
         now: u64,
         rng: &mut R,
-    ) -> Option<(OutboundPacket, [u8; TRUNCATED_HASH_LEN])> {
+    ) -> Result<(OutboundPacket, [u8; TRUNCATED_HASH_LEN]), SendError> {
         let packed = rete_transport::build_request(path, data, now as f64);
         let pkt = self.transport.build_link_data_packet(
             link_id,
@@ -727,23 +753,24 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         // Compute request_id from the packet's truncated hash — must match
         // how the receiver computes it (transport.rs uses pkt_hash[..16]).
         // Python RNS Link.py: RequestReceipt uses packet_receipt.truncated_hash.
-        let parsed = rete_core::Packet::parse(&pkt).ok()?;
+        let parsed =
+            rete_core::Packet::parse(&pkt).map_err(SendError::PacketBuild)?;
         let pkt_hash = parsed.compute_hash();
         let mut req_id = [0u8; TRUNCATED_HASH_LEN];
         req_id.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
-        Some((OutboundPacket::broadcast(pkt), req_id))
+        Ok((OutboundPacket::broadcast(pkt), req_id))
     }
 
     /// Send a link.response() on an established link.
     ///
-    /// Returns the outbound packet on success, or `None` if the link is not active.
+    /// Returns the outbound packet on success, or `Err` if the link is not active.
     pub fn send_response<R: RngCore + CryptoRng>(
         &self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         request_id: &[u8; TRUNCATED_HASH_LEN],
         data: &[u8],
         rng: &mut R,
-    ) -> Option<OutboundPacket> {
+    ) -> Result<OutboundPacket, SendError> {
         let packed = rete_transport::build_response(request_id, data);
         let pkt = self.transport.build_link_data_packet(
             link_id,
@@ -751,7 +778,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             rete_core::CONTEXT_RESPONSE,
             rng,
         )?;
-        Some(OutboundPacket::broadcast(pkt))
+        Ok(OutboundPacket::broadcast(pkt))
     }
 
     /// Start a resource transfer on a link.
@@ -764,7 +791,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         data: &[u8],
         rng: &mut R,
-    ) -> Option<OutboundPacket> {
+    ) -> Result<OutboundPacket, SendError> {
         use alloc::borrow::Cow;
         use rete_transport::resource::MAX_EFFICIENT_SIZE;
 
@@ -774,8 +801,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         if data.len() > MAX_EFFICIENT_SIZE {
             let pkt = self
                 .transport
-                .start_resource(link_id, data, data, false, rng)?;
-            return Some(OutboundPacket::broadcast(pkt));
+                .start_resource(link_id, data, data, false, rng)
+                .ok_or(SendError::ResourceLimit)?;
+            return Ok(OutboundPacket::broadcast(pkt));
         }
 
         let compressed = self
@@ -790,8 +818,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
         let pkt = self
             .transport
-            .start_resource(link_id, &send_data, data, is_compressed, rng)?;
-        Some(OutboundPacket::broadcast(pkt))
+            .start_resource(link_id, &send_data, data, is_compressed, rng)
+            .ok_or(SendError::ResourceLimit)?;
+        Ok(OutboundPacket::broadcast(pkt))
     }
 
     /// Build a path request packet for a destination.
@@ -890,7 +919,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 if let Some(msg) = self.auto_reply.take() {
                     let result = self.build_data_packet(&dest_hash, &msg, rng, now);
                     self.auto_reply = Some(msg);
-                    if let Some(pkt) = result {
+                    if let Ok(pkt) = result {
                         packets.push(OutboundPacket {
                             data: pkt,
                             routing: PacketRouting::SourceInterface,
@@ -981,7 +1010,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                     .unwrap_or(false)
                 {
                     let rtt_bytes = &now.to_be_bytes()[4..8];
-                    if let Some(pkt) = self.transport.build_lrrtt_packet(&link_id, rtt_bytes, rng) {
+                    if let Ok(pkt) = self.transport.build_lrrtt_packet(&link_id, rtt_bytes, rng) {
                         packets.push(OutboundPacket::broadcast(pkt));
                     }
                 }
@@ -998,7 +1027,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 let mut packets = Vec::new();
                 // If this is a keepalive request, send the response back
                 if context == rete_core::CONTEXT_KEEPALIVE {
-                    if let Some(pkt) = self.transport.build_keepalive_packet(&link_id, false, rng) {
+                    if let Ok(pkt) = self.transport.build_keepalive_packet(&link_id, false, rng) {
                         packets.push(OutboundPacket::broadcast(pkt));
                     }
                 }
@@ -1062,7 +1091,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         if let Some(response_data) =
                             handler_fn(&path_str, &data, &request_id, &link_id)
                         {
-                            if let Some(pkt) =
+                            if let Ok(pkt) =
                                 self.send_response(&link_id, &request_id, &response_data, rng)
                             {
                                 response_packets.push(pkt);
@@ -1683,7 +1712,7 @@ mod tests {
 
         // Should be able to build data packet to registered peer
         let pkt = core.build_data_packet(&peer_dest, b"hello peer", &mut rng, 100);
-        assert!(pkt.is_some(), "should build data packet to registered peer");
+        assert!(pkt.is_ok(), "should build data packet to registered peer");
     }
 
     // -----------------------------------------------------------------------
@@ -2266,13 +2295,16 @@ mod tests {
     #[test]
     fn test_build_data_packet_no_cached_key() {
         // build_data_packet when no public key is cached for the destination.
-        // Should return None.
+        // Should return Err when no cached key.
         let mut core = make_core(b"no-key-test");
         let mut rng = rand::thread_rng();
 
         let unknown_dest = [0xFFu8; TRUNCATED_HASH_LEN];
         let result = core.build_data_packet(&unknown_dest, b"hello", &mut rng, 100);
-        assert!(result.is_none(), "should return None when no cached key");
+        assert!(
+            matches!(result, Err(rete_transport::SendError::UnknownDestination)),
+            "should return Err(UnknownDestination) when no cached key"
+        );
     }
 
     // -----------------------------------------------------------------------

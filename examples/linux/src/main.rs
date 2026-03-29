@@ -1101,7 +1101,7 @@ fn on_event(
             let mut packets = Vec::new();
 
             // Send the response (count of messages)
-            if let Some(resp_pkt) =
+            if let Ok(resp_pkt) =
                 core.send_response(&link_id, &request_id, &result.response_data, rng)
             {
                 packets.push(resp_pkt);

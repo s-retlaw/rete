@@ -159,15 +159,18 @@ fn handle_event(
             if let Some(ref data) = app_data {
                 if data == b"LINK_ME" {
                     println!("[serial-test] LINK_ME detected, initiating link");
-                    if let Some((pkt, link_id)) = core.initiate_link(dest_hash, now, rng) {
-                        let lh = hex4(&link_id);
-                        println!(
-                            "[serial-test] link initiated: {}",
-                            core::str::from_utf8(&lh).unwrap_or("????")
-                        );
-                        out.push(pkt);
-                    } else {
-                        println!("[serial-test] link initiation failed");
+                    match core.initiate_link(dest_hash, now, rng) {
+                        Ok((pkt, link_id)) => {
+                            let lh = hex4(&link_id);
+                            println!(
+                                "[serial-test] link initiated: {}",
+                                core::str::from_utf8(&lh).unwrap_or("????")
+                            );
+                            out.push(pkt);
+                        }
+                        Err(e) => {
+                            println!("[serial-test] link initiation failed: {:?}", e);
+                        }
                     }
                 }
             }
@@ -184,7 +187,7 @@ fn handle_event(
             if let Some(peer) = *last_peer {
                 let mut echo_msg = b"echo:".to_vec();
                 echo_msg.extend_from_slice(&payload);
-                if let Some(pkt) = core.build_data_packet(&peer, &echo_msg, rng, now) {
+                if let Ok(pkt) = core.build_data_packet(&peer, &echo_msg, rng, now) {
                     out.push(OutboundPacket {
                         data: pkt,
                         routing: PacketRouting::SourceInterface,
@@ -201,7 +204,7 @@ fn handle_event(
             );
 
             // Send a greeting channel message on link establishment
-            if let Some(pkt) =
+            if let Ok(pkt) =
                 core.send_channel_message(&link_id, 0x0001, b"esp32-hello", now, rng)
             {
                 println!("[serial-test] sent channel greeting");
@@ -227,7 +230,7 @@ fn handle_event(
                 // Echo back with "echo:" prefix
                 let mut echo = b"echo:".to_vec();
                 echo.extend_from_slice(payload);
-                if let Some(pkt) = core.send_channel_message(&link_id, *msg_type, &echo, now, rng)
+                if let Ok(pkt) = core.send_channel_message(&link_id, *msg_type, &echo, now, rng)
                 {
                     out.push(pkt);
                 }
@@ -252,7 +255,7 @@ fn handle_event(
             // Echo back with "echo:" prefix
             let mut echo = b"echo:".to_vec();
             echo.extend_from_slice(&data);
-            if let Some(pkt) = core.send_link_data(&link_id, &echo, rng) {
+            if let Ok(pkt) = core.send_link_data(&link_id, &echo, rng) {
                 out.push(pkt);
             }
         }
@@ -272,7 +275,7 @@ fn handle_event(
             // Respond with "esp32-response:<path_hash_hex>"
             let mut resp = b"esp32-response:".to_vec();
             resp.extend_from_slice(&ph);
-            if let Some(pkt) = core.send_response(&link_id, &request_id, &resp, rng) {
+            if let Ok(pkt) = core.send_response(&link_id, &request_id, &resp, rng) {
                 println!("[serial-test] sent response");
                 out.push(pkt);
             }

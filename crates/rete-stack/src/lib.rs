@@ -185,3 +185,20 @@ pub use node_core::{
     EmbeddedNodeCore, HostedNodeCore, IngestOutcome, NodeCore, OutboundPacket, PacketRouting,
     ProveAppFn, RequestHandler, RequestHandlerFn, RequestPolicy,
 };
+
+#[cfg(feature = "alloc")]
+pub use rete_transport::SendError;
+
+/// Dispatch outbound packets to a single interface.
+///
+/// Skips `AllExceptSource` packets — the only interface IS the source,
+/// so forwarded packets must not be sent back where they came from.
+#[cfg(feature = "alloc")]
+pub async fn dispatch_single<I: ReteInterface>(iface: &mut I, packets: &[OutboundPacket]) {
+    for pkt in packets {
+        if pkt.routing == PacketRouting::AllExceptSource {
+            continue;
+        }
+        let _ = iface.send(&pkt.data).await;
+    }
+}

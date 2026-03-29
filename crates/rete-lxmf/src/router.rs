@@ -190,7 +190,7 @@ impl LxmfRouter {
         R: rand_core::RngCore + rand_core::CryptoRng,
     {
         let payload = Self::pack_opportunistic(msg);
-        let pkt_data = core.build_data_packet(&msg.destination_hash, &payload, rng, now)?;
+        let pkt_data = core.build_data_packet(&msg.destination_hash, &payload, rng, now).ok()?;
         Some(OutboundPacket::broadcast(pkt_data))
     }
 
@@ -236,7 +236,7 @@ impl LxmfRouter {
         R: rand_core::RngCore + rand_core::CryptoRng,
     {
         let data = Self::pack_direct(msg);
-        core.start_resource(link_id, &data, rng)
+        core.start_resource(link_id, &data, rng).ok()
     }
 
     /// Try to parse an LXMF message from Resource data.
@@ -596,7 +596,7 @@ impl LxmfRouter {
         }
 
         // Initiate link to the destination (this is the recipient's lxmf.delivery dest)
-        let (pkt, link_id) = core.initiate_link(*dest_hash, now, rng)?;
+        let (pkt, link_id) = core.initiate_link(*dest_hash, now, rng).ok()?;
 
         self.pending_forwards.push(ForwardJob::Linking {
             dest_hash: *dest_hash,
@@ -741,8 +741,8 @@ impl LxmfRouter {
         let compressed = bz2_compress(data);
 
         match core.start_resource(link_id, &compressed, rng) {
-            Some(pkt) => vec![pkt],
-            None => Vec::new(),
+            Ok(pkt) => vec![pkt],
+            Err(_) => Vec::new(),
         }
     }
 

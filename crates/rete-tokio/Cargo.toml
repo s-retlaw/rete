@@ -16,3 +16,4 @@ tokio          = { workspace = true }
 rand_core      = { version = "0.6", features = ["std"] }
 rand           = "0.8"
 log            = "0.4"
+hex            = "0.4"

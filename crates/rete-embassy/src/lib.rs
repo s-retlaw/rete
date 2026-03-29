@@ -22,7 +22,7 @@ pub use rete_stack::NodeEvent;
 pub use rete_stack::OutboundPacket;
 pub use rete_stack::PacketRouting;
 pub use rete_stack::ProofStrategy;
-use rete_stack::ReteInterface;
+use rete_stack::{dispatch_single, ReteInterface};
 use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 // ---------------------------------------------------------------------------
@@ -211,11 +211,12 @@ impl EmbassyNode {
         R: RngCore + CryptoRng,
         F: FnMut(NodeEvent, &mut EmbeddedNodeCore, &mut R) -> Vec<OutboundPacket>,
     {
-        // Queue initial announce through transport (gets immediate + one retransmit)
+        // Queue initial announce through transport (gets immediate + one retransmit).
+        // Cached announces are not re-broadcast on embedded (single-interface, no catch-up needed).
         {
-            let now = Instant::now().as_secs();
-            self.core.queue_announce(None, rng, self.announce_time());
-            dispatch(iface, &self.core.flush_announces(now, rng)).await;
+            let now = self.announce_time();
+            let (announces, _cached) = self.core.initial_announce(rng, now);
+            dispatch_single(iface, &announces).await;
         }
 
         let mut recv_buf = [0u8; MTU];
@@ -260,10 +261,10 @@ impl EmbassyNode {
 
                         let now = now_inst.as_secs();
                         let outcome = self.core.handle_ingest(data, now, 0, rng);
-                        dispatch(iface, &outcome.packets).await;
+                        dispatch_single(iface, &outcome.packets).await;
                         if let Some(event) = outcome.event {
                             let extra = on_event(event, &mut self.core, rng);
-                            dispatch(iface, &extra).await;
+                            dispatch_single(iface, &extra).await;
                         }
                     }
                     Err(_) => {
@@ -278,16 +279,16 @@ impl EmbassyNode {
                     next_announce = Instant::now() + Duration::from_secs(announce_interval);
                     let now = Instant::now().as_secs();
                     self.core.queue_announce(None, rng, self.announce_time());
-                    dispatch(iface, &self.core.flush_announces(now, rng)).await;
+                    dispatch_single(iface, &self.core.flush_announces(now, rng)).await;
                 }
                 Either3::Third(()) => {
                     next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
                     let now = Instant::now().as_secs();
                     let outcome = self.core.handle_tick(now, rng);
-                    dispatch(iface, &outcome.packets).await;
+                    dispatch_single(iface, &outcome.packets).await;
                     if let Some(event) = outcome.event {
                         let extra = on_event(event, &mut self.core, rng);
-                        dispatch(iface, &extra).await;
+                        dispatch_single(iface, &extra).await;
                     }
                 }
             }
@@ -295,15 +296,3 @@ impl EmbassyNode {
     }
 }
 
-/// Dispatch outbound packets on a single interface.
-///
-/// `AllExceptSource` is a no-op: the only interface IS the source,
-/// so forwarded packets must not be sent back where they came from.
-async fn dispatch<I: ReteInterface>(iface: &mut I, packets: &[OutboundPacket]) {
-    for pkt in packets {
-        if pkt.routing == PacketRouting::AllExceptSource {
-            continue;
-        }
-        let _ = iface.send(&pkt.data).await;
-    }
-}

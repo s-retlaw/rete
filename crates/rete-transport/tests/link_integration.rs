@@ -648,7 +648,7 @@ fn channel_window_blocks_at_capacity() {
         assert!(
             init_t
                 .send_channel_message(&link_id, 0x01, &[i as u8], 200, &mut rng)
-                .is_some(),
+                .is_ok(),
             "message {} should succeed",
             i
         );
@@ -658,7 +658,7 @@ fn channel_window_blocks_at_capacity() {
     assert!(
         init_t
             .send_channel_message(&link_id, 0x01, b"blocked", 201, &mut rng)
-            .is_none(),
+            .is_err(),
         "window should be full"
     );
 }

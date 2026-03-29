@@ -88,6 +88,48 @@ pub const RECEIPT_TIMEOUT: u64 = 30;
 /// Minimum seconds between retry REQs for stalled receiver resources.
 pub const RESOURCE_RETRY_THRESHOLD_SECS: u64 = 10;
 
+/// Maximum pending outbound resource packets (parts + HMUs) queued per tick.
+///
+/// `resource_outbound` is drained to the caller after every ingest/tick call,
+/// so this bounds a single burst, not steady-state queue depth.
+const RESOURCE_OUTBOUND_MAX: usize = 256;
+
+/// Errors from transport-layer send operations.
+///
+/// Returned by methods that build or encrypt outbound packets, where multiple
+/// distinct failure modes were previously collapsed into `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// No known path or cached identity for the destination.
+    UnknownDestination,
+    /// Link not found in the link table.
+    LinkNotFound,
+    /// Link exists but is not in Active state (still Pending/Handshake/Stale/Closed).
+    LinkNotActive,
+    /// Channel send window is full (back-pressure).
+    WindowFull,
+    /// Cryptographic operation failed (encrypt, sign, ECDH).
+    Crypto(rete_core::Error),
+    /// Packet building failed (buffer too small, invalid fields).
+    PacketBuild(rete_core::Error),
+    /// Resource limit reached (resource table full).
+    ResourceLimit,
+}
+
+impl core::fmt::Display for SendError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SendError::UnknownDestination => write!(f, "unknown destination (no cached identity)"),
+            SendError::LinkNotFound => write!(f, "link not found"),
+            SendError::LinkNotActive => write!(f, "link not active"),
+            SendError::WindowFull => write!(f, "channel window full"),
+            SendError::Crypto(e) => write!(f, "crypto error: {e}"),
+            SendError::PacketBuild(e) => write!(f, "packet build error: {e}"),
+            SendError::ResourceLimit => write!(f, "resource table full"),
+        }
+    }
+}
+
 /// A receipt for a channel message awaiting proof-of-delivery.
 #[derive(Debug, Clone)]
 pub struct ChannelReceipt {
@@ -697,7 +739,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         identity: &Identity,
         rng: &mut R,
         now: u64,
-    ) -> Option<(alloc::vec::Vec<u8>, [u8; TRUNCATED_HASH_LEN])> {
+    ) -> Result<(alloc::vec::Vec<u8>, [u8; TRUNCATED_HASH_LEN]), SendError> {
         let (mut link, request_payload) =
             Link::new_initiator(dest_hash, identity.ed25519_pub(), rng, now);
 
@@ -719,18 +761,18 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             .payload(&request_payload)
             .via(via.as_ref())
             .build()
-            .ok()?;
+            .map_err(SendError::PacketBuild)?;
 
         // Compute link_id from the HEADER_1 form of the packet (strip transport
         // header if present). Python computes link_id from the hashable part which
         // masks header_type/transport bits, but uses get_hashable_part() which for
         // HEADER_2 starts at raw[18:] (skipping transport_id). Our compute_link_id
         // handles both HEADER_1 and HEADER_2.
-        let link_id = compute_link_id(&pkt_buf[..pkt_len]).ok()?;
+        let link_id = compute_link_id(&pkt_buf[..pkt_len]).map_err(SendError::PacketBuild)?;
         link.set_link_id(link_id);
 
         let _ = self.links.insert(link_id, link);
-        Some((pkt_buf[..pkt_len].to_vec(), link_id))
+        Ok((pkt_buf[..pkt_len].to_vec(), link_id))
     }
 
     /// Build an encrypted DATA packet for a link.
@@ -740,10 +782,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         plaintext: &[u8],
         context: u8,
         rng: &mut R,
-    ) -> Option<alloc::vec::Vec<u8>> {
-        let link = self.links.get(link_id)?;
+    ) -> Result<alloc::vec::Vec<u8>, SendError> {
+        let link = self.links.get(link_id).ok_or(SendError::LinkNotFound)?;
         if !link.is_active() {
-            return None;
+            return Err(SendError::LinkNotActive);
         }
         Self::build_link_packet(link, link_id, plaintext, context, rng)
     }
@@ -754,8 +796,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         link_id: &[u8; TRUNCATED_HASH_LEN],
         rtt_bytes: &[u8],
         rng: &mut R,
-    ) -> Option<alloc::vec::Vec<u8>> {
-        let link = self.links.get(link_id)?;
+    ) -> Result<alloc::vec::Vec<u8>, SendError> {
+        let link = self.links.get(link_id).ok_or(SendError::LinkNotFound)?;
         Self::build_link_packet(link, link_id, rtt_bytes, CONTEXT_LRRTT, rng)
     }
 
@@ -768,10 +810,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         link_id: &[u8; TRUNCATED_HASH_LEN],
         request: bool,
         rng: &mut R,
-    ) -> Option<alloc::vec::Vec<u8>> {
-        let link = self.links.get(link_id)?;
+    ) -> Result<alloc::vec::Vec<u8>, SendError> {
+        let link = self.links.get(link_id).ok_or(SendError::LinkNotFound)?;
         if !link.is_active() && link.state != crate::link::LinkState::Stale {
-            return None;
+            return Err(SendError::LinkNotActive);
         }
         let payload: &[u8] = if request { &[0xFF] } else { &[0xFE] };
         Self::build_link_packet(link, link_id, payload, CONTEXT_KEEPALIVE, rng)
@@ -784,9 +826,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         plaintext: &[u8],
         context: u8,
         rng: &mut R,
-    ) -> Option<alloc::vec::Vec<u8>> {
+    ) -> Result<alloc::vec::Vec<u8>, SendError> {
         let mut ct_buf = [0u8; rete_core::MTU];
-        let ct_len = link.encrypt(plaintext, rng, &mut ct_buf).ok()?;
+        let ct_len = link
+            .encrypt(plaintext, rng, &mut ct_buf)
+            .map_err(SendError::Crypto)?;
         let mut pkt_buf = [0u8; rete_core::MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
@@ -795,8 +839,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             .context(context)
             .payload(&ct_buf[..ct_len])
             .build()
-            .ok()?;
-        Some(pkt_buf[..pkt_len].to_vec())
+            .map_err(SendError::PacketBuild)?;
+        Ok(pkt_buf[..pkt_len].to_vec())
     }
 
     /// Build a LINKCLOSE packet and remove the link.
@@ -804,10 +848,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
-    ) -> Option<alloc::vec::Vec<u8>> {
-        let link = self.links.get(link_id)?;
+    ) -> Result<alloc::vec::Vec<u8>, SendError> {
+        let link = self.links.get(link_id).ok_or(SendError::LinkNotFound)?;
         let mut close_buf = [0u8; rete_core::MTU];
-        let close_len = link.build_close(rng, &mut close_buf).ok()?;
+        let close_len = link
+            .build_close(rng, &mut close_buf)
+            .map_err(SendError::Crypto)?;
 
         let mut pkt_buf = [0u8; rete_core::MTU];
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
@@ -817,10 +863,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             .context(CONTEXT_LINKCLOSE)
             .payload(&close_buf[..close_len])
             .build()
-            .ok()?;
+            .map_err(SendError::PacketBuild)?;
 
         self.links.remove(link_id);
-        Some(pkt_buf[..pkt_len].to_vec())
+        Ok(pkt_buf[..pkt_len].to_vec())
     }
 
     // -----------------------------------------------------------------------
@@ -1729,6 +1775,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 // Resource advertisement from sender
                 match Resource::from_advertisement(decrypted, *link_id) {
                     Ok(res) => {
+                        if self.resources.len() >= L {
+                            return IngestResult::Invalid;
+                        }
                         let mut rh = [0u8; TRUNCATED_HASH_LEN];
                         rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
                         let total_size = res.total_size;
@@ -1778,20 +1827,20 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         .payload(&part_data)
                         .build()
                     {
-                        self.resource_outbound.push(pkt_buf[..pkt_len].to_vec());
+                        self.push_resource_outbound(pkt_buf[..pkt_len].to_vec());
                     }
                 }
                 // Send link-encrypted HMU so receiver gets hashes for next window.
                 if let Some(payload) = hmu_payload {
                     if let Some(link) = self.links.get(link_id) {
-                        if let Some(pkt) = Self::build_link_packet(
+                        if let Ok(pkt) = Self::build_link_packet(
                             link,
                             link_id,
                             &payload,
                             CONTEXT_RESOURCE_HMU,
                             rng,
                         ) {
-                            self.resource_outbound.push(pkt);
+                            self.push_resource_outbound(pkt);
                         }
                     }
                 }
@@ -1834,7 +1883,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             if let Some(adv_pkt) =
                                 self.advertise_next_split_segment(link_id, &original_hash, rng)
                             {
-                                self.resource_outbound.push(adv_pkt);
+                                self.push_resource_outbound(adv_pkt);
                             }
                             // Return Duplicate so NodeCore doesn't emit ResourceComplete yet
                             IngestResult::Duplicate
@@ -2107,7 +2156,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     /// Send a channel message on a link.
     ///
     /// Lazy-inits the channel, enqueues the message, encrypts it, and returns
-    /// the raw packet bytes. Returns `None` if the link is not active or the
+    /// the raw packet bytes. Returns `Err` if the link is not active or the
     /// channel window is full.
     pub fn send_channel_message<R: RngCore + CryptoRng>(
         &mut self,
@@ -2116,16 +2165,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         payload: &[u8],
         now: u64,
         rng: &mut R,
-    ) -> Option<alloc::vec::Vec<u8>> {
-        let link = self.links.get_mut(link_id)?;
+    ) -> Result<alloc::vec::Vec<u8>, SendError> {
+        let link = self.links.get_mut(link_id).ok_or(SendError::LinkNotFound)?;
         if !link.is_active() {
-            return None;
+            return Err(SendError::LinkNotActive);
         }
         let channel = link
             .channel
             .get_or_insert_with(crate::channel::Channel::new);
         let sequence = channel.next_tx_sequence();
-        let envelope_bytes = channel.send(message_type, payload)?;
+        let envelope_bytes = channel.send(message_type, payload).ok_or(SendError::WindowFull)?;
         channel.mark_sent(now);
         link.last_outbound = now;
         let raw = Self::build_link_packet(link, link_id, &envelope_bytes, CONTEXT_CHANNEL, rng)?;
@@ -2145,7 +2194,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             );
         }
 
-        Some(raw)
+        Ok(raw)
     }
 
     // -----------------------------------------------------------------------
@@ -2187,7 +2236,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 continue;
             }
             for envelope_bytes in retransmits {
-                if let Some(pkt) =
+                if let Ok(pkt) =
                     Self::build_link_packet(link, &lid, &envelope_bytes, CONTEXT_CHANNEL, rng)
                 {
                     packets.push(pkt);
@@ -2227,7 +2276,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         let mut packets = alloc::vec::Vec::new();
         for lid in need_ka {
-            if let Some(pkt) = self.build_keepalive_packet(&lid, true, rng) {
+            if let Ok(pkt) = self.build_keepalive_packet(&lid, true, rng) {
                 if let Some(link) = self.links.get_mut(&lid) {
                     link.last_outbound = now;
                 }
@@ -2477,6 +2526,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         )?;
 
         // Queue remaining data for later segments (only the tail after segment 1)
+        if self.split_send_queue.len() >= L {
+            return None;
+        }
         self.split_send_queue.push(SplitSendEntry {
             link_id: *link_id,
             original_hash: seg1_hash,
@@ -2545,6 +2597,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     /// `split` optionally sets split metadata: (split_index, split_total, original_hash).
     ///
     /// Returns (advertisement_packet, resource_hash).
+    fn push_resource_outbound(&mut self, pkt: alloc::vec::Vec<u8>) {
+        if self.resource_outbound.len() < RESOURCE_OUTBOUND_MAX {
+            self.resource_outbound.push(pkt);
+        }
+    }
+
     fn prepare_and_advertise_segment<R: RngCore + CryptoRng>(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
@@ -2554,6 +2612,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         split: Option<SplitMeta>,
         rng: &mut R,
     ) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
+        if self.resources.len() >= L {
+            return None;
+        }
         let (encrypted, peer_mtu) = self.prepend_and_encrypt(link_id, send_data, rng)?;
         let (sdu, link_mdu) = Self::compute_sdu_and_link_mdu(peer_mtu);
         let original_size = split
@@ -2766,7 +2827,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         // Encrypt REQ packets via the link (separate loop to avoid borrow conflict)
         for (link_id, req_payload) in &req_packets {
             if let Some(pkt) = self.build_resource_req_packet(link_id, req_payload, rng) {
-                self.resource_outbound.push(pkt);
+                self.push_resource_outbound(pkt);
             }
         }
         // Also send link-encrypted HMU for sender resources with unsent hashes.
@@ -2782,10 +2843,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         }
         for (lid, hmu_payload) in &hmu_items {
             if let Some(link) = self.links.get(lid) {
-                if let Some(pkt) =
+                if let Ok(pkt) =
                     Self::build_link_packet(link, lid, hmu_payload, CONTEXT_RESOURCE_HMU, rng)
                 {
-                    self.resource_outbound.push(pkt);
+                    self.push_resource_outbound(pkt);
                 }
             }
         }

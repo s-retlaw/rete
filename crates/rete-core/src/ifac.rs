@@ -36,6 +36,7 @@
 use crate::{Error, Identity};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// HKDF salt used for IFAC key derivation (from Python `Reticulum.IFAC_SALT`).
 pub const IFAC_SALT: [u8; 32] = [
@@ -57,6 +58,7 @@ const MAX_PROTECTED_LEN: usize = crate::MTU + 64;
 /// Derived from a network name and/or network key (passphrase).
 /// All interfaces sharing the same `IfacKey` can communicate;
 /// packets from interfaces with a different (or no) IFAC key are dropped.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct IfacKey {
     identity: Identity,
     key: [u8; 64],

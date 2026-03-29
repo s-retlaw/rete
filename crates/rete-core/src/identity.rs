@@ -48,9 +48,10 @@
 use crate::token::{Token, TOKEN_OVERHEAD};
 use crate::{Error, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// An RNS identity — combined X25519 (ECDH) and Ed25519 (signing) keypair.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct Identity {
     /// X25519 private scalar (32 bytes).
     pub(crate) x25519_prv: [u8; 32],

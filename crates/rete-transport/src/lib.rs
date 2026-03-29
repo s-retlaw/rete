@@ -48,8 +48,8 @@ pub use resource::{
 };
 pub use snapshot::{IdentityEntry, PathEntry, Snapshot, SnapshotDetail};
 pub use transport::{
-    IngestResult, ReverseEntry, TickResult, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,
-    REVERSE_TIMEOUT,
+    IngestResult, ReverseEntry, SendError, TickResult, Transport, PATH_REQUEST_DEST,
+    RECEIPT_TIMEOUT, REVERSE_TIMEOUT,
 };
 
 // ---------------------------------------------------------------------------
