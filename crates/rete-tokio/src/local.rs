@@ -13,29 +13,17 @@ use rete_core::MTU;
 use rete_stack::ReteInterface;
 
 use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
+use crate::hub::{ClientHub, HubBroadcaster};
 use crate::InboundMsg;
-
-/// Counter for assigning unique client IDs.
-static NEXT_CLIENT_ID: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------
 // LocalServer — accepts local clients and relays packets
 // ---------------------------------------------------------------------------
-
-/// A connected local client tracked by the server.
-struct LocalClientEntry {
-    /// Unique identifier for this client.
-    id: usize,
-    /// Channel to send outbound packets to this client's write task.
-    tx: mpsc::Sender<Vec<u8>>,
-}
 
 /// Server for local shared instance IPC.
 ///
@@ -48,11 +36,12 @@ pub struct LocalServer {
     /// Interface index assigned to local clients in the multi-interface model.
     /// All local clients share a single "local" interface index.
     iface_idx: u8,
-    /// Connected clients (shared with the broadcast path).
-    clients: Arc<tokio::sync::RwLock<Vec<LocalClientEntry>>>,
-    /// Per-client outbound channel capacity.
-    channel_capacity: usize,
+    /// Shared client management hub.
+    hub: ClientHub,
 }
+
+/// Type alias for backward compatibility.
+pub type LocalBroadcaster = HubBroadcaster;
 
 impl LocalServer {
     /// Bind to an abstract-namespace Unix socket for the given instance name.
@@ -86,16 +75,13 @@ impl LocalServer {
             listener,
             inbound_tx,
             iface_idx,
-            clients: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            channel_capacity: config.channel_capacity,
+            hub: ClientHub::new(config.channel_capacity),
         })
     }
 
     /// Get a handle for broadcasting packets to all connected local clients.
-    pub fn broadcaster(&self) -> LocalBroadcaster {
-        LocalBroadcaster {
-            clients: Arc::clone(&self.clients),
-        }
+    pub fn broadcaster(&self) -> HubBroadcaster {
+        self.hub.broadcaster()
     }
 
     /// Run the accept loop forever, spawning a task for each client.
@@ -105,19 +91,8 @@ impl LocalServer {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _addr)) => {
-                    let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+                    let (client_id, client_rx) = self.hub.register().await;
                     eprintln!("[rete-local] client {} connected", client_id);
-
-                    let (client_tx, client_rx) = mpsc::channel::<Vec<u8>>(self.channel_capacity);
-
-                    // Register client
-                    {
-                        let mut clients = self.clients.write().await;
-                        clients.push(LocalClientEntry {
-                            id: client_id,
-                            tx: client_tx,
-                        });
-                    }
 
                     // Spawn read/write tasks for this client
                     let (read_half, write_half) = stream.into_split();
@@ -132,10 +107,16 @@ impl LocalServer {
                     // read (no zombie half-connections).
                     let inbound_tx = self.inbound_tx.clone();
                     let iface_idx = self.iface_idx;
-                    let clients = Arc::clone(&self.clients);
+                    let broadcaster = self.hub.broadcaster();
+                    let hub_broadcaster = self.hub.broadcaster();
                     tokio::spawn(async move {
-                        let read_fut =
-                            client_read_task(read_half, inbound_tx, iface_idx, client_id, &clients);
+                        let read_fut = client_read_task(
+                            read_half,
+                            inbound_tx,
+                            iface_idx,
+                            client_id,
+                            &broadcaster,
+                        );
                         tokio::select! {
                             _ = read_fut => {},
                             _ = write_handle => {
@@ -146,9 +127,8 @@ impl LocalServer {
                             },
                         }
 
-                        // Client disconnected — remove from list
-                        let mut clients = clients.write().await;
-                        clients.retain(|c| c.id != client_id);
+                        // Client disconnected — remove from hub
+                        hub_broadcaster.remove_client(client_id).await;
                         eprintln!("[rete-local] client {} disconnected", client_id);
                     });
                 }
@@ -159,45 +139,6 @@ impl LocalServer {
                 }
             }
         }
-    }
-}
-
-/// Handle for broadcasting packets to all connected local clients.
-///
-/// Obtained via [`LocalServer::broadcaster`]. Clone-friendly — can be held by
-/// the main event loop alongside the interface sender list.
-#[derive(Clone)]
-pub struct LocalBroadcaster {
-    clients: Arc<tokio::sync::RwLock<Vec<LocalClientEntry>>>,
-}
-
-impl LocalBroadcaster {
-    /// Broadcast a raw packet to all connected local clients.
-    ///
-    /// If `exclude_client` is `Some(id)`, that client is skipped (used when
-    /// relaying a packet that originated from that client).
-    pub async fn broadcast(&self, data: &[u8], exclude_client: Option<usize>) {
-        // Collect senders under the lock, then release before sending.
-        // This avoids holding the RwLock across .await (backpressure risk).
-        let senders: Vec<_> = {
-            let clients = self.clients.read().await;
-            clients
-                .iter()
-                .filter(|c| exclude_client != Some(c.id))
-                .map(|c| c.tx.clone())
-                .collect()
-        };
-        let payload = data.to_vec();
-        for tx in senders {
-            if tx.send(payload.clone()).await.is_err() {
-                log::debug!("[rete-local] broadcast send to client failed (disconnected or full)");
-            }
-        }
-    }
-
-    /// Number of currently connected clients.
-    pub async fn client_count(&self) -> usize {
-        self.clients.read().await.len()
     }
 }
 
@@ -234,7 +175,7 @@ async fn client_read_task(
     inbound_tx: mpsc::Sender<InboundMsg>,
     iface_idx: u8,
     client_id: usize,
-    clients: &tokio::sync::RwLock<Vec<LocalClientEntry>>,
+    broadcaster: &HubBroadcaster,
 ) {
     // Box-allocate the decoder to avoid ~9 KB stack usage per spawned task.
     let mut decoder: Box<HdlcDecoder<{ MTU }>> = Box::new(HdlcDecoder::new());
@@ -262,20 +203,7 @@ async fn client_read_task(
                     }
 
                     // Broadcast to other local clients (not back to sender).
-                    // Collect senders first, release lock before sending.
-                    let senders: Vec<_> = {
-                        let guard = clients.read().await;
-                        guard
-                            .iter()
-                            .filter(|c| c.id != client_id)
-                            .map(|c| c.tx.clone())
-                            .collect()
-                    };
-                    for tx in senders {
-                        if tx.send(data.clone()).await.is_err() {
-                            log::debug!("[rete-local] relay send to peer client failed");
-                        }
-                    }
+                    broadcaster.broadcast(&data, Some(client_id)).await;
                 }
             }
         }
@@ -648,8 +576,7 @@ mod tests {
                     assert_eq!(broadcaster.client_count().await, 2);
 
                     // Broadcast a packet (from node, no exclusion)
-                    let test_data = b"broadcast packet";
-                    broadcaster.broadcast(test_data, None).await;
+                    broadcaster.broadcast(b"broadcast packet", None).await;
 
                     // Both clients should receive it
                     let frame1 = timeout(Duration::from_secs(2), hdlc_read(&mut client1))
@@ -659,8 +586,8 @@ mod tests {
                         .await
                         .expect("timeout on client2");
 
-                    assert_eq!(frame1, test_data);
-                    assert_eq!(frame2, test_data);
+                    assert_eq!(frame1, b"broadcast packet");
+                    assert_eq!(frame2, b"broadcast packet");
                 });
         });
     }

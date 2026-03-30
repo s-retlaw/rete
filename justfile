@@ -368,6 +368,16 @@ test-all:
     # --- E2E tests ---
     E2E_ANY_FAIL=0
 
+    # Detect Docker availability for Docker-isolated tests
+    DOCKER_OK=0
+    if docker info >/dev/null 2>&1; then
+        DOCKER_OK=1
+    else
+        echo "  ⚠ Docker daemon not available — Docker-isolated E2E tests will be skipped"
+        echo ""
+    fi
+    DOCKER_SKIPPED=0
+
     # Helper to run one E2E suite and parse results
     run_e2e() {
         local label="$1" script="$2"
@@ -385,14 +395,25 @@ test-all:
         echo ""
     }
 
+    # Helper to run a Docker-isolated E2E suite (skipped if Docker unavailable)
+    run_e2e_docker() {
+        local label="$1" script="$2"
+        if [ "$DOCKER_OK" -eq 0 ]; then
+            eval "${label}_PASS=0"; eval "${label}_FAIL=0"; eval "${label}_SKIP=0"
+            DOCKER_SKIPPED=$((DOCKER_SKIPPED + 1))
+            return
+        fi
+        run_e2e "$label" "$script"
+    }
+
     # Core (7) — Docker-isolated
-    run_e2e LIVE docker_live_interop.py
-    run_e2e LINK docker_link_interop.py
-    run_e2e CHANNEL docker_channel_interop.py
-    run_e2e RELAY docker_relay_interop.py
-    run_e2e PATHREQ docker_path_request_interop.py
-    run_e2e PROOF docker_proof_routing_interop.py
-    run_e2e ROBUSTNESS docker_robustness_interop.py
+    run_e2e_docker LIVE docker_live_interop.py
+    run_e2e_docker LINK docker_link_interop.py
+    run_e2e_docker CHANNEL docker_channel_interop.py
+    run_e2e_docker RELAY docker_relay_interop.py
+    run_e2e_docker PATHREQ docker_path_request_interop.py
+    run_e2e_docker PROOF docker_proof_routing_interop.py
+    run_e2e_docker ROBUSTNESS docker_robustness_interop.py
 
     # Link advanced (8)
     run_e2e LINKINIT link_initiate_interop.py
@@ -405,14 +426,14 @@ test-all:
     run_e2e TEARDOWN link_teardown_race_interop.py
 
     # IFAC (5) — base IFAC Docker-isolated
-    run_e2e IFAC docker_ifac_interop.py
+    run_e2e_docker IFAC docker_ifac_interop.py
     run_e2e IFACMISMATCH ifac_mismatch_interop.py
     run_e2e IFACRELAY ifac_relay_interop.py
     run_e2e IFACLINK ifac_link_interop.py
     run_e2e IFACLARGE ifac_large_packet_interop.py
 
     # Transport/relay (6) — base transport Docker-isolated
-    run_e2e TRANSPORT docker_transport_relay_interop.py
+    run_e2e_docker TRANSPORT docker_transport_relay_interop.py
     run_e2e DUAL dual_interface_interop.py
     run_e2e MULTIHOP multi_hop_relay_interop.py
     run_e2e CHANRELAY channel_relay_interop.py
@@ -420,7 +441,7 @@ test-all:
     run_e2e RESINITRELAY resource_initiate_relay_interop.py
 
     # Auto/mDNS (3) — base auto Docker-isolated
-    run_e2e AUTO docker_auto_interop.py
+    run_e2e_docker AUTO docker_auto_interop.py
     run_e2e AUTODATA auto_data_interop.py
     run_e2e AUTOGROUP auto_group_isolation_interop.py
 
@@ -445,7 +466,7 @@ test-all:
     run_e2e HDLC hdlc_recovery_interop.py
 
     # Resource (5) — base resource Docker-isolated
-    run_e2e RESOURCE docker_resource_interop.py
+    run_e2e_docker RESOURCE docker_resource_interop.py
     run_e2e RESCONCUR resource_concurrent_interop.py
     run_e2e RESMULTISEG resource_multiseg_interop.py
     run_e2e RESMULTI resource_multiwindow_interop.py
@@ -593,7 +614,11 @@ test-all:
         + CHANORDER_FAIL + CONCTRAF_FAIL + PATHEXP_FAIL + RESCANCEL_FAIL \
         + RESLARGE_FAIL + MIXSTRESS_FAIL + PROOFCHAIN_FAIL))
     echo ""
-    printf "  %-30s %s passed, %s failed\n" "e2e total (63 suites)" "$E2E_PASS" "$E2E_FAIL"
+    DOCKER_SKIP_STR=""
+    if [ "$DOCKER_SKIPPED" -gt 0 ]; then
+        DOCKER_SKIP_STR=" ($DOCKER_SKIPPED docker suites skipped)"
+    fi
+    printf "  %-30s %s passed, %s failed%s\n" "e2e total (63 suites)" "$E2E_PASS" "$E2E_FAIL" "$DOCKER_SKIP_STR"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))

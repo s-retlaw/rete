@@ -3,7 +3,9 @@
 //! Provides [`TokioNode`] which drives transport + interfaces in an async
 //! event loop using `tokio::select!`.
 
+pub mod hub;
 pub mod local;
+pub mod tcp_server;
 
 use rete_core::{Identity, TRUNCATED_HASH_LEN};
 pub use rete_stack::NodeEvent;
@@ -11,7 +13,35 @@ pub use rete_stack::ProofStrategy;
 use rete_stack::{dispatch_single, HostedNodeCore, OutboundPacket, PacketRouting, ReteInterface};
 use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
+pub use hub::{ClientHub, HubBroadcaster};
+pub use tcp_server::TcpServer;
+
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// A dispatch target for outbound packets.
+///
+/// Static interfaces (TCP client, serial, AutoInterface) use [`Direct`](InterfaceSlot::Direct)
+/// with a point-to-point channel. Dynamic interfaces (local IPC server, TCP server,
+/// future WebSocket) use [`Hub`](InterfaceSlot::Hub) with broadcast semantics.
+pub enum InterfaceSlot {
+    /// Point-to-point: single send channel to one interface task.
+    Direct(tokio::sync::mpsc::Sender<Vec<u8>>),
+    /// Multi-client: broadcast to all connected clients.
+    Hub(HubBroadcaster),
+}
+
+impl InterfaceSlot {
+    async fn send_packet(&self, data: &[u8]) {
+        match self {
+            InterfaceSlot::Direct(tx) => {
+                let _ = tx.send(data.to_vec()).await;
+            }
+            InterfaceSlot::Hub(broadcaster) => {
+                broadcaster.broadcast(data, None).await;
+            }
+        }
+    }
+}
 
 /// Command injected into a running node's event loop.
 #[derive(Debug)]
@@ -430,7 +460,7 @@ impl TokioNode {
     /// Run the main event loop with multiple interfaces (no command channel).
     pub async fn run_multi<F>(
         &mut self,
-        iface_senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>>,
+        slots: Vec<InterfaceSlot>,
         inbound_rx: tokio::sync::mpsc::Receiver<InboundMsg>,
         mut on_event: F,
     ) where
@@ -439,7 +469,7 @@ impl TokioNode {
         let (dummy_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
         drop(dummy_tx);
         self.run_multi_with_commands(
-            iface_senders,
+            slots,
             inbound_rx,
             cmd_rx,
             |e, _, _: &mut rand::rngs::ThreadRng| {
@@ -450,13 +480,17 @@ impl TokioNode {
         .await;
     }
 
-    /// Run the main event loop with multiple interfaces and a command channel.
+    /// Run the main event loop with multiple interface slots and a command channel.
+    ///
+    /// Each slot is either a [`Direct`](InterfaceSlot::Direct) point-to-point channel
+    /// (for TCP client, serial, AutoInterface) or a [`Hub`](InterfaceSlot::Hub) broadcaster
+    /// (for local IPC server, TCP server, future WebSocket).
     ///
     /// The `on_event` callback receives the event, a mutable reference to the
     /// node core, and the RNG. It may return outbound packets to send.
     pub async fn run_multi_with_commands<F>(
         &mut self,
-        iface_senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>>,
+        slots: Vec<InterfaceSlot>,
         mut inbound_rx: tokio::sync::mpsc::Receiver<InboundMsg>,
         mut cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
         mut on_event: F,
@@ -469,14 +503,14 @@ impl TokioNode {
         {
             let now = current_time_secs();
             let (announces, cached) = self.core.initial_announce(&mut rng, now);
-            dispatch_multi(&iface_senders, &announces, 0).await;
-            eprintln!("[rete] sent announce on {} interfaces", iface_senders.len());
+            dispatch(&slots, &announces, 0).await;
+            eprintln!("[rete] sent announce on {} interface slots", slots.len());
             if !cached.is_empty() {
                 eprintln!(
                     "[rete] flushing {} cached announces to interfaces",
                     cached.len()
                 );
-                dispatch_multi(&iface_senders, &cached, 0).await;
+                dispatch(&slots, &cached, 0).await;
             }
         }
 
@@ -484,8 +518,8 @@ impl TokioNode {
         if let Some((data, dest)) = self.initial_send.take() {
             let now = current_time_secs();
             if let Ok(pkt) = self.core.build_data_packet(&dest, &data, &mut rng, now) {
-                for tx in &iface_senders {
-                    let _ = tx.send(pkt.clone()).await;
+                for slot in &slots {
+                    slot.send_packet(&pkt).await;
                 }
             }
         }
@@ -503,19 +537,19 @@ impl TokioNode {
                     let Some(msg) = msg else { break };
                     let now = current_time_secs();
                     let outcome = self.core.handle_ingest(&msg.data, now, msg.iface_idx, &mut rng);
-                    dispatch_multi(&iface_senders, &outcome.packets, msg.iface_idx).await;
+                    dispatch(&slots, &outcome.packets, msg.iface_idx).await;
                     if let Some(event) = outcome.event {
                         let extra = on_event(event, &mut self.core, &mut rng);
-                        dispatch_multi(&iface_senders, &extra, 0).await;
+                        dispatch(&slots, &extra, 0).await;
                     }
                 }
                 cmd = cmd_rx.recv() => {
                     if let Some(cmd) = cmd {
                         let (packets, cont, event) = self.handle_command(cmd, &mut rng);
-                        dispatch_multi(&iface_senders, &packets, 0).await;
+                        dispatch(&slots, &packets, 0).await;
                         if let Some(e) = event {
                             let extra = on_event(e, &mut self.core, &mut rng);
-                            dispatch_multi(&iface_senders, &extra, 0).await;
+                            dispatch(&slots, &extra, 0).await;
                         }
                         if !cont { break; }
                     }
@@ -523,15 +557,15 @@ impl TokioNode {
                 _ = announce_timer.tick() => {
                     let now = current_time_secs();
                     self.core.queue_announce(None, &mut rng, now);
-                    dispatch_multi(&iface_senders, &self.core.flush_announces(now, &mut rng), 0).await;
+                    dispatch(&slots, &self.core.flush_announces(now, &mut rng), 0).await;
                 }
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();
                     let outcome = self.core.handle_tick(now, &mut rng);
-                    dispatch_multi(&iface_senders, &outcome.packets, 0).await;
+                    dispatch(&slots, &outcome.packets, 0).await;
                     if let Some(event) = outcome.event {
                         let extra = on_event(event, &mut self.core, &mut rng);
-                        dispatch_multi(&iface_senders, &extra, 0).await;
+                        dispatch(&slots, &extra, 0).await;
                     }
                 }
             }
@@ -539,29 +573,32 @@ impl TokioNode {
     }
 }
 
-/// Dispatch outbound packets across multiple interfaces.
-async fn dispatch_multi(
-    senders: &[tokio::sync::mpsc::Sender<Vec<u8>>],
+/// Dispatch outbound packets across interface slots.
+///
+/// Handles both point-to-point ([`InterfaceSlot::Direct`]) and multi-client
+/// ([`InterfaceSlot::Hub`]) slots uniformly.
+pub async fn dispatch(
+    slots: &[InterfaceSlot],
     packets: &[OutboundPacket],
     source_iface: u8,
 ) {
     for pkt in packets {
         match pkt.routing {
             PacketRouting::SourceInterface => {
-                if let Some(tx) = senders.get(source_iface as usize) {
-                    let _ = tx.send(pkt.data.clone()).await;
+                if let Some(slot) = slots.get(source_iface as usize) {
+                    slot.send_packet(&pkt.data).await;
                 }
             }
             PacketRouting::AllExceptSource => {
-                for (i, tx) in senders.iter().enumerate() {
+                for (i, slot) in slots.iter().enumerate() {
                     if i as u8 != source_iface {
-                        let _ = tx.send(pkt.data.clone()).await;
+                        slot.send_packet(&pkt.data).await;
                     }
                 }
             }
             PacketRouting::All => {
-                for tx in senders {
-                    let _ = tx.send(pkt.data.clone()).await;
+                for slot in slots {
+                    slot.send_packet(&pkt.data).await;
                 }
             }
         }

@@ -13,7 +13,7 @@ use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU,
     TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
 };
-use rete_tokio::{InboundMsg, TokioNode};
+use rete_tokio::{InboundMsg, InterfaceSlot, TokioNode};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -66,11 +66,11 @@ async fn run_multi_with_inbound(
 ) -> Vec<Vec<Vec<u8>>> {
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<InboundMsg>(256);
 
-    let mut senders = Vec::new();
+    let mut slots = Vec::new();
     let mut receivers = Vec::new();
     for _ in 0..num_interfaces {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-        senders.push(tx);
+        slots.push(InterfaceSlot::Direct(tx));
         receivers.push(rx);
     }
 
@@ -81,7 +81,7 @@ async fn run_multi_with_inbound(
 
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        node.run_multi(senders, inbound_rx, |_| {}),
+        node.run_multi(slots, inbound_rx, |_| {}),
     )
     .await;
 

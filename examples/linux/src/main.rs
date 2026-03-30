@@ -12,6 +12,7 @@
 //!   cargo run -p rete-example-linux -- --auto
 //!   cargo run -p rete-example-linux -- --auto --auto-group mynetwork
 //!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242 --propagation
+//!   cargo run -p rete-example-linux -- --listen 0.0.0.0:4242 --transport
 
 use rete_core::Identity;
 use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
@@ -20,7 +21,8 @@ use rete_iface_tcp::TcpInterface;
 use rete_lxmf::{LXMessage, LxmfEvent, LxmfRouter};
 use rete_stack::{OutboundPacket, RequestHandler, RequestPolicy};
 use rete_tokio::local::{LocalServer, ReconnectingLocalClient};
-use rete_tokio::{interface_task, InboundMsg, NodeCommand, NodeEvent, TokioNode};
+use rete_tokio::tcp_server::TcpServer;
+use rete_tokio::{interface_task, InboundMsg, InterfaceSlot, NodeCommand, NodeEvent, TokioNode};
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -465,6 +467,12 @@ async fn main() {
         .find(|w| w[0] == "--local-client")
         .map(|w| w[1].clone());
 
+    // Parse --listen <addr> (TCP server bind address, e.g. "0.0.0.0:4242")
+    let listen_addr = args
+        .windows(2)
+        .find(|w| w[0] == "--listen")
+        .map(|w| w[1].clone());
+
     // Parse --ifac-netname <name> (IFAC network name for interface access control)
     let ifac_netname = args
         .windows(2)
@@ -696,13 +704,14 @@ async fn main() {
         )
         .await;
     } else if local_server_name.is_some()
+        || listen_addr.is_some()
         || addrs.len() > 1
         || (auto_enabled && !addrs.is_empty())
         || (serial_path.is_some() && !addrs.is_empty())
     {
-        // Multi-interface mode: TCP endpoints + optional local server + optional AutoInterface.
+        // Multi-interface mode: TCP endpoints + optional servers + optional AutoInterface.
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<InboundMsg>(256);
-        let mut senders = Vec::new();
+        let mut slots: Vec<InterfaceSlot> = Vec::new();
         let mut next_iface_idx: u8 = 0;
 
         // Connect TCP interfaces
@@ -725,7 +734,7 @@ async fn main() {
             }
             eprintln!("[rete] connected to {} (iface {})", addr, idx);
             let (tx, driver) = interface_task(iface, idx, inbound_tx.clone());
-            senders.push(tx);
+            slots.push(InterfaceSlot::Direct(tx));
             tokio::spawn(driver);
         }
 
@@ -751,7 +760,7 @@ async fn main() {
                         );
                     }
                     let (tx, driver) = interface_task(iface, auto_idx, inbound_tx.clone());
-                    senders.push(tx);
+                    slots.push(InterfaceSlot::Direct(tx));
                     tokio::spawn(driver);
                     eprintln!("[rete] AutoInterface ready (iface {})", auto_idx);
                 }
@@ -778,14 +787,15 @@ async fn main() {
                 }
             };
             let (tx, driver) = interface_task(iface, serial_idx, inbound_tx.clone());
-            senders.push(tx);
+            slots.push(InterfaceSlot::Direct(tx));
             tokio::spawn(driver);
             eprintln!("[rete] serial port open (iface {})", serial_idx);
         }
 
         // Start local server (if configured)
-        let local_broadcaster = if let Some(ref server_name) = local_server_name {
+        if let Some(ref server_name) = local_server_name {
             let local_iface_idx = next_iface_idx;
+            next_iface_idx += 1;
             eprintln!(
                 "[rete] starting local server '{}' (iface {}) ...",
                 server_name, local_iface_idx
@@ -794,42 +804,62 @@ async fn main() {
                 Ok(server) => {
                     let broadcaster = server.broadcaster();
                     tokio::spawn(server.run());
+                    slots.push(InterfaceSlot::Hub(broadcaster));
                     eprintln!(
                         "[rete] local server '{}' listening on \\0rns/{}",
                         server_name, server_name
                     );
-                    Some(broadcaster)
                 }
                 Err(e) => {
                     eprintln!("[rete] failed to start local server: {e}");
                     std::process::exit(1);
                 }
             }
-        } else {
-            None
-        };
+        }
+
+        // Start TCP server (if configured)
+        if let Some(ref addr) = listen_addr {
+            let tcp_server_idx = next_iface_idx;
+            next_iface_idx += 1;
+
+            let ifac = if ifac_enabled {
+                Some(
+                    rete_core::IfacKey::derive(ifac_netname.as_deref(), ifac_netkey.as_deref())
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+
+            match TcpServer::bind(addr, inbound_tx.clone(), tcp_server_idx, ifac, Default::default())
+                .await
+            {
+                Ok(server) => {
+                    let broadcaster = server.broadcaster();
+                    tokio::spawn(server.run());
+                    slots.push(InterfaceSlot::Hub(broadcaster));
+                    eprintln!(
+                        "[rete] TCP server listening on {} (iface {})",
+                        addr, tcp_server_idx
+                    );
+                }
+                Err(e) => {
+                    eprintln!("[rete] failed to bind TCP server on {}: {e}", addr);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        // Suppress unused variable warning
+        let _ = next_iface_idx;
 
         // Drop the original inbound_tx so the channel closes when all tasks exit
         drop(inbound_tx);
 
-        // If we have a local server, we need to also broadcast outbound packets
-        // to local clients. We wrap the multi-interface loop with a broadcaster.
-        if let Some(broadcaster) = local_broadcaster {
-            run_multi_with_local_server(
-                &mut node,
-                senders,
-                inbound_rx,
-                cmd_rx,
-                broadcaster,
-                |e, core, rng| on_event(e, &lxmf_router, core, rng),
-            )
-            .await;
-        } else {
-            node.run_multi_with_commands(senders, inbound_rx, cmd_rx, |e, core, rng| {
-                on_event(e, &lxmf_router, core, rng)
-            })
-            .await;
-        }
+        node.run_multi_with_commands(slots, inbound_rx, cmd_rx, |e, core, rng| {
+            on_event(e, &lxmf_router, core, rng)
+        })
+        .await;
     } else {
         let addr = addrs.first().copied().unwrap_or(DEFAULT_ADDR);
         eprintln!("[rete] connecting to {} ...", addr);
@@ -854,167 +884,6 @@ async fn main() {
             rand::thread_rng(),
         )
         .await;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Multi-interface loop with local server broadcasting
-// ---------------------------------------------------------------------------
-
-/// Run the multi-interface event loop, additionally broadcasting outbound
-/// packets to local IPC clients via the [`LocalBroadcaster`].
-///
-/// This is used when `--local-server` is combined with TCP `--connect`
-/// interfaces. Packets from local clients arrive via `inbound_rx` (like any
-/// other interface). Outbound packets from the node are sent to TCP interfaces
-/// via their senders AND broadcast to all local clients.
-async fn run_multi_with_local_server<F>(
-    node: &mut TokioNode,
-    iface_senders: Vec<tokio::sync::mpsc::Sender<Vec<u8>>>,
-    mut inbound_rx: tokio::sync::mpsc::Receiver<InboundMsg>,
-    mut cmd_rx: tokio::sync::mpsc::Receiver<NodeCommand>,
-    broadcaster: rete_tokio::local::LocalBroadcaster,
-    mut on_event: F,
-) where
-    F: FnMut(
-        NodeEvent,
-        &mut rete_stack::HostedNodeCore,
-        &mut rand::rngs::ThreadRng,
-    ) -> Vec<OutboundPacket>,
-{
-    use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
-
-    let mut rng = rand::thread_rng();
-
-    // Queue initial announce
-    {
-        let now = rete_tokio::current_time_secs();
-        node.core.queue_announce(None, &mut rng, now);
-        let announces = node.core.flush_announces(now, &mut rng);
-        dispatch_with_local(&iface_senders, &announces, 0, &broadcaster, None).await;
-    }
-    eprintln!(
-        "[rete] sent announce on {} TCP interfaces + local server",
-        iface_senders.len()
-    );
-
-    // Flush cached announces to all interfaces + local clients
-    {
-        let cached = node.core.cached_announces();
-        if !cached.is_empty() {
-            eprintln!("[rete] flushing {} cached announces", cached.len());
-            dispatch_with_local(&iface_senders, &cached, 0, &broadcaster, None).await;
-        }
-    }
-
-    let mut announce_timer =
-        tokio::time::interval(std::time::Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
-    let mut tick_timer = tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
-    announce_timer.tick().await;
-    tick_timer.tick().await;
-
-    loop {
-        tokio::select! {
-            msg = inbound_rx.recv() => {
-                let Some(msg) = msg else { break };
-                let now = rete_tokio::current_time_secs();
-                let outcome = node.core.handle_ingest(&msg.data, now, msg.iface_idx, &mut rng);
-                dispatch_with_local(
-                    &iface_senders,
-                    &outcome.packets,
-                    msg.iface_idx,
-                    &broadcaster,
-                    None,
-                ).await;
-                if let Some(event) = outcome.event {
-                    let extra = on_event(event, &mut node.core, &mut rng);
-                    dispatch_with_local(&iface_senders, &extra, 0, &broadcaster, None).await;
-                }
-            }
-            cmd = cmd_rx.recv() => {
-                if let Some(cmd) = cmd {
-                    if matches!(&cmd, NodeCommand::AppCommand { ref name, .. } if name == "stats") {
-                        let now = rete_tokio::current_time_secs();
-                        let stats = node.core.stats(now);
-                        if let Ok(json) = serde_json::to_string(&stats) {
-                            println!("STATS:{json}");
-                            use std::io::Write as _;
-                            std::io::stdout().flush().ok();
-                        }
-                    } else {
-                        let (packets, cont, event) = node.handle_command(cmd, &mut rng);
-                        dispatch_with_local(&iface_senders, &packets, 0, &broadcaster, None).await;
-                        if let Some(e) = event {
-                            let extra = on_event(e, &mut node.core, &mut rng);
-                            dispatch_with_local(&iface_senders, &extra, 0, &broadcaster, None).await;
-                        }
-                        if !cont { break; }
-                    }
-                }
-            }
-            _ = announce_timer.tick() => {
-                let now = rete_tokio::current_time_secs();
-                node.core.queue_announce(None, &mut rng, now);
-                let announces = node.core.flush_announces(now, &mut rng);
-                dispatch_with_local(&iface_senders, &announces, 0, &broadcaster, None).await;
-            }
-            _ = tick_timer.tick() => {
-                let now = rete_tokio::current_time_secs();
-                let outcome = node.core.handle_tick(now, &mut rng);
-                dispatch_with_local(&iface_senders, &outcome.packets, 0, &broadcaster, None).await;
-                if let Some(event) = outcome.event {
-                    let extra = on_event(event, &mut node.core, &mut rng);
-                    dispatch_with_local(&iface_senders, &extra, 0, &broadcaster, None).await;
-                }
-            }
-        }
-    }
-}
-
-/// Dispatch outbound packets to TCP interfaces AND local IPC clients.
-async fn dispatch_with_local(
-    senders: &[tokio::sync::mpsc::Sender<Vec<u8>>],
-    packets: &[rete_stack::OutboundPacket],
-    source_iface: u8,
-    broadcaster: &rete_tokio::local::LocalBroadcaster,
-    exclude_client: Option<usize>,
-) {
-    use rete_stack::PacketRouting;
-
-    for pkt in packets {
-        match pkt.routing {
-            PacketRouting::SourceInterface => {
-                if let Some(tx) = senders.get(source_iface as usize) {
-                    let _ = tx.send(pkt.data.clone()).await;
-                }
-                // Also send to local clients if source is the local iface
-                // (source_iface >= senders.len() means local)
-                if source_iface as usize >= senders.len() {
-                    broadcaster.broadcast(&pkt.data, exclude_client).await;
-                }
-            }
-            PacketRouting::AllExceptSource => {
-                for (i, tx) in senders.iter().enumerate() {
-                    if i as u8 != source_iface {
-                        let _ = tx.send(pkt.data.clone()).await;
-                    }
-                }
-                // Broadcast to local clients (unless source was local)
-                if (source_iface as usize) < senders.len() {
-                    // Source was a TCP iface — broadcast to all local clients
-                    broadcaster.broadcast(&pkt.data, None).await;
-                }
-                // If source was local, the server's read task already relayed
-                // to other local clients. We still need to send to TCP ifaces
-                // (handled above).
-            }
-            PacketRouting::All => {
-                for tx in senders {
-                    let _ = tx.send(pkt.data.clone()).await;
-                }
-                broadcaster.broadcast(&pkt.data, exclude_client).await;
-            }
-        }
     }
 }
 
