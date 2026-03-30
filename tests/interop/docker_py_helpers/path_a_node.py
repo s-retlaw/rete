@@ -47,8 +47,12 @@ def main():
     )
     dest.announce()
     print(f"PY_A_DEST_HASH:{dest.hexhash}", flush=True)
-    # Keep alive long enough for Rust to receive and cache the announce
-    time.sleep(5)
+    # Keep alive long enough for Rust to receive the announce AND for
+    # Python_C to start and send a path request.  If we exit too soon,
+    # rnsd's table-culling removes the path (the receiving interface is
+    # torn down on disconnect) and rnsd won't forward the path request
+    # to Rust because TCPServerInterface uses MODE_FULL.
+    time.sleep(60)
     print("PY_A_DONE", flush=True)
 
 

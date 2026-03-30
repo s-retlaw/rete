@@ -288,9 +288,14 @@ class DockerTopologyTest:
         self._stdin_pipes.clear()
         if self._started:
             self._log("tearing down compose stack...")
+            # Use --profile to ensure profiled services (e.g. late-join)
+            # are also cleaned up.  Passing a profile that doesn't exist
+            # in the compose file is harmless.
             subprocess.run(
                 ["docker", "compose", "-f", self.compose_file,
-                 "-p", self.project_name, "down", "-v",
+                 "-p", self.project_name,
+                 "--profile", "late-join",
+                 "down", "-v",
                  "--rmi", "local", "--remove-orphans", "--timeout", "5"],
                 capture_output=True,
                 timeout=30,

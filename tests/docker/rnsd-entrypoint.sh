@@ -17,7 +17,7 @@ cat > "$CONFIG_DIR/config" <<EOF
   share_instance = ${RNSD_SHARE_INSTANCE:-no}
 
 [logging]
-  loglevel = 5
+  loglevel = ${RNSD_LOGLEVEL:-5}
 
 [interfaces]
 

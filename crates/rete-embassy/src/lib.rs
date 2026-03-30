@@ -1,18 +1,19 @@
 //! rete-embassy — Embassy runtime harness for Reticulum.
 //!
 //! Provides [`EmbassyNode`] which drives transport + interfaces in an async
-//! event loop using `embassy_futures::select::select3`.
+//! event loop using `embassy_futures::select`.
 //!
 //! This crate is runtime-agnostic in the sense that it does not import any
 //! specific executor — only `embassy-time` (for timers) and `embassy-futures`
-//! (for `select3`). The executor is the caller's concern.
+//! (for select combinators). The executor is the caller's concern.
 
 #![no_std]
 extern crate alloc;
 
 use alloc::vec::Vec;
 
-use embassy_futures::select::{select3, Either3};
+use core::future::Future;
+use embassy_futures::select::{select4, Either4};
 use embassy_time::{Duration, Instant, Timer};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
@@ -186,30 +187,80 @@ impl EmbassyNode {
         self.core.build_announce(app_data, rng, now)
     }
 
-    /// Run the main event loop with a single interface.
-    pub async fn run<I, R, F>(&mut self, iface: &mut I, rng: &mut R, mut on_event: F)
+    /// Run the main event loop forever with a single interface.
+    ///
+    /// This is the production entry point for embedded targets where the node
+    /// runs until power-off. Equivalent to `run_until` with a future that
+    /// never resolves.
+    pub async fn run<I, R, F>(&mut self, iface: &mut I, rng: &mut R, on_event: F)
     where
         I: ReteInterface,
         R: RngCore + CryptoRng,
         F: FnMut(NodeEvent),
     {
-        self.run_with_handler(iface, rng, |event, _, _| {
-            on_event(event);
-            Vec::new()
-        })
+        self.run_until(iface, rng, on_event, core::future::pending::<()>())
+            .await;
+    }
+
+    /// Run the main event loop until a shutdown signal resolves.
+    ///
+    /// Identical to [`run`](Self::run) but returns when `shutdown` completes.
+    /// Useful for tests, graceful shutdown on button press, or deep-sleep
+    /// transitions.
+    pub async fn run_until<I, R, F, S>(
+        &mut self,
+        iface: &mut I,
+        rng: &mut R,
+        mut on_event: F,
+        shutdown: S,
+    ) where
+        I: ReteInterface,
+        R: RngCore + CryptoRng,
+        F: FnMut(NodeEvent),
+        S: Future<Output = ()>,
+    {
+        self.run_until_with_handler(
+            iface,
+            rng,
+            |event, _, _| {
+                on_event(event);
+                Vec::new()
+            },
+            shutdown,
+        )
         .await;
     }
 
-    /// Run the main event loop with a single interface and handler callback.
+    /// Run the main event loop forever with a handler callback.
     ///
     /// The `on_event` callback receives the event, a mutable reference to the
     /// node core, and the RNG. It may call methods like `core.initiate_link()`,
     /// `core.send_channel_message()`, etc. and return outbound packets to send.
-    pub async fn run_with_handler<I, R, F>(&mut self, iface: &mut I, rng: &mut R, mut on_event: F)
+    pub async fn run_with_handler<I, R, F>(&mut self, iface: &mut I, rng: &mut R, on_event: F)
     where
         I: ReteInterface,
         R: RngCore + CryptoRng,
         F: FnMut(NodeEvent, &mut EmbeddedNodeCore, &mut R) -> Vec<OutboundPacket>,
+    {
+        self.run_until_with_handler(iface, rng, on_event, core::future::pending::<()>())
+            .await;
+    }
+
+    /// Run the main event loop with handler callback until shutdown.
+    ///
+    /// This is the most general entry point. All other `run*` variants
+    /// delegate here.
+    pub async fn run_until_with_handler<I, R, F, S>(
+        &mut self,
+        iface: &mut I,
+        rng: &mut R,
+        mut on_event: F,
+        shutdown: S,
+    ) where
+        I: ReteInterface,
+        R: RngCore + CryptoRng,
+        F: FnMut(NodeEvent, &mut EmbeddedNodeCore, &mut R) -> Vec<OutboundPacket>,
+        S: Future<Output = ()>,
     {
         // Queue initial announce through transport (gets immediate + one retransmit).
         // Cached announces are not re-broadcast on embedded (single-interface, no catch-up needed).
@@ -237,15 +288,19 @@ impl EmbassyNode {
         const REANNOUNCE_IDLE_SECS: u64 = 3;
         let mut last_recv = Instant::from_secs(0);
 
+        // Pin the shutdown future so select4 can poll it repeatedly.
+        let mut shutdown = core::pin::pin!(shutdown);
+
         loop {
-            match select3(
+            match select4(
                 iface.recv(&mut recv_buf),
                 Timer::at(next_announce),
                 Timer::at(next_tick),
+                &mut shutdown,
             )
             .await
             {
-                Either3::First(result) => match result {
+                Either4::First(result) => match result {
                     Ok(data) => {
                         let now_inst = Instant::now();
 
@@ -275,13 +330,13 @@ impl EmbassyNode {
                         continue;
                     }
                 },
-                Either3::Second(()) => {
+                Either4::Second(()) => {
                     next_announce = Instant::now() + Duration::from_secs(announce_interval);
                     let now = Instant::now().as_secs();
                     self.core.queue_announce(None, rng, self.announce_time());
                     dispatch_single(iface, &self.core.flush_announces(now, rng)).await;
                 }
-                Either3::Third(()) => {
+                Either4::Third(()) => {
                     next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
                     let now = Instant::now().as_secs();
                     let outcome = self.core.handle_tick(now, rng);
@@ -290,6 +345,10 @@ impl EmbassyNode {
                         let extra = on_event(event, &mut self.core, rng);
                         dispatch_single(iface, &extra).await;
                     }
+                }
+                Either4::Fourth(()) => {
+                    // Shutdown signal received — exit the run loop.
+                    break;
                 }
             }
         }

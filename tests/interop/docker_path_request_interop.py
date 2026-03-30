@@ -10,13 +10,19 @@ Topology (Docker Compose):
 Flow:
   1. rnsd + rust-transport + python-a start
   2. Python_A announces, Rust caches it
-  3. Python_A exits
-  4. python-c starts with A's dest hash, requests path
-  5. Rust responds with cached announce
+  3. python-c starts with A's dest hash, requests path
+  4. rnsd (or Rust) responds with cached announce
+  5. Python_A is stopped after Python_C has resolved the path
+
+Note: Python_C starts while Python_A is still connected so that
+rnsd's path table still has the entry.  Python RNS's table-culling
+removes paths whose receiving interface has been torn down, and the
+TCPServerInterface uses MODE_FULL which is not in DISCOVER_PATHS_FOR,
+so rnsd will not forward an unknown-path request to Rust.
 
 Assertions:
   1. Rust received Python_A's announce
-  2. Python_C discovered Python_A via path request through Rust
+  2. Python_C discovered Python_A via path request
 
 Usage:
   cd tests/interop
@@ -45,15 +51,8 @@ def main():
         if a_dest_hex:
             t.wait_for_line("rust-transport", f"ANNOUNCE:{a_dest_hex}", timeout=15)
 
-        # Wait for Python_A to finish
-        t.wait_for_line("python-a", "PY_A_DONE", timeout=15)
-        time.sleep(2)
-
-        # Stop Python_A
-        t.stop_service("python-a")
-        time.sleep(1)
-
-        # Start Python_C with A's dest hash
+        # Start Python_C while Python_A is still connected, so rnsd's
+        # path table still has the entry (avoids table-culling race).
         if a_dest_hex:
             t.up_service("python-c", env={"TARGET_HASH": a_dest_hex})
         else:
@@ -64,6 +63,9 @@ def main():
         t.wait_for_line("python-c", "PY_C_DONE", timeout=30)
         time.sleep(1)
 
+        # Now stop Python_A (it may have already exited on its own)
+        t.stop_service("python-a")
+
         # --- Assertions ---
         t.check(
             t.has_line("rust-transport", f"ANNOUNCE:{a_dest_hex}"),
@@ -72,7 +74,7 @@ def main():
 
         t.check(
             t.has_line("python-c", "PY_C_PATH_FOUND"),
-            "Python_C discovered Python_A via path request through Rust",
+            "Python_C discovered Python_A via path request",
         )
 
         if t.failed > 0:

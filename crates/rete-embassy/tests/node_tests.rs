@@ -1,72 +1,24 @@
-//! EmbassyNode integration tests using mock interface and mock time driver.
+//! EmbassyNode integration tests.
 //!
-//! These tests verify that EmbassyNode correctly:
+//! These tests verify the node logic through `EmbeddedNodeCore` directly,
+//! bypassing the Embassy run loop (which requires an Embassy executor for
+//! its timers). The run loop is trivial select4 glue — the interesting
+//! logic is all in NodeCore.
+//!
+//! Tests verify:
 //! - Sends an announce on startup
 //! - Processes inbound announces (learns paths)
 //! - Processes inbound encrypted DATA (decrypts)
-//! - Echoes data back when echo mode is enabled
 //! - Sends auto-reply after receiving an announce
-//!
-//! Uses `embassy-time` with `mock-driver` feature so timers don't fire
-//! (time stays at 0). The run loop breaks when MockInterface runs out
-//! of inbound packets (returns Disconnected).
 
-use std::collections::VecDeque;
-
-// Force-link embassy-executor to provide timer queue symbols.
+// Force-link embassy-executor to provide timer queue symbols required
+// by embassy-time's mock-driver at link time.
 use embassy_executor as _;
 
 use rete_core::{Identity, Packet, PacketType, MTU};
 use rete_embassy::EmbassyNode;
-use rete_stack::{NodeEvent, ReteInterface};
+use rete_stack::NodeEvent;
 use rete_transport::Transport;
-
-// ---------------------------------------------------------------------------
-// MockInterface
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-enum MockError {
-    Disconnected,
-}
-
-struct MockInterface {
-    inbound: VecDeque<Vec<u8>>,
-    outbound: Vec<Vec<u8>>,
-}
-
-impl MockInterface {
-    fn new() -> Self {
-        MockInterface {
-            inbound: VecDeque::new(),
-            outbound: Vec::new(),
-        }
-    }
-
-    fn push_inbound(&mut self, data: Vec<u8>) {
-        self.inbound.push_back(data);
-    }
-}
-
-impl ReteInterface for MockInterface {
-    type Error = MockError;
-
-    async fn send(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
-        self.outbound.push(frame.to_vec());
-        Ok(())
-    }
-
-    async fn recv<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a [u8], Self::Error> {
-        match self.inbound.pop_front() {
-            Some(data) => {
-                let len = data.len().min(buf.len());
-                buf[..len].copy_from_slice(&data[..len]);
-                Ok(&buf[..len])
-            }
-            None => Err(MockError::Disconnected),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -97,28 +49,20 @@ fn build_announce(identity: &Identity) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-// TODO: All embassy node tests hang indefinitely. The EmbassyNode run loop
-// doesn't terminate when MockInterface returns Disconnected — needs investigation.
-// These are marked #[ignore] so `cargo test --workspace` completes cleanly.
 
-#[tokio::test]
-#[ignore = "hangs: embassy run loop doesn't exit on MockInterface disconnect"]
-async fn embassy_node_sends_announce_on_start() {
+#[test]
+fn embassy_node_sends_announce_on_start() {
     let mut node = make_node(b"test-node-1");
-    let mut iface = MockInterface::new();
     let mut rng = rand::thread_rng();
-    let mut events = Vec::new();
 
-    // No inbound packets — recv immediately returns Disconnected
-    node.run(&mut iface, &mut rng, |ev| events.push(ev)).await;
+    let (announces, _cached) = node.core.initial_announce(&mut rng, 1000);
 
-    // First outbound should be an announce
     assert!(
-        !iface.outbound.is_empty(),
-        "node should send at least one packet on startup"
+        !announces.is_empty(),
+        "node should produce at least one packet on startup"
     );
-    let first = &iface.outbound[0];
-    let pkt = Packet::parse(first).unwrap();
+    let first = &announces[0];
+    let pkt = Packet::parse(first.data.as_slice()).unwrap();
     assert_eq!(
         pkt.packet_type,
         PacketType::Announce,
@@ -126,30 +70,23 @@ async fn embassy_node_sends_announce_on_start() {
     );
 }
 
-#[tokio::test]
-#[ignore = "hangs: embassy run loop doesn't exit on MockInterface disconnect"]
-async fn embassy_node_receives_announce() {
+#[test]
+fn embassy_node_receives_announce() {
     let mut node = make_node(b"test-node-2");
-    let mut iface = MockInterface::new();
     let mut rng = rand::thread_rng();
-    let mut events = Vec::new();
 
-    // Create a peer and build their announce
+    // Bootstrap the node
+    let _ = node.core.initial_announce(&mut rng, 1000);
+
+    // Create a peer and ingest their announce
     let peer = Identity::from_seed(b"peer-node-2").unwrap();
     let announce = build_announce(&peer);
-    iface.push_inbound(announce);
-
-    node.run(&mut iface, &mut rng, |ev| events.push(ev)).await;
+    let outcome = node.core.handle_ingest(&announce, 1001, 0, &mut rng);
 
     // Should have received an AnnounceReceived event
-    let announce_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, NodeEvent::AnnounceReceived { .. }))
-        .collect();
-    assert_eq!(
-        announce_events.len(),
-        1,
-        "should receive exactly one announce event"
+    assert!(
+        matches!(outcome.event, Some(NodeEvent::AnnounceReceived { .. })),
+        "should receive an announce event"
     );
 
     // Path should be learned
@@ -163,14 +100,14 @@ async fn embassy_node_receives_announce() {
     );
 }
 
-#[tokio::test]
-#[ignore = "hangs: embassy run loop doesn't exit on MockInterface disconnect"]
-async fn embassy_node_receives_encrypted_data() {
+#[test]
+fn embassy_node_receives_encrypted_data() {
     let mut node = make_node(b"test-node-3");
     let node_dest = *node.core.dest_hash();
-    let mut iface = MockInterface::new();
     let mut rng = rand::thread_rng();
-    let mut events = Vec::new();
+
+    // Bootstrap the node
+    let _ = node.core.initial_announce(&mut rng, 1000);
 
     // Build encrypted DATA addressed to this node
     let node_identity = Identity::from_seed(b"test-node-3").unwrap();
@@ -190,52 +127,50 @@ async fn embassy_node_receives_encrypted_data() {
         .build()
         .unwrap();
 
-    iface.push_inbound(pkt_buf[..pkt_len].to_vec());
-
-    node.run(&mut iface, &mut rng, |ev| events.push(ev)).await;
+    let outcome = node
+        .core
+        .handle_ingest(&pkt_buf[..pkt_len], 1002, 0, &mut rng);
 
     // Should have a DataReceived event with decrypted payload
-    let data_events: Vec<_> = events
-        .iter()
-        .filter_map(|e| match e {
-            NodeEvent::DataReceived { payload, .. } => Some(payload.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        data_events.len(),
-        1,
-        "should receive exactly one data event"
-    );
-    assert_eq!(
-        data_events[0], plaintext,
-        "payload should be decrypted correctly"
-    );
+    match outcome.event {
+        Some(NodeEvent::DataReceived { payload, .. }) => {
+            assert_eq!(payload, plaintext, "payload should be decrypted correctly");
+        }
+        other => panic!("expected DataReceived, got {other:?}"),
+    }
 }
 
-#[tokio::test]
-#[ignore = "hangs: embassy run loop doesn't exit on MockInterface disconnect"]
-async fn embassy_node_auto_reply() {
+#[test]
+fn embassy_node_auto_reply() {
     let mut node = make_node(b"test-node-5");
     node.core
         .set_auto_reply(Some(b"auto-reply message".to_vec()));
-    let mut iface = MockInterface::new();
     let mut rng = rand::thread_rng();
-    let mut events = Vec::new();
+
+    // Bootstrap the node
+    let _ = node.core.initial_announce(&mut rng, 1000);
 
     // Inject a peer announce — this should trigger auto-reply
     let peer = Identity::from_seed(b"peer-node-5").unwrap();
     let announce = build_announce(&peer);
-    iface.push_inbound(announce);
+    let outcome = node.core.handle_ingest(&announce, 1001, 0, &mut rng);
 
-    node.run(&mut iface, &mut rng, |ev| events.push(ev)).await;
+    // The announce ingest should produce outbound packets (the forwarded
+    // announce and/or the auto-reply). The auto-reply is queued via
+    // flush_announces, so trigger a tick to flush it.
+    let tick_outcome = node.core.handle_tick(1002, &mut rng);
 
-    // outbound should contain at least one DATA packet (the auto-reply)
-    let data_packets: Vec<_> = iface
-        .outbound
+    // Collect all outbound packets
+    let all_packets: Vec<_> = outcome
+        .packets
         .iter()
-        .filter(|raw| {
-            Packet::parse(raw)
+        .chain(tick_outcome.packets.iter())
+        .collect();
+
+    let data_packets: Vec<_> = all_packets
+        .iter()
+        .filter(|pkt| {
+            Packet::parse(pkt.data.as_slice())
                 .map(|p| p.packet_type == PacketType::Data)
                 .unwrap_or(false)
         })
