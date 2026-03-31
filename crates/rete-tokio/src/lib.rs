@@ -7,6 +7,20 @@ pub mod hub;
 pub mod local;
 pub mod tcp_server;
 
+#[cfg(test)]
+pub(crate) mod test_utils {
+    /// Run a test on a thread with 4 MB stack to avoid overflow from large
+    /// structs (HdlcDecoder, HostedTransport) in debug builds.
+    pub fn big_stack_test(f: fn()) {
+        std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
 use rete_core::{Identity, TRUNCATED_HASH_LEN};
 pub use rete_stack::NodeEvent;
 pub use rete_stack::ProofStrategy;
@@ -577,11 +591,7 @@ impl TokioNode {
 ///
 /// Handles both point-to-point ([`InterfaceSlot::Direct`]) and multi-client
 /// ([`InterfaceSlot::Hub`]) slots uniformly.
-pub async fn dispatch(
-    slots: &[InterfaceSlot],
-    packets: &[OutboundPacket],
-    source_iface: u8,
-) {
+pub async fn dispatch(slots: &[InterfaceSlot], packets: &[OutboundPacket], source_iface: u8) {
     for pkt in packets {
         match pkt.routing {
             PacketRouting::SourceInterface => {

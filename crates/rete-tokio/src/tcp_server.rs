@@ -90,9 +90,7 @@ impl TcpServer {
             match self.listener.accept().await {
                 Ok((stream, addr)) => {
                     // Check max clients
-                    if self.max_clients > 0
-                        && self.hub.client_count().await >= self.max_clients
-                    {
+                    if self.max_clients > 0 && self.hub.client_count().await >= self.max_clients {
                         eprintln!(
                             "[rete-tcp-server] max clients ({}) reached, rejecting {}",
                             self.max_clients, addr
@@ -118,7 +116,6 @@ impl TcpServer {
                     let inbound_tx = self.inbound_tx.clone();
                     let iface_idx = self.iface_idx;
                     let broadcaster = self.hub.broadcaster();
-                    let cleanup_broadcaster = self.hub.broadcaster();
                     let ifac_r = self.ifac.clone();
 
                     tokio::spawn(async move {
@@ -140,7 +137,7 @@ impl TcpServer {
                             },
                         }
 
-                        cleanup_broadcaster.remove_client(client_id).await;
+                        broadcaster.remove_client(client_id).await;
                         eprintln!("[rete-tcp-server] client {} disconnected", client_id);
                     });
                 }
@@ -290,14 +287,7 @@ mod tests {
         }
     }
 
-    fn big_stack_test(f: fn()) {
-        std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
+    use crate::test_utils::big_stack_test;
 
     #[test]
     fn test_tcp_server_accept_and_relay() {
@@ -308,15 +298,10 @@ mod tests {
                 .unwrap()
                 .block_on(async {
                     let (inbound_tx, mut inbound_rx) = mpsc::channel(256);
-                    let server = TcpServer::bind(
-                        "127.0.0.1:0",
-                        inbound_tx,
-                        3,
-                        None,
-                        Default::default(),
-                    )
-                    .await
-                    .unwrap();
+                    let server =
+                        TcpServer::bind("127.0.0.1:0", inbound_tx, 3, None, Default::default())
+                            .await
+                            .unwrap();
                     let addr = server.listener.local_addr().unwrap();
                     let broadcaster = server.broadcaster();
 
@@ -360,15 +345,10 @@ mod tests {
                 .unwrap()
                 .block_on(async {
                     let (inbound_tx, _inbound_rx) = mpsc::channel(256);
-                    let server = TcpServer::bind(
-                        "127.0.0.1:0",
-                        inbound_tx,
-                        0,
-                        None,
-                        Default::default(),
-                    )
-                    .await
-                    .unwrap();
+                    let server =
+                        TcpServer::bind("127.0.0.1:0", inbound_tx, 0, None, Default::default())
+                            .await
+                            .unwrap();
                     let addr = server.listener.local_addr().unwrap();
                     let broadcaster = server.broadcaster();
 
@@ -398,15 +378,10 @@ mod tests {
                 .unwrap()
                 .block_on(async {
                     let (inbound_tx, _inbound_rx) = mpsc::channel(256);
-                    let server = TcpServer::bind(
-                        "127.0.0.1:0",
-                        inbound_tx,
-                        0,
-                        None,
-                        Default::default(),
-                    )
-                    .await
-                    .unwrap();
+                    let server =
+                        TcpServer::bind("127.0.0.1:0", inbound_tx, 0, None, Default::default())
+                            .await
+                            .unwrap();
                     let addr = server.listener.local_addr().unwrap();
                     let broadcaster = server.broadcaster();
 

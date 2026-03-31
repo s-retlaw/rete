@@ -831,8 +831,14 @@ async fn main() {
                 None
             };
 
-            match TcpServer::bind(addr, inbound_tx.clone(), tcp_server_idx, ifac, Default::default())
-                .await
+            match TcpServer::bind(
+                addr,
+                inbound_tx.clone(),
+                tcp_server_idx,
+                ifac,
+                Default::default(),
+            )
+            .await
             {
                 Ok(server) => {
                     let broadcaster = server.broadcaster();

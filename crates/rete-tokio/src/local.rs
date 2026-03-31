@@ -40,9 +40,6 @@ pub struct LocalServer {
     hub: ClientHub,
 }
 
-/// Type alias for backward compatibility.
-pub type LocalBroadcaster = HubBroadcaster;
-
 impl LocalServer {
     /// Bind to an abstract-namespace Unix socket for the given instance name.
     ///
@@ -108,7 +105,6 @@ impl LocalServer {
                     let inbound_tx = self.inbound_tx.clone();
                     let iface_idx = self.iface_idx;
                     let broadcaster = self.hub.broadcaster();
-                    let hub_broadcaster = self.hub.broadcaster();
                     tokio::spawn(async move {
                         let read_fut = client_read_task(
                             read_half,
@@ -128,7 +124,7 @@ impl LocalServer {
                         }
 
                         // Client disconnected — remove from hub
-                        hub_broadcaster.remove_client(client_id).await;
+                        broadcaster.remove_client(client_id).await;
                         eprintln!("[rete-local] client {} disconnected", client_id);
                     });
                 }
@@ -474,15 +470,7 @@ mod tests {
         }
     }
 
-    /// Run an async test on a thread with 4MB stack (HostedTransport is large).
-    fn big_stack_test(f: fn()) {
-        std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
+    use crate::test_utils::big_stack_test;
 
     #[test]
     fn test_local_client_connect_disconnect() {

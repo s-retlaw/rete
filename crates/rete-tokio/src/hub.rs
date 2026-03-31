@@ -14,11 +14,9 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
 /// A connected client tracked by the hub.
-pub struct ClientEntry {
-    /// Unique identifier for this client.
-    pub id: usize,
-    /// Channel to send outbound packets to this client's write task.
-    pub tx: mpsc::Sender<Vec<u8>>,
+struct ClientEntry {
+    id: usize,
+    tx: mpsc::Sender<Vec<u8>>,
 }
 
 /// Manages a dynamic set of connected clients.
@@ -54,12 +52,6 @@ impl ClientHub {
             clients.push(ClientEntry { id, tx });
         }
         (id, rx)
-    }
-
-    /// Remove a client by ID.
-    pub async fn remove(&self, client_id: usize) {
-        let mut clients = self.clients.write().await;
-        clients.retain(|c| c.id != client_id);
     }
 
     /// Get a broadcaster handle for sending to all clients.
@@ -128,6 +120,7 @@ mod tests {
     #[tokio::test]
     async fn test_client_hub_register_remove() {
         let hub = ClientHub::new(16);
+        let broadcaster = hub.broadcaster();
         assert_eq!(hub.client_count().await, 0);
 
         let (id1, _rx1) = hub.register().await;
@@ -135,10 +128,10 @@ mod tests {
         assert_ne!(id1, id2);
         assert_eq!(hub.client_count().await, 2);
 
-        hub.remove(id1).await;
+        broadcaster.remove_client(id1).await;
         assert_eq!(hub.client_count().await, 1);
 
-        hub.remove(id2).await;
+        broadcaster.remove_client(id2).await;
         assert_eq!(hub.client_count().await, 0);
     }
 
