@@ -6,10 +6,13 @@
 //! When propagation is enabled, also registers an `lxmf.propagation`
 //! destination and manages store-and-forward message handling.
 
+use std::collections::HashMap;
+
 use rete_core::TRUNCATED_HASH_LEN;
 use rete_stack::{NodeCore, NodeEvent, OutboundPacket};
 
-use crate::propagation::{InMemoryMessageStore, PropagationNode};
+use crate::peer::{LxmPeer, SyncStrategy};
+use crate::propagation::{InMemoryMessageStore, MessageStore, PropagationNode};
 use crate::{DeliveryMethod, LXMessage};
 
 /// LXMF delivery event, wrapping NodeEvent with LXMF-specific variants.
@@ -54,6 +57,30 @@ pub enum LxmfEvent {
         dest_hash: [u8; TRUNCATED_HASH_LEN],
         /// Retrieval result (response data + messages to send).
         result: PropagationRetrievalResult,
+    },
+    /// A propagation peer was discovered via announce.
+    PeerDiscovered {
+        /// Destination hash of the discovered peer.
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        /// Identity hash of the discovered peer.
+        identity_hash: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// Peer sync completed successfully.
+    PeerSyncComplete {
+        /// Destination hash of the peer.
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        /// Number of messages sent to the peer.
+        messages_sent: usize,
+    },
+    /// An inbound peer offer request was received and processed.
+    /// The application should send the response via `core.send_response()`.
+    PeerOfferReceived {
+        /// Link the request came on.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Request ID to respond to.
+        request_id: [u8; TRUNCATED_HASH_LEN],
+        /// Response data to send back (msgpack: false/true/[hashes]).
+        response_data: Vec<u8>,
     },
     /// A non-LXMF NodeEvent (pass-through).
     Other(NodeEvent),
@@ -104,33 +131,112 @@ enum RetrievalJob {
     },
 }
 
+/// State machine for peer-to-peer propagation sync.
+///
+/// When a peer's sync timer fires, we initiate a link, identify ourselves,
+/// send an offer of message hashes we have, receive a response indicating
+/// which ones the peer wants, then transfer those messages.
+#[derive(Debug)]
+enum SyncJob {
+    /// Establishing link to peer's propagation destination.
+    Linking {
+        peer_dest: [u8; TRUNCATED_HASH_LEN],
+        link_id: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// Offer request sent, awaiting response.
+    OfferSent {
+        peer_dest: [u8; TRUNCATED_HASH_LEN],
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        offered_hashes: Vec<[u8; 32]>,
+    },
+    /// Transferring messages via resource.
+    Transferring {
+        peer_dest: [u8; TRUNCATED_HASH_LEN],
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        offered_hashes: Vec<[u8; 32]>,
+    },
+}
+
+impl SyncJob {
+    fn link_id(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+        match self {
+            SyncJob::Linking { link_id, .. }
+            | SyncJob::OfferSent { link_id, .. }
+            | SyncJob::Transferring { link_id, .. } => link_id,
+        }
+    }
+
+    fn peer_dest(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+        match self {
+            SyncJob::Linking { peer_dest, .. }
+            | SyncJob::OfferSent { peer_dest, .. }
+            | SyncJob::Transferring { peer_dest, .. } => peer_dest,
+        }
+    }
+}
+
+/// Path for peer sync offer requests.
+const OFFER_PATH: &str = "/lxmf/peering/offer";
+
 /// LXMF router — manages `lxmf.delivery` destination and message handling.
+///
+/// Generic over `S: MessageStore` so different backends (in-memory, flash, DB)
+/// can be used. See [`DefaultLxmfRouter`] for the common in-memory variant.
 ///
 /// Does NOT own or wrap NodeCore. Holds only derived state and takes
 /// `&mut NodeCore` as parameter to avoid lifetime issues.
-pub struct LxmfRouter {
+pub struct LxmfRouter<S: MessageStore = InMemoryMessageStore> {
     /// The `lxmf.delivery` destination hash registered with NodeCore.
     delivery_dest_hash: [u8; TRUNCATED_HASH_LEN],
     /// Display name advertised in LXMF announces.
     display_name: Option<Vec<u8>>,
     /// Propagation node (store-and-forward), if enabled.
-    propagation: Option<PropagationNode<InMemoryMessageStore>>,
+    propagation: Option<PropagationNode<S>>,
     /// The `lxmf.propagation` destination hash, if propagation is enabled.
     propagation_dest_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
     /// Active propagation forward jobs (push delivery on announce).
     pending_forwards: Vec<ForwardJob>,
     /// Active propagation retrieval jobs (pull delivery on request).
     pending_retrievals: Vec<RetrievalJob>,
+    /// Active peer sync jobs.
+    pending_syncs: Vec<SyncJob>,
+    /// Peer registry: dest_hash → LxmPeer.
+    peers: HashMap<[u8; TRUNCATED_HASH_LEN], LxmPeer>,
+    /// Auto-discover peers from propagation announces.
+    autopeer: bool,
+    /// Maximum hops for auto-peering (default 4).
+    autopeer_maxdepth: u8,
+    /// Maximum number of peers (default 20).
+    max_peers: usize,
 }
 
-impl LxmfRouter {
+/// Type alias for the common in-memory router variant.
+pub type DefaultLxmfRouter = LxmfRouter<InMemoryMessageStore>;
+
+impl LxmfRouter<InMemoryMessageStore> {
     /// Register an `lxmf.delivery` destination on the given NodeCore.
     ///
+    /// Creates a router with the default in-memory message store.
     /// Sets ProveAll strategy on the delivery destination (LXMF expects
     /// delivery proofs).
     pub fn register<const P: usize, const A: usize, const D: usize, const L: usize>(
         core: &mut NodeCore<P, A, D, L>,
     ) -> Self {
+        Self::register_with_store(core)
+    }
+}
+
+impl<S: MessageStore> LxmfRouter<S> {
+    /// Register an `lxmf.delivery` destination on the given NodeCore.
+    ///
+    /// Sets ProveAll strategy on the delivery destination (LXMF expects
+    /// delivery proofs).
+    pub fn register_with_store<const P: usize, const A: usize, const D: usize, const L: usize>(
+        core: &mut NodeCore<P, A, D, L>,
+    ) -> Self
+    where
+        S: Default,
+    {
         let dest_hash = core.register_destination("lxmf", &["delivery"]);
 
         // LXMF delivery always proves received data
@@ -145,6 +251,11 @@ impl LxmfRouter {
             propagation_dest_hash: None,
             pending_forwards: Vec::new(),
             pending_retrievals: Vec::new(),
+            pending_syncs: Vec::new(),
+            peers: HashMap::new(),
+            autopeer: false,
+            autopeer_maxdepth: 4,
+            max_peers: 20,
         }
     }
 
@@ -369,7 +480,46 @@ impl LxmfRouter {
                         result,
                     };
                 }
-                // If not a retrieval request, fall through
+                // Check if this is a peer offer request
+                if let Some(response_data) = self.handle_offer_request(&path_hash, data) {
+                    return LxmfEvent::PeerOfferReceived {
+                        link_id,
+                        request_id,
+                        response_data,
+                    };
+                }
+                // If not a retrieval or offer request, fall through
+            }
+        }
+
+        // For AnnounceReceived: check if this is a propagation peer announce
+        if self.autopeer {
+            if let NodeEvent::AnnounceReceived {
+                dest_hash,
+                identity_hash,
+                hops,
+                ref app_data,
+            } = event
+            {
+                if let Some(ref data) = app_data {
+                    if let Some(parsed) = parse_lxmf_announce_data(data) {
+                        if parsed.is_propagation
+                            && hops <= self.autopeer_maxdepth
+                            && !self.peers.contains_key(&dest_hash)
+                            && self.peers.len() < self.max_peers
+                            // Don't peer with ourselves
+                            && self.propagation_dest_hash.map_or(true, |h| h != dest_hash)
+                        {
+                            let mut p = LxmPeer::new(dest_hash, identity_hash);
+                            p.sync_strategy = SyncStrategy::Persistent;
+                            self.peers.insert(dest_hash, p);
+                            return LxmfEvent::PeerDiscovered {
+                                dest_hash,
+                                identity_hash,
+                            };
+                        }
+                    }
+                }
             }
         }
 
@@ -425,10 +575,26 @@ impl LxmfRouter {
     /// Register an `lxmf.propagation` destination and enable store-and-forward.
     ///
     /// Creates a SINGLE destination (identity-bound) for `lxmf.propagation`,
-    /// sets ProveAll, and initializes the in-memory message store.
+    /// sets ProveAll, and initializes the message store using `S::default()`.
     pub fn register_propagation<const P: usize, const A: usize, const D: usize, const L: usize>(
         &mut self,
         core: &mut NodeCore<P, A, D, L>,
+    ) where
+        S: Default,
+    {
+        self.register_propagation_with_store(core, S::default());
+    }
+
+    /// Register an `lxmf.propagation` destination with a specific store instance.
+    pub fn register_propagation_with_store<
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        core: &mut NodeCore<P, A, D, L>,
+        store: S,
     ) {
         let dest_hash = core.register_destination("lxmf", &["propagation"]);
 
@@ -437,7 +603,7 @@ impl LxmfRouter {
         }
 
         self.propagation_dest_hash = Some(dest_hash);
-        self.propagation = Some(PropagationNode::new(InMemoryMessageStore::new()));
+        self.propagation = Some(PropagationNode::new(store));
     }
 
     /// Returns the `lxmf.propagation` destination hash, if propagation is enabled.
@@ -555,6 +721,450 @@ impl LxmfRouter {
             Some(prop) => prop.message_count(),
             None => 0,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Peer registry
+    // -----------------------------------------------------------------------
+
+    /// Manually add a peer to the registry.
+    ///
+    /// Returns `true` if the peer was added, `false` if already peered or
+    /// the peer limit has been reached.
+    pub fn peer(
+        &mut self,
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        identity_hash: [u8; TRUNCATED_HASH_LEN],
+    ) -> bool {
+        if self.peers.contains_key(&dest_hash) {
+            return false;
+        }
+        if self.peers.len() >= self.max_peers {
+            return false;
+        }
+        let mut p = LxmPeer::new(dest_hash, identity_hash);
+        p.sync_strategy = SyncStrategy::Persistent;
+        self.peers.insert(dest_hash, p);
+        true
+    }
+
+    /// Remove a peer from the registry.
+    pub fn unpeer(&mut self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+        self.peers.remove(dest_hash).is_some()
+    }
+
+    /// Number of peers in the registry.
+    pub fn peer_count(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// Check if a destination is peered.
+    pub fn is_peered(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+        self.peers.contains_key(dest_hash)
+    }
+
+    /// Enable or disable auto-peering from propagation announces.
+    pub fn set_autopeer(&mut self, enabled: bool, max_depth: u8) {
+        self.autopeer = enabled;
+        self.autopeer_maxdepth = max_depth;
+    }
+
+    /// Get a reference to a peer by dest hash.
+    pub fn get_peer(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&LxmPeer> {
+        self.peers.get(dest_hash)
+    }
+
+    /// Get a mutable reference to a peer by dest hash.
+    pub fn get_peer_mut(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<&mut LxmPeer> {
+        self.peers.get_mut(dest_hash)
+    }
+
+    // -----------------------------------------------------------------------
+    // Peer sync (propagation node <-> propagation node)
+    // -----------------------------------------------------------------------
+
+    /// Path hash for the peer offer request path.
+    pub fn offer_path_hash() -> [u8; TRUNCATED_HASH_LEN] {
+        rete_transport::request::path_hash(OFFER_PATH)
+    }
+
+    /// Check peers that need syncing and initiate links.
+    ///
+    /// Called from the tick handler. Returns outbound packets (link requests).
+    pub fn check_peer_syncs<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+        now: u64,
+    ) -> Vec<OutboundPacket> {
+        if !self.propagation_enabled() {
+            return Vec::new();
+        }
+
+        let mut packets = Vec::new();
+
+        // Collect peers that need sync (can't borrow mutably during iteration)
+        let peers_to_sync: Vec<[u8; TRUNCATED_HASH_LEN]> = self
+            .peers
+            .iter()
+            .filter(|(_, p)| p.needs_sync(now))
+            .filter(|(dest, _)| {
+                !self
+                    .pending_syncs
+                    .iter()
+                    .any(|s| s.peer_dest() == *dest)
+            })
+            .map(|(dest, _)| *dest)
+            .collect();
+
+        for peer_dest in peers_to_sync {
+            if let Ok((pkt, link_id)) = core.initiate_link(peer_dest, now, rng) {
+                if let Some(p) = self.peers.get_mut(&peer_dest) {
+                    p.state = crate::peer::PeerState::LinkEstablishing;
+                    p.sync_attempted(now);
+                }
+                self.pending_syncs.push(SyncJob::Linking {
+                    peer_dest,
+                    link_id,
+                });
+                packets.push(pkt);
+            }
+        }
+
+        packets
+    }
+
+    /// Advance a sync job when a link is established.
+    ///
+    /// Sends an identify packet and transitions to Identifying.
+    pub fn advance_sync_on_link_established<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+        now: u64,
+    ) -> Vec<OutboundPacket> {
+        let idx = self
+            .pending_syncs
+            .iter()
+            .position(|s| matches!(s, SyncJob::Linking { link_id: lid, .. } if lid == link_id));
+
+        let Some(idx) = idx else {
+            return Vec::new();
+        };
+
+        let peer_dest = *self.pending_syncs[idx].peer_dest();
+
+        if let Some(p) = self.peers.get_mut(&peer_dest) {
+            p.link_established(*link_id);
+        }
+
+        // Send identify on the link
+        let mut packets = Vec::new();
+        if let Ok(pkt) = core.link_identify(link_id, rng) {
+            packets.push(pkt);
+        }
+
+        // Build offer immediately (don't wait for remote LinkIdentified —
+        // identify is one-directional, we won't get a callback)
+        let all_hashes = match &self.propagation {
+            Some(prop) => prop.all_message_hashes(),
+            None => {
+                self.pending_syncs.remove(idx);
+                return packets;
+            }
+        };
+
+        let offered_hashes = match self.peers.get(&peer_dest) {
+            Some(peer) => peer.unhandled_from(&all_hashes),
+            None => all_hashes,
+        };
+
+        if offered_hashes.is_empty() {
+            self.pending_syncs.remove(idx);
+            if let Some(p) = self.peers.get_mut(&peer_dest) {
+                p.sync_complete(now);
+            }
+            let _ = core.close_link(link_id, rng);
+            return packets;
+        }
+
+        let offer_data = encode_offer_hashes(&offered_hashes);
+
+        if let Ok((pkt, _request_id)) =
+            core.send_request(link_id, OFFER_PATH, &offer_data, now, rng)
+        {
+            packets.push(pkt);
+            if let Some(p) = self.peers.get_mut(&peer_dest) {
+                p.offer_sent();
+            }
+            self.pending_syncs[idx] = SyncJob::OfferSent {
+                peer_dest,
+                link_id: *link_id,
+                offered_hashes,
+            };
+        } else {
+            self.pending_syncs.remove(idx);
+            if let Some(p) = self.peers.get_mut(&peer_dest) {
+                p.sync_failed();
+            }
+        }
+
+        packets
+    }
+
+    /// Advance a sync job when the offer response is received.
+    ///
+    /// Parses the response (true=want all, false=want none, array=want subset)
+    /// and packs + sends the wanted messages as a bz2-compressed Resource.
+    pub fn advance_sync_on_response<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        response_data: &[u8],
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+        now: u64,
+    ) -> Vec<OutboundPacket> {
+        let idx = self.pending_syncs.iter().position(
+            |s| matches!(s, SyncJob::OfferSent { link_id: lid, .. } if lid == link_id),
+        );
+
+        let Some(idx) = idx else {
+            return Vec::new();
+        };
+
+        // Remove the job to extract owned offered_hashes without cloning
+        let job = self.pending_syncs.remove(idx);
+        let (peer_dest, offered_hashes) = match job {
+            SyncJob::OfferSent {
+                peer_dest,
+                offered_hashes,
+                ..
+            } => (peer_dest, offered_hashes),
+            _ => unreachable!(),
+        };
+
+        if let Some(p) = self.peers.get_mut(&peer_dest) {
+            p.response_received();
+        }
+
+        // Parse response
+        let wanted = parse_offer_response(response_data, &offered_hashes);
+
+        if wanted.is_empty() {
+            if let Some(p) = self.peers.get_mut(&peer_dest) {
+                for h in &offered_hashes {
+                    p.mark_handled(*h);
+                }
+                p.sync_complete(now);
+            }
+            let _ = core.close_link(link_id, rng);
+            return Vec::new();
+        }
+
+        // Pack wanted messages into a single bz2-compressed Resource
+        let prop = match &self.propagation {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        let message_data: Vec<Vec<u8>> = wanted
+            .iter()
+            .filter_map(|hash| prop.get_data(hash).map(|d| d.to_vec()))
+            .collect();
+
+        if message_data.is_empty() {
+            if let Some(p) = self.peers.get_mut(&peer_dest) {
+                p.sync_complete(now);
+            }
+            let _ = core.close_link(link_id, rng);
+            return Vec::new();
+        }
+
+        let packed = pack_sync_messages(now, &message_data);
+        let compressed = bz2_compress(&packed);
+
+        let mut packets = Vec::new();
+        if let Ok(pkt) = core.start_resource(link_id, &compressed, rng) {
+            if let Some(p) = self.peers.get_mut(&peer_dest) {
+                p.transfer_started();
+            }
+            self.pending_syncs.push(SyncJob::Transferring {
+                peer_dest,
+                link_id: *link_id,
+                offered_hashes: wanted,
+            });
+            packets.push(pkt);
+        } else {
+            if let Some(p) = self.peers.get_mut(&peer_dest) {
+                p.sync_failed();
+            }
+        }
+
+        packets
+    }
+
+    /// Advance a sync job when the resource transfer completes.
+    ///
+    /// Marks all transferred messages as handled and completes the sync.
+    pub fn advance_sync_on_resource_complete<
+        R: rand_core::RngCore + rand_core::CryptoRng,
+        const P: usize,
+        const A: usize,
+        const D: usize,
+        const L: usize,
+    >(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        core: &mut NodeCore<P, A, D, L>,
+        rng: &mut R,
+        now: u64,
+    ) -> (Vec<OutboundPacket>, Option<LxmfEvent>) {
+        let idx = self.pending_syncs.iter().position(
+            |s| matches!(s, SyncJob::Transferring { link_id: lid, .. } if lid == link_id),
+        );
+
+        let Some(idx) = idx else {
+            return (Vec::new(), None);
+        };
+
+        let job = self.pending_syncs.remove(idx);
+        let (peer_dest, offered_hashes) = match job {
+            SyncJob::Transferring {
+                peer_dest,
+                offered_hashes,
+                ..
+            } => (peer_dest, offered_hashes),
+            _ => unreachable!(),
+        };
+
+        let messages_sent = offered_hashes.len();
+
+        if let Some(p) = self.peers.get_mut(&peer_dest) {
+            for h in &offered_hashes {
+                p.mark_handled(*h);
+            }
+            p.sync_complete(now);
+        }
+
+        // Close the link
+        let _ = core.close_link(link_id, rng);
+
+        let event = LxmfEvent::PeerSyncComplete {
+            dest_hash: peer_dest,
+            messages_sent,
+        };
+
+        (Vec::new(), Some(event))
+    }
+
+    /// Handle an inbound offer request from a peer.
+    ///
+    /// Checks which of the offered message hashes we already have,
+    /// and returns a response: `false` if we have all, `true` if we want all,
+    /// or a list of the hashes we want.
+    pub fn handle_offer_request(
+        &self,
+        path_hash: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+    ) -> Option<Vec<u8>> {
+        if *path_hash != Self::offer_path_hash() {
+            return None;
+        }
+        if !self.propagation_enabled() {
+            return None;
+        }
+
+        let offered = decode_offer_hashes(data)?;
+        let prop = self.propagation.as_ref()?;
+
+        // Check which messages we already have
+        let wanted: Vec<[u8; 32]> = offered
+            .iter()
+            .filter(|h| prop.get_data(h).is_none())
+            .copied()
+            .collect();
+
+        if wanted.is_empty() {
+            // We have all of them
+            Some(vec![0xc2]) // msgpack false
+        } else if wanted.len() == offered.len() {
+            // We want all of them
+            Some(vec![0xc3]) // msgpack true
+        } else {
+            // We want a subset — encode as array of hashes
+            Some(encode_offer_hashes(&wanted))
+        }
+    }
+
+    /// Deposit messages received from a peer sync resource.
+    ///
+    /// Unpacks the bz2-compressed msgpack `[timestamp, [msg1, msg2, ...]]`
+    /// and deposits each message into the propagation store.
+    pub fn deposit_sync_resource(
+        &mut self,
+        data: &[u8],
+        now: u64,
+    ) -> Vec<([u8; TRUNCATED_HASH_LEN], [u8; 32])> {
+        let prop = match &mut self.propagation {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        let messages = unpack_sync_messages(data);
+        let mut deposited = Vec::new();
+
+        for msg_data in messages {
+            if let Some((dest, hash)) = prop.deposit(&msg_data, now) {
+                deposited.push((dest, hash));
+            }
+        }
+
+        deposited
+    }
+
+    /// Clean up sync jobs for a link that was closed.
+    pub fn cleanup_sync_jobs_for_link(&mut self, link_id: &[u8; TRUNCATED_HASH_LEN]) {
+        let removed: Vec<[u8; TRUNCATED_HASH_LEN]> = self
+            .pending_syncs
+            .iter()
+            .filter(|s| s.link_id() == link_id)
+            .map(|s| *s.peer_dest())
+            .collect();
+
+        self.pending_syncs.retain(|s| s.link_id() != link_id);
+
+        for peer_dest in removed {
+            if let Some(p) = self.peers.get_mut(&peer_dest) {
+                p.sync_failed();
+            }
+        }
+    }
+
+    /// Check if a sync job exists for the given link_id.
+    pub fn has_sync_job_for_link(&self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+        self.pending_syncs.iter().any(|s| s.link_id() == link_id)
     }
 
     // -----------------------------------------------------------------------
@@ -940,15 +1550,140 @@ fn bz2_compress(data: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap_or_else(|_| data.to_vec())
 }
 
-/// Try to parse LXMF announce app_data: msgpack `[display_name_bytes, stamp_cost]`
+/// Parsed LXMF announce app_data.
+struct LxmfAnnounceData {
+    display_name: Vec<u8>,
+    /// True if this is a propagation node announce (second element is `true`).
+    is_propagation: bool,
+}
+
+/// Try to parse LXMF announce app_data: msgpack `[display_name_bytes, tag]`
+/// where tag is a stamp_cost int (delivery) or `true` boolean (propagation).
 fn try_parse_lxmf_announce_data(data: &[u8]) -> Option<Vec<u8>> {
+    let parsed = parse_lxmf_announce_data(data)?;
+    Some(parsed.display_name)
+}
+
+/// Parse full LXMF announce app_data including propagation flag.
+fn parse_lxmf_announce_data(data: &[u8]) -> Option<LxmfAnnounceData> {
     let mut pos = 0;
     let arr_len = crate::message::read_array_len(data, &mut pos).ok()?;
-    if arr_len != 2 {
+    if arr_len < 2 {
         return None;
     }
     let display_name = crate::message::read_bin(data, &mut pos).ok()?;
-    Some(display_name)
+    // Second element: 0xc3 = true (propagation), integer = stamp_cost (delivery)
+    let is_propagation = data.get(pos) == Some(&0xc3);
+    Some(LxmfAnnounceData {
+        display_name,
+        is_propagation,
+    })
+}
+
+/// Encode a list of message hashes as a msgpack array of bin32 elements.
+/// Write a msgpack array header for the given length.
+fn write_array_header(buf: &mut Vec<u8>, len: usize) {
+    if len <= 15 {
+        buf.push(0x90 | len as u8);
+    } else if len <= 0xFFFF {
+        buf.push(0xdc);
+        buf.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        buf.push(0xdd);
+        buf.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+}
+
+fn encode_offer_hashes(hashes: &[[u8; 32]]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(5 + hashes.len() * 35);
+    write_array_header(&mut buf, hashes.len());
+    for h in hashes {
+        crate::message::write_bin(&mut buf, h);
+    }
+    buf
+}
+
+/// Decode a msgpack array of bin elements into message hashes.
+fn decode_offer_hashes(data: &[u8]) -> Option<Vec<[u8; 32]>> {
+    let mut pos = 0;
+    let arr_len = crate::message::read_array_len(data, &mut pos).ok()?;
+    let mut hashes = Vec::with_capacity(arr_len);
+    for _ in 0..arr_len {
+        let bin = crate::message::read_bin(data, &mut pos).ok()?;
+        if bin.len() != 32 {
+            return None;
+        }
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&bin);
+        hashes.push(h);
+    }
+    Some(hashes)
+}
+
+/// Parse an offer response: `false` (want none) → empty,
+/// `true` (want all) → return offered, array → subset.
+fn parse_offer_response(data: &[u8], offered: &[[u8; 32]]) -> Vec<[u8; 32]> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    match data[0] {
+        0xc2 => Vec::new(),          // false: want none
+        0xc3 => offered.to_vec(),    // true: want all
+        _ => {
+            // Try to decode as array of hashes
+            decode_offer_hashes(data).unwrap_or_default()
+        }
+    }
+}
+
+/// Pack sync messages: msgpack `[timestamp_f64, [msg1_bytes, msg2_bytes, ...]]`.
+fn pack_sync_messages(now: u64, messages: &[Vec<u8>]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(0x92); // fixarray(2)
+
+    // timestamp as float64
+    buf.push(0xcb);
+    buf.extend_from_slice(&(now as f64).to_be_bytes());
+
+    write_array_header(&mut buf, messages.len());
+    for msg in messages {
+        crate::message::write_bin(&mut buf, msg);
+    }
+    buf
+}
+
+/// Unpack sync messages from msgpack `[timestamp, [msg1, msg2, ...]]`.
+fn unpack_sync_messages(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut pos = 0;
+    // Outer array [timestamp, messages]
+    let arr_len = match crate::message::read_array_len(data, &mut pos) {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    if arr_len < 2 {
+        return Vec::new();
+    }
+    // Skip timestamp (float64 = 9 bytes: 0xcb + 8 bytes)
+    if pos < data.len() && data[pos] == 0xcb {
+        pos += 9;
+    } else {
+        // Try skipping other numeric types
+        let _ = pos; // consumed
+        return Vec::new();
+    }
+    // Messages array
+    let msg_count = match crate::message::read_array_len(data, &mut pos) {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    let mut messages = Vec::with_capacity(msg_count);
+    for _ in 0..msg_count {
+        match crate::message::read_bin(data, &mut pos) {
+            Ok(bin) => messages.push(bin),
+            Err(_) => break,
+        }
+    }
+    messages
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1696,8 @@ mod tests {
     use rete_core::Identity;
     use std::collections::BTreeMap;
 
+    // Use the concrete type alias for static method calls in tests.
+    type Router = DefaultLxmfRouter;
     type TestNodeCore = NodeCore<64, 16, 128, 4>;
 
     fn make_core(seed: &[u8]) -> TestNodeCore {
@@ -1038,7 +1775,7 @@ mod tests {
         .unwrap();
 
         let full_packed = msg.pack();
-        let opp_packed = LxmfRouter::pack_opportunistic(&msg);
+        let opp_packed = Router::pack_opportunistic(&msg);
 
         // Opportunistic should strip dest_hash (first 16 bytes)
         assert_eq!(opp_packed.len(), full_packed.len() - 16);
@@ -1073,7 +1810,7 @@ mod tests {
         let router = LxmfRouter::register(&mut core);
 
         let (msg, _source) = make_test_msg(b"parse-opp-source", *router.delivery_dest_hash());
-        let opp_payload = LxmfRouter::pack_opportunistic(&msg);
+        let opp_payload = Router::pack_opportunistic(&msg);
 
         let parsed = router
             .try_parse_lxmf(router.delivery_dest_hash(), &opp_payload)
@@ -1118,7 +1855,7 @@ mod tests {
         let router = LxmfRouter::register(&mut core);
 
         let (msg, _) = make_test_msg(b"roundtrip-source", *router.delivery_dest_hash());
-        let opp_payload = LxmfRouter::pack_opportunistic(&msg);
+        let opp_payload = Router::pack_opportunistic(&msg);
 
         let parsed = router
             .try_parse_lxmf(router.delivery_dest_hash(), &opp_payload)
@@ -1136,7 +1873,7 @@ mod tests {
     #[test]
     fn test_pack_for_direct_keeps_full_message() {
         let (msg, _) = make_test_msg(b"direct-pack-test", [0xAA; 16]);
-        let direct = LxmfRouter::pack_direct(&msg);
+        let direct = Router::pack_direct(&msg);
         let full = msg.pack();
         assert_eq!(direct, full);
     }
@@ -1145,15 +1882,15 @@ mod tests {
     fn test_try_parse_lxmf_resource_roundtrip() {
         let (msg, _) = make_test_msg(b"resource-rt-test", [0xBB; 16]);
         let packed = msg.pack();
-        let parsed = LxmfRouter::try_parse_lxmf_resource(&packed).unwrap();
+        let parsed = Router::try_parse_lxmf_resource(&packed).unwrap();
         assert_eq!(parsed.title, b"Hello");
         assert_eq!(parsed.content, b"World");
     }
 
     #[test]
     fn test_try_parse_lxmf_resource_rejects_garbage() {
-        assert!(LxmfRouter::try_parse_lxmf_resource(b"not a message").is_none());
-        assert!(LxmfRouter::try_parse_lxmf_resource(&[0u8; 50]).is_none());
+        assert!(Router::try_parse_lxmf_resource(b"not a message").is_none());
+        assert!(Router::try_parse_lxmf_resource(&[0u8; 50]).is_none());
     }
 
     // -------------------------------------------------------------------
@@ -1166,7 +1903,7 @@ mod tests {
         let router = LxmfRouter::register(&mut core);
 
         let (msg, _) = make_test_msg(b"event-source", *router.delivery_dest_hash());
-        let opp_payload = LxmfRouter::pack_opportunistic(&msg);
+        let opp_payload = Router::pack_opportunistic(&msg);
 
         let event = NodeEvent::DataReceived {
             dest_hash: *router.delivery_dest_hash(),
@@ -1201,7 +1938,7 @@ mod tests {
         let router = LxmfRouter::register(&mut core);
 
         let (msg, _) = make_test_msg(b"resource-source", *router.delivery_dest_hash());
-        let packed = LxmfRouter::pack_direct(&msg);
+        let packed = Router::pack_direct(&msg);
 
         let event = NodeEvent::ResourceComplete {
             link_id: [0xAA; 16],
@@ -1911,7 +2648,7 @@ mod tests {
 
     #[test]
     fn test_propagation_retrieve_path_hash() {
-        let ph = LxmfRouter::propagation_retrieve_path_hash();
+        let ph = Router::propagation_retrieve_path_hash();
         assert_eq!(ph.len(), 16);
 
         // Should be SHA-256("/lxmf/propagation/retrieve")[..16]
@@ -1920,7 +2657,7 @@ mod tests {
         assert_eq!(&ph[..], &digest[..16]);
 
         // Should be deterministic
-        let ph2 = LxmfRouter::propagation_retrieve_path_hash();
+        let ph2 = Router::propagation_retrieve_path_hash();
         assert_eq!(ph, ph2);
     }
 
@@ -1936,7 +2673,7 @@ mod tests {
         router.propagation_deposit(&msg1.pack(), 1000);
         router.propagation_deposit(&msg2.pack(), 1001);
 
-        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let path_hash = Router::propagation_retrieve_path_hash();
         let result = router.handle_propagation_request(&path_hash, &dest);
         assert!(result.is_some());
 
@@ -1961,7 +2698,7 @@ mod tests {
         router.register_propagation(&mut core);
 
         let dest = [0x99; 16]; // no messages for this dest
-        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let path_hash = Router::propagation_retrieve_path_hash();
         let result = router.handle_propagation_request(&path_hash, &dest);
         assert!(result.is_some());
 
@@ -1988,7 +2725,7 @@ mod tests {
         let router = LxmfRouter::register(&mut core);
         // Propagation NOT enabled
 
-        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let path_hash = Router::propagation_retrieve_path_hash();
         let dest = [0x42; 16];
         let result = router.handle_propagation_request(&path_hash, &dest);
         assert!(result.is_none());
@@ -2000,7 +2737,7 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let path_hash = Router::propagation_retrieve_path_hash();
         // data is shorter than 16 bytes (TRUNCATED_HASH_LEN)
         let result = router.handle_propagation_request(&path_hash, &[0x42; 5]);
         assert!(result.is_none());
@@ -2020,7 +2757,7 @@ mod tests {
         assert_eq!(router.propagation_message_count(), 1);
 
         // Get the messages via handle_propagation_request
-        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let path_hash = Router::propagation_retrieve_path_hash();
         let result = router
             .handle_propagation_request(&path_hash, &dest)
             .unwrap();
@@ -2062,7 +2799,7 @@ mod tests {
         router.propagation_deposit(&msg2.pack(), 1001);
         assert_eq!(router.propagation_message_count(), 2);
 
-        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let path_hash = Router::propagation_retrieve_path_hash();
         let result = router
             .handle_propagation_request(&path_hash, &dest)
             .unwrap();
@@ -2094,7 +2831,7 @@ mod tests {
         let (msg, _) = make_test_msg(b"ret-cleanup-msg", dest);
         router.propagation_deposit(&msg.pack(), 1000);
 
-        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let path_hash = Router::propagation_retrieve_path_hash();
         let result = router
             .handle_propagation_request(&path_hash, &dest)
             .unwrap();
@@ -2122,7 +2859,7 @@ mod tests {
         let (msg, _) = make_test_msg(b"ret-event-msg", dest);
         router.propagation_deposit(&msg.pack(), 1000);
 
-        let path_hash = LxmfRouter::propagation_retrieve_path_hash();
+        let path_hash = Router::propagation_retrieve_path_hash();
         let request_id = [
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
             0x0F, 0x10,
@@ -2172,5 +2909,359 @@ mod tests {
             encode_msgpack_uint(65536),
             vec![0xce, 0x00, 0x01, 0x00, 0x00]
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Step 3: Peer registry
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_peer_add_remove() {
+        let mut core = make_core(b"peer-registry-test");
+        let mut router = LxmfRouter::register(&mut core);
+
+        let dest = [0x11; TRUNCATED_HASH_LEN];
+        let identity = [0x22; TRUNCATED_HASH_LEN];
+
+        assert!(!router.is_peered(&dest));
+        assert!(router.peer(dest, identity));
+        assert!(router.is_peered(&dest));
+        assert_eq!(router.peer_count(), 1);
+
+        // Adding same peer again fails
+        assert!(!router.peer(dest, identity));
+        assert_eq!(router.peer_count(), 1);
+
+        // Remove
+        assert!(router.unpeer(&dest));
+        assert!(!router.is_peered(&dest));
+        assert_eq!(router.peer_count(), 0);
+
+        // Remove non-existent
+        assert!(!router.unpeer(&dest));
+    }
+
+    #[test]
+    fn test_peer_max_count() {
+        let mut core = make_core(b"peer-max-test");
+        let mut router = LxmfRouter::register(&mut core);
+        // Set low max for testing
+        router.max_peers = 2;
+
+        assert!(router.peer([0x01; 16], [0xA1; 16]));
+        assert!(router.peer([0x02; 16], [0xA2; 16]));
+        // Third peer rejected
+        assert!(!router.peer([0x03; 16], [0xA3; 16]));
+        assert_eq!(router.peer_count(), 2);
+    }
+
+    #[test]
+    fn test_autopeer_flag() {
+        let mut core = make_core(b"autopeer-test");
+        let mut router = LxmfRouter::register(&mut core);
+
+        assert!(!router.autopeer);
+        router.set_autopeer(true, 6);
+        assert!(router.autopeer);
+        assert_eq!(router.autopeer_maxdepth, 6);
+    }
+
+    // -------------------------------------------------------------------
+    // Step 4: Peer discovery via announces
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_propagation_announce_creates_peer() {
+        let mut core = make_core(b"peer-discovery-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        router.set_autopeer(true, 4);
+
+        // Build a propagation announce app_data: [display_name, true]
+        let app_data = {
+            let mut buf = Vec::new();
+            buf.push(0x92); // fixarray of 2
+            crate::message::write_bin(&mut buf, b"TestPeer");
+            buf.push(0xc3); // msgpack true = propagation
+            buf
+        };
+
+        let dest = [0x33; TRUNCATED_HASH_LEN];
+        let identity = [0x44; TRUNCATED_HASH_LEN];
+        let event = NodeEvent::AnnounceReceived {
+            dest_hash: dest,
+            identity_hash: identity,
+            hops: 2,
+            app_data: Some(app_data),
+        };
+
+        let result = router.handle_event_mut(event, 1000);
+        assert!(matches!(result, LxmfEvent::PeerDiscovered { .. }));
+        assert!(router.is_peered(&dest));
+        assert_eq!(router.peer_count(), 1);
+    }
+
+    #[test]
+    fn test_announce_beyond_maxdepth_ignored() {
+        let mut core = make_core(b"maxdepth-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        router.set_autopeer(true, 2); // max 2 hops
+
+        let app_data = {
+            let mut buf = Vec::new();
+            buf.push(0x92);
+            crate::message::write_bin(&mut buf, b"FarPeer");
+            buf.push(0xc3);
+            buf
+        };
+
+        let event = NodeEvent::AnnounceReceived {
+            dest_hash: [0x55; TRUNCATED_HASH_LEN],
+            identity_hash: [0x66; TRUNCATED_HASH_LEN],
+            hops: 5, // beyond maxdepth
+            app_data: Some(app_data),
+        };
+
+        let result = router.handle_event_mut(event, 1000);
+        // Should fall through to PeerAnnounced, not PeerDiscovered
+        assert!(!matches!(result, LxmfEvent::PeerDiscovered { .. }));
+        assert_eq!(router.peer_count(), 0);
+    }
+
+    #[test]
+    fn test_announce_non_propagation_ignored() {
+        let mut core = make_core(b"non-prop-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        router.set_autopeer(true, 4);
+
+        // Delivery announce: [display_name, stamp_cost=0]
+        let app_data = {
+            let mut buf = Vec::new();
+            buf.push(0x92);
+            crate::message::write_bin(&mut buf, b"RegularNode");
+            buf.push(0x00); // stamp_cost = 0, not propagation
+            buf
+        };
+
+        let event = NodeEvent::AnnounceReceived {
+            dest_hash: [0x77; TRUNCATED_HASH_LEN],
+            identity_hash: [0x88; TRUNCATED_HASH_LEN],
+            hops: 1,
+            app_data: Some(app_data),
+        };
+
+        let result = router.handle_event_mut(event, 1000);
+        assert!(!matches!(result, LxmfEvent::PeerDiscovered { .. }));
+        assert_eq!(router.peer_count(), 0);
+    }
+
+    #[test]
+    fn test_autopeer_disabled_ignores_announce() {
+        let mut core = make_core(b"autopeer-off-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+        // autopeer is false by default
+
+        let app_data = {
+            let mut buf = Vec::new();
+            buf.push(0x92);
+            crate::message::write_bin(&mut buf, b"TestPeer");
+            buf.push(0xc3);
+            buf
+        };
+
+        let event = NodeEvent::AnnounceReceived {
+            dest_hash: [0x33; TRUNCATED_HASH_LEN],
+            identity_hash: [0x44; TRUNCATED_HASH_LEN],
+            hops: 1,
+            app_data: Some(app_data),
+        };
+
+        let result = router.handle_event_mut(event, 1000);
+        assert!(!matches!(result, LxmfEvent::PeerDiscovered { .. }));
+        assert_eq!(router.peer_count(), 0);
+    }
+
+    #[test]
+    fn test_peer_has_persistent_strategy() {
+        let mut core = make_core(b"peer-strategy-test");
+        let mut router = LxmfRouter::register(&mut core);
+
+        router.peer([0x11; 16], [0x22; 16]);
+        let peer = router.get_peer(&[0x11; 16]).unwrap();
+        assert_eq!(peer.sync_strategy, SyncStrategy::Persistent);
+    }
+
+    // -------------------------------------------------------------------
+    // Step 5-8: SyncJob, outbound sync, inbound offer, integration
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_decode_offer_hashes_roundtrip() {
+        let hashes = vec![[0xAA; 32], [0xBB; 32], [0xCC; 32]];
+        let encoded = encode_offer_hashes(&hashes);
+        let decoded = decode_offer_hashes(&encoded).unwrap();
+        assert_eq!(decoded, hashes);
+    }
+
+    #[test]
+    fn test_parse_offer_response_false() {
+        let offered = vec![[0xAA; 32], [0xBB; 32]];
+        let response = vec![0xc2]; // msgpack false
+        let wanted = parse_offer_response(&response, &offered);
+        assert!(wanted.is_empty());
+    }
+
+    #[test]
+    fn test_parse_offer_response_true() {
+        let offered = vec![[0xAA; 32], [0xBB; 32]];
+        let response = vec![0xc3]; // msgpack true
+        let wanted = parse_offer_response(&response, &offered);
+        assert_eq!(wanted, offered);
+    }
+
+    #[test]
+    fn test_parse_offer_response_subset() {
+        let offered = vec![[0xAA; 32], [0xBB; 32]];
+        let subset = vec![[0xBB; 32]];
+        let response = encode_offer_hashes(&subset);
+        let wanted = parse_offer_response(&response, &offered);
+        assert_eq!(wanted, subset);
+    }
+
+    #[test]
+    fn test_pack_unpack_sync_messages_roundtrip() {
+        let messages = vec![vec![1, 2, 3], vec![4, 5, 6, 7]];
+        let packed = pack_sync_messages(1000, &messages);
+        let unpacked = unpack_sync_messages(&packed);
+        assert_eq!(unpacked, messages);
+    }
+
+    #[test]
+    fn test_handle_offer_request_want_all() {
+        let mut core = make_core(b"offer-want-all");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        // Offer hashes that we don't have
+        let hashes = vec![[0xAA; 32], [0xBB; 32]];
+        let offer_data = encode_offer_hashes(&hashes);
+        let path_hash = Router::offer_path_hash();
+
+        let response = router.handle_offer_request(&path_hash, &offer_data).unwrap();
+        assert_eq!(response, vec![0xc3]); // true = want all
+    }
+
+    #[test]
+    fn test_handle_offer_request_want_none() {
+        let mut core = make_core(b"offer-want-none");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        // Deposit messages first
+        let data1 = make_fake_lxmf_data([0x42; 16], 0xAA);
+        let data2 = make_fake_lxmf_data([0x42; 16], 0xBB);
+        let (_, h1) = router.propagation_deposit(&data1, 1000).map(|e| match e {
+            LxmfEvent::PropagationDeposit { dest_hash, message_hash } => (dest_hash, message_hash),
+            _ => panic!("expected deposit"),
+        }).unwrap();
+        let (_, h2) = router.propagation_deposit(&data2, 1000).map(|e| match e {
+            LxmfEvent::PropagationDeposit { dest_hash, message_hash } => (dest_hash, message_hash),
+            _ => panic!("expected deposit"),
+        }).unwrap();
+
+        // Offer those same hashes — we already have them
+        let hashes = vec![h1, h2];
+        let offer_data = encode_offer_hashes(&hashes);
+        let path_hash = Router::offer_path_hash();
+
+        let response = router.handle_offer_request(&path_hash, &offer_data).unwrap();
+        assert_eq!(response, vec![0xc2]); // false = want none
+    }
+
+    #[test]
+    fn test_handle_offer_request_want_subset() {
+        let mut core = make_core(b"offer-want-subset");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        // Deposit one message
+        let data1 = make_fake_lxmf_data([0x42; 16], 0xAA);
+        let (_, h1) = router.propagation_deposit(&data1, 1000).map(|e| match e {
+            LxmfEvent::PropagationDeposit { dest_hash, message_hash } => (dest_hash, message_hash),
+            _ => panic!("expected deposit"),
+        }).unwrap();
+
+        // Offer h1 (which we have) and a new hash (which we don't)
+        let h2 = [0xFF; 32];
+        let hashes = vec![h1, h2];
+        let offer_data = encode_offer_hashes(&hashes);
+        let path_hash = Router::offer_path_hash();
+
+        let response = router.handle_offer_request(&path_hash, &offer_data).unwrap();
+        // Should be an array with just h2
+        let wanted = decode_offer_hashes(&response).unwrap();
+        assert_eq!(wanted, vec![h2]);
+    }
+
+    #[test]
+    fn test_deposit_sync_resource() {
+        let mut core = make_core(b"deposit-sync-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        let msg1 = make_fake_lxmf_data([0x42; 16], 0xAA);
+        let msg2 = make_fake_lxmf_data([0x42; 16], 0xBB);
+        let messages = vec![msg1.clone(), msg2.clone()];
+        let packed = pack_sync_messages(1000, &messages);
+
+        let deposited = router.deposit_sync_resource(&packed, 2000);
+        assert_eq!(deposited.len(), 2);
+        assert_eq!(router.propagation_message_count(), 2);
+    }
+
+    #[test]
+    fn test_sync_job_cleanup_on_link_closed() {
+        let mut core = make_core(b"sync-cleanup-test");
+        let mut router = LxmfRouter::register(&mut core);
+        router.register_propagation(&mut core);
+
+        let peer_dest = [0x11; TRUNCATED_HASH_LEN];
+        let link_id = [0x22; TRUNCATED_HASH_LEN];
+        router.peer(peer_dest, [0x33; TRUNCATED_HASH_LEN]);
+
+        // Simulate an active sync job
+        router.pending_syncs.push(SyncJob::Linking {
+            peer_dest,
+            link_id,
+        });
+
+        // Close the link
+        router.cleanup_sync_jobs_for_link(&link_id);
+
+        assert!(router.pending_syncs.is_empty());
+        // Peer should have been marked as failed (backoff increased)
+        let peer = router.get_peer(&peer_dest).unwrap();
+        assert_eq!(peer.state, crate::peer::PeerState::Idle);
+        assert!(peer.sync_backoff > 0);
+    }
+
+    #[test]
+    fn test_offer_path_hash_deterministic() {
+        let h1 = Router::offer_path_hash();
+        let h2 = Router::offer_path_hash();
+        assert_eq!(h1, h2);
+        assert_ne!(h1, [0u8; TRUNCATED_HASH_LEN]);
+    }
+
+    fn make_fake_lxmf_data(dest_hash: [u8; 16], content_byte: u8) -> Vec<u8> {
+        let mut data = Vec::with_capacity(100);
+        data.extend_from_slice(&dest_hash);
+        data.extend_from_slice(&[0xAA; 16]); // source_hash
+        data.extend_from_slice(&[content_byte; 64]); // signature (fake)
+        data.extend_from_slice(&[content_byte; 4]); // minimal payload
+        data
     }
 }

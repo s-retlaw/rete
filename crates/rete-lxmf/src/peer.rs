@@ -3,6 +3,7 @@
 //! Peers are other propagation nodes that we synchronize messages with.
 //! Each peer has a state machine tracking the link and sync process.
 
+use std::collections::HashSet;
 use std::vec::Vec;
 
 use rete_core::TRUNCATED_HASH_LEN;
@@ -33,6 +34,9 @@ pub enum SyncStrategy {
     Persistent,
 }
 
+/// Default sync backoff increment on failure (12 minutes, matching Python).
+pub const SYNC_BACKOFF_INCREMENT: u64 = 720;
+
 /// An LXMF propagation peer.
 #[derive(Debug, Clone)]
 pub struct LxmPeer {
@@ -57,7 +61,12 @@ pub struct LxmPeer {
     /// Link ID if link is established.
     pub link_id: Option<[u8; TRUNCATED_HASH_LEN]>,
     /// Message hashes we've already synced to this peer.
-    pub handled: Vec<[u8; 32]>,
+    pub handled: HashSet<[u8; 32]>,
+    /// Additional delay after failed syncs (seconds). Increases by
+    /// [`SYNC_BACKOFF_INCREMENT`] on each failure, resets on success.
+    pub sync_backoff: u64,
+    /// Timestamp of last sync attempt (monotonic seconds).
+    pub last_sync_attempt: u64,
 }
 
 impl LxmPeer {
@@ -77,11 +86,13 @@ impl LxmPeer {
             last_sync: 0,
             sync_interval: 480, // 8 minutes default
             link_id: None,
-            handled: Vec::new(),
+            handled: HashSet::new(),
+            sync_backoff: 0,
+            last_sync_attempt: 0,
         }
     }
 
-    /// Check if this peer needs a sync (based on time and strategy).
+    /// Check if this peer needs a sync (based on time, strategy, and backoff).
     pub fn needs_sync(&self, now: u64) -> bool {
         if self.sync_strategy != SyncStrategy::Persistent {
             return false;
@@ -89,7 +100,9 @@ impl LxmPeer {
         if self.state != PeerState::Idle {
             return false;
         }
-        now.saturating_sub(self.last_sync) >= self.sync_interval
+        let effective_interval = self.sync_interval + self.sync_backoff;
+        let reference = self.last_sync.max(self.last_sync_attempt);
+        now.saturating_sub(reference) >= effective_interval
     }
 
     /// Transition state for link established.
@@ -113,24 +126,29 @@ impl LxmPeer {
         self.state = PeerState::ResourceTransferring;
     }
 
-    /// Sync complete — return to idle.
+    /// Sync complete — return to idle, reset backoff.
     pub fn sync_complete(&mut self, now: u64) {
         self.state = PeerState::Idle;
         self.link_id = None;
         self.last_sync = now;
+        self.sync_backoff = 0;
     }
 
-    /// Sync failed — return to idle.
+    /// Sync failed — return to idle, increase backoff.
     pub fn sync_failed(&mut self) {
         self.state = PeerState::Idle;
         self.link_id = None;
+        self.sync_backoff += SYNC_BACKOFF_INCREMENT;
+    }
+
+    /// Record a sync attempt timestamp (called when initiating sync).
+    pub fn sync_attempted(&mut self, now: u64) {
+        self.last_sync_attempt = now;
     }
 
     /// Mark a message hash as handled (already synced to this peer).
     pub fn mark_handled(&mut self, message_hash: [u8; 32]) {
-        if !self.handled.contains(&message_hash) {
-            self.handled.push(message_hash);
-        }
+        self.handled.insert(message_hash);
     }
 
     /// Check if a message has already been synced to this peer.
@@ -183,6 +201,55 @@ mod tests {
 
         assert!(!peer.needs_sync(150)); // 50s < 60s interval
         assert!(peer.needs_sync(161)); // 61s >= 60s interval
+    }
+
+    #[test]
+    fn test_sync_backoff_increases_on_failure() {
+        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        assert_eq!(peer.sync_backoff, 0);
+
+        peer.sync_failed();
+        assert_eq!(peer.sync_backoff, SYNC_BACKOFF_INCREMENT);
+
+        peer.sync_failed();
+        assert_eq!(peer.sync_backoff, 2 * SYNC_BACKOFF_INCREMENT);
+    }
+
+    #[test]
+    fn test_sync_backoff_resets_on_success() {
+        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        peer.sync_failed();
+        peer.sync_failed();
+        assert_eq!(peer.sync_backoff, 2 * SYNC_BACKOFF_INCREMENT);
+
+        peer.sync_complete(5000);
+        assert_eq!(peer.sync_backoff, 0);
+        assert_eq!(peer.last_sync, 5000);
+    }
+
+    #[test]
+    fn test_needs_sync_respects_backoff() {
+        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        peer.sync_strategy = SyncStrategy::Persistent;
+        peer.sync_interval = 60;
+        peer.last_sync = 100;
+
+        // No backoff: needs sync at 161
+        assert!(peer.needs_sync(161));
+
+        // Add backoff: effective interval = 60 + 720 = 780
+        peer.sync_failed();
+        peer.last_sync_attempt = 100;
+        assert!(!peer.needs_sync(161)); // 61 < 780
+        assert!(!peer.needs_sync(879)); // 779 < 780
+        assert!(peer.needs_sync(881)); // 781 >= 780
+    }
+
+    #[test]
+    fn test_sync_attempted_records_timestamp() {
+        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        peer.sync_attempted(999);
+        assert_eq!(peer.last_sync_attempt, 999);
     }
 
     #[test]

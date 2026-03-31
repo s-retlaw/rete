@@ -332,6 +332,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         self.transport.path_count()
     }
 
+    /// Number of pending announces in the queue.
+    pub fn announce_count(&self) -> usize {
+        self.transport.announce_count()
+    }
+
     /// Capture transport state into a snapshot for persistence.
     pub fn save_snapshot(
         &self,

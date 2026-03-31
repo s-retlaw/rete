@@ -805,15 +805,6 @@ async fn main() {
         hex::encode(lxmf_router.delivery_dest_hash())
     );
 
-    // --lxmf-announce: queue LXMF delivery announce at startup
-    let lxmf_announce = args.iter().any(|a| a == "--lxmf-announce");
-    if lxmf_announce {
-        let mut rng = rand::thread_rng();
-        let now = rete_tokio::current_time_secs();
-        lxmf_router.queue_delivery_announce(&mut node.core, &mut rng, now);
-        eprintln!("[rete] LXMF delivery announce queued");
-    }
-
     // --propagation: enable LXMF propagation node (store-and-forward)
     let propagation_enabled = args.iter().any(|a| a == "--propagation");
     if propagation_enabled {
@@ -823,11 +814,32 @@ async fn main() {
             hex::encode(lxmf_router.propagation_dest_hash().unwrap())
         );
 
-        // Queue propagation announce at startup
+        // Always queue propagation announce when propagation is enabled —
+        // this is how other nodes discover our propagation capability.
         let mut rng = rand::thread_rng();
         let now = rete_tokio::current_time_secs();
         lxmf_router.queue_propagation_announce(&mut node.core, &mut rng, now);
         eprintln!("[rete] LXMF propagation announce queued");
+    }
+
+    // --lxmf-announce: queue LXMF delivery announce at startup.
+    // Note: when propagation is enabled, the propagation announce is already
+    // queued above. Due to rnsd dedup (only one announce per identity relayed
+    // per cycle), we skip the delivery announce when propagation is active —
+    // it will be sent on the next 300s announce timer tick.
+    let lxmf_announce = args.iter().any(|a| a == "--lxmf-announce");
+    if lxmf_announce && !propagation_enabled {
+        let mut rng = rand::thread_rng();
+        let now = rete_tokio::current_time_secs();
+        lxmf_router.queue_delivery_announce(&mut node.core, &mut rng, now);
+        eprintln!("[rete] LXMF delivery announce queued");
+    }
+
+    // --autopeer: enable auto-peering with propagation nodes
+    let autopeer_enabled = args.iter().any(|a| a == "--autopeer");
+    if autopeer_enabled {
+        lxmf_router.set_autopeer(true, 4);
+        eprintln!("[rete] auto-peering enabled (maxdepth=4)");
     }
 
     // Wrap lxmf_router and snapshot_store in RefCell for interior mutability
@@ -1343,6 +1355,15 @@ fn on_event(
             let stats = core.stats(now);
             let _ = stats_tx.send(Some(stats));
         }
+
+        // Check peer syncs
+        let sync_pkts = lxmf_router
+            .borrow_mut()
+            .check_peer_syncs(core, rng, now);
+        if !sync_pkts.is_empty() {
+            eprintln!("[rete] peer sync: initiated {} link(s)", sync_pkts.len());
+            return sync_pkts;
+        }
     }
 
     // Use mutable handler — handles propagation deposit when enabled,
@@ -1464,10 +1485,58 @@ fn on_event(
                 }
             }
         }
+        LxmfEvent::PeerDiscovered {
+            dest_hash,
+            identity_hash,
+        } => {
+            eprintln!(
+                "[rete] PEER_DISCOVERED dest={} identity={}",
+                hex::encode(dest_hash),
+                hex::encode(identity_hash),
+            );
+            println!(
+                "PEER_DISCOVERED:{}:{}",
+                hex::encode(dest_hash),
+                hex::encode(identity_hash),
+            );
+        }
+        LxmfEvent::PeerSyncComplete {
+            dest_hash,
+            messages_sent,
+        } => {
+            eprintln!(
+                "[rete] PEER_SYNC_COMPLETE dest={} sent={}",
+                hex::encode(dest_hash),
+                messages_sent,
+            );
+            println!(
+                "PEER_SYNC_COMPLETE:{}:{}",
+                hex::encode(dest_hash),
+                messages_sent,
+            );
+        }
+        LxmfEvent::PeerOfferReceived {
+            link_id,
+            request_id,
+            response_data,
+        } => {
+            eprintln!(
+                "[rete] PEER_OFFER_RECEIVED link={} response_len={}",
+                hex::encode(link_id),
+                response_data.len(),
+            );
+            println!("PEER_OFFER_RECEIVED:{}", hex::encode(link_id));
+
+            // Send the response back
+            if let Ok(pkt) = core.send_response(&link_id, &request_id, &response_data, rng) {
+                return vec![pkt];
+            }
+        }
         LxmfEvent::Other(event) => {
-            // Check if this is a link event that advances a forward job
+            // Check if this is a link event that advances a forward or sync job
             match &event {
                 NodeEvent::LinkEstablished { link_id } => {
+                    // Try forward jobs
                     let pkts = lxmf_router
                         .borrow_mut()
                         .advance_forward_on_link_established(link_id, core, rng);
@@ -1478,7 +1547,36 @@ fn on_event(
                             pkts.len(),
                         );
                         println!("PROP_FORWARD_SENDING:{}", hex::encode(link_id));
-                        // Also log the base event
+                        on_node_event(event);
+                        return pkts;
+                    }
+
+                    // Try sync jobs
+                    let pkts = lxmf_router
+                        .borrow_mut()
+                        .advance_sync_on_link_established(link_id, core, rng, rete_tokio::current_time_secs());
+                    if !pkts.is_empty() {
+                        eprintln!(
+                            "[rete] PEER_SYNC_IDENTIFYING link={}",
+                            hex::encode(link_id),
+                        );
+                        on_node_event(event);
+                        return pkts;
+                    }
+                }
+                NodeEvent::ResponseReceived {
+                    link_id, ref data, ..
+                } => {
+                    // Advance sync job on offer response
+                    let now = rete_tokio::current_time_secs();
+                    let pkts = lxmf_router
+                        .borrow_mut()
+                        .advance_sync_on_response(link_id, data, core, rng, now);
+                    if !pkts.is_empty() {
+                        eprintln!(
+                            "[rete] PEER_SYNC_TRANSFERRING link={}",
+                            hex::encode(link_id),
+                        );
                         on_node_event(event);
                         return pkts;
                     }
@@ -1486,7 +1584,7 @@ fn on_event(
                 NodeEvent::ResourceComplete {
                     link_id,
                     resource_hash,
-                    ..
+                    ref data,
                 } => {
                     // Try advancing forward jobs first
                     let pkts = lxmf_router
@@ -1497,7 +1595,7 @@ fn on_event(
                         return pkts;
                     }
 
-                    // Then try advancing retrieval jobs
+                    // Try advancing retrieval jobs
                     let pkts = lxmf_router
                         .borrow_mut()
                         .advance_retrieval_on_resource_complete(link_id, resource_hash, core, rng);
@@ -1511,11 +1609,65 @@ fn on_event(
                         on_node_event(event);
                         return pkts;
                     }
+
+                    // Try advancing sync jobs (outbound)
+                    let now = rete_tokio::current_time_secs();
+                    let (pkts, sync_event) = lxmf_router
+                        .borrow_mut()
+                        .advance_sync_on_resource_complete(link_id, core, rng, now);
+                    if let Some(evt) = sync_event {
+                        match &evt {
+                            LxmfEvent::PeerSyncComplete {
+                                dest_hash,
+                                messages_sent,
+                            } => {
+                                eprintln!(
+                                    "[rete] PEER_SYNC_COMPLETE dest={} sent={}",
+                                    hex::encode(dest_hash),
+                                    messages_sent,
+                                );
+                                println!(
+                                    "PEER_SYNC_COMPLETE:{}:{}",
+                                    hex::encode(dest_hash),
+                                    messages_sent,
+                                );
+                            }
+                            _ => {}
+                        }
+                        on_node_event(event);
+                        return pkts;
+                    }
+
+                    // Try depositing as inbound sync resource
+                    if lxmf_router.borrow().has_sync_job_for_link(link_id) {
+                        let deposited = lxmf_router
+                            .borrow_mut()
+                            .deposit_sync_resource(data, now);
+                        if !deposited.is_empty() {
+                            for (dest, hash) in &deposited {
+                                eprintln!(
+                                    "[rete] PEER_SYNC_DEPOSIT dest={} msg={}",
+                                    hex::encode(dest),
+                                    hex::encode(hash),
+                                );
+                                println!(
+                                    "PEER_SYNC_DEPOSIT:{}:{}",
+                                    hex::encode(dest),
+                                    hex::encode(hash),
+                                );
+                            }
+                            on_node_event(event);
+                            return Vec::new();
+                        }
+                    }
                 }
                 NodeEvent::LinkClosed { link_id } => {
                     lxmf_router
                         .borrow_mut()
                         .cleanup_forward_jobs_for_link(link_id);
+                    lxmf_router
+                        .borrow_mut()
+                        .cleanup_sync_jobs_for_link(link_id);
                 }
                 _ => {}
             }

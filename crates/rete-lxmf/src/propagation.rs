@@ -52,6 +52,9 @@ pub trait MessageStore {
     /// Look up a stored message's data by its hash. Returns a reference
     /// to the packed message bytes without cloning.
     fn get_data(&self, message_hash: &[u8; 32]) -> Option<&[u8]>;
+
+    /// Return all stored message hashes (needed for building sync offers).
+    fn all_message_hashes(&self) -> Vec<[u8; 32]>;
 }
 
 /// A stored LXMF message.
@@ -167,6 +170,10 @@ impl MessageStore for InMemoryMessageStore {
     fn get_data(&self, message_hash: &[u8; 32]) -> Option<&[u8]> {
         self.messages.get(message_hash).map(|m| m.data.as_slice())
     }
+
+    fn all_message_hashes(&self) -> Vec<[u8; 32]> {
+        self.messages.keys().copied().collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +263,11 @@ impl<S: MessageStore> PropagationNode<S> {
     /// Look up a stored message's data by hash (O(1) via HashMap).
     pub fn get_data(&self, message_hash: &[u8; 32]) -> Option<&[u8]> {
         self.store.get_data(message_hash)
+    }
+
+    /// Return all stored message hashes.
+    pub fn all_message_hashes(&self) -> Vec<[u8; 32]> {
+        self.store.all_message_hashes()
     }
 
     /// Get a reference to the underlying store.
@@ -352,6 +364,36 @@ mod tests {
         assert_eq!(dests.len(), 2);
         assert!(dests.contains(&dest1));
         assert!(dests.contains(&dest2));
+    }
+
+    #[test]
+    fn test_all_message_hashes_returns_stored() {
+        let mut store = InMemoryMessageStore::new();
+        store.store([0x01; 16], [0xAA; 32], vec![1], 1000);
+        store.store([0x02; 16], [0xBB; 32], vec![2], 1000);
+        let hashes = store.all_message_hashes();
+        assert_eq!(hashes.len(), 2);
+        assert!(hashes.contains(&[0xAA; 32]));
+        assert!(hashes.contains(&[0xBB; 32]));
+    }
+
+    #[test]
+    fn test_all_message_hashes_empty() {
+        let store = InMemoryMessageStore::new();
+        assert!(store.all_message_hashes().is_empty());
+    }
+
+    #[test]
+    fn test_propagation_node_all_message_hashes() {
+        let mut node = PropagationNode::new(InMemoryMessageStore::new());
+        let data1 = make_fake_lxmf_data([0x42; 16], 0xAA);
+        let data2 = make_fake_lxmf_data([0x42; 16], 0xBB);
+        let (_, h1) = node.deposit(&data1, 1000).unwrap();
+        let (_, h2) = node.deposit(&data2, 1001).unwrap();
+        let hashes = node.all_message_hashes();
+        assert_eq!(hashes.len(), 2);
+        assert!(hashes.contains(&h1));
+        assert!(hashes.contains(&h2));
     }
 
     #[test]

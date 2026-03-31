@@ -1,0 +1,60 @@
+networks:
+  rete-lan:
+    driver: bridge
+
+services:
+  rnsd:
+    build:
+      context: ..
+      dockerfile: rnsd-node.Dockerfile
+    networks:
+      - rete-lan
+    environment:
+      - RNSD_PORT=4242
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',4242),1); s.close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
+
+  rust-prop-a:
+    build:
+      context: ..
+      dockerfile: rust-node.Dockerfile
+    networks:
+      - rete-lan
+    stdin_open: true
+    volumes:
+      - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
+    command: ["--connect", "rnsd:4242", "--propagation", "--autopeer", "--lxmf-name", "NodeA", "--lxmf-announce"]
+    depends_on:
+      rnsd:
+        condition: service_healthy
+
+  rust-prop-b:
+    build:
+      context: ..
+      dockerfile: rust-node.Dockerfile
+    networks:
+      - rete-lan
+    stdin_open: true
+    volumes:
+      - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
+    command: ["--connect", "rnsd:4242", "--propagation", "--autopeer", "--lxmf-name", "NodeB", "--lxmf-announce"]
+    depends_on:
+      rnsd:
+        condition: service_healthy
+
+  python-node:
+    build:
+      context: ..
+      dockerfile: python-node.Dockerfile
+    networks:
+      - rete-lan
+    volumes:
+      - ../../interop:/opt/tests:ro
+    command: ${PY_CMD:-/opt/tests/docker_py_helpers/tcp_node.py --host rnsd --port 4242}
+    depends_on:
+      rnsd:
+        condition: service_healthy
