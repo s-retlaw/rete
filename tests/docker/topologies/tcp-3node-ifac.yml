@@ -27,7 +27,7 @@ services:
       - rete-lan
     volumes:
       - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
-    command: ${RUST_ARGS:---connect rnsd:4242}
+    command: ${RUST_ARGS:---data-dir /tmp/rete --connect rnsd:4242}
     depends_on:
       rnsd:
         condition: service_healthy

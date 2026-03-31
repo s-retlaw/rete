@@ -182,8 +182,12 @@ class InteropTest:
             list[str]: A live-updated list of stdout lines.
         """
         port = port or self.port
+        # Each Rust process gets an isolated data dir (identity + snapshot)
+        data_dir = os.path.join(self.tmpdir, f"rete_data_{len(self._procs)}")
+        os.makedirs(data_dir, exist_ok=True)
         cmd = [
             self.rust_binary,
+            "--data-dir", data_dir,
             "--connect", f"127.0.0.1:{port}",
         ]
         if extra_args:
@@ -454,8 +458,11 @@ class InteropTest:
         """
         port = port or self.port
         serial_port = serial_port or self.args.serial_port
+        data_dir = os.path.join(self.tmpdir, f"rete_data_{len(self._procs)}")
+        os.makedirs(data_dir, exist_ok=True)
         cmd = [
             self.rust_binary,
+            "--data-dir", data_dir,
             "--connect", f"127.0.0.1:{port}",
             "--serial", serial_port,
         ]
@@ -575,8 +582,11 @@ class InteropTest:
             list[str]: A live-updated list of stdout lines.
         """
         serial_port = serial_port or self.args.serial_port
+        data_dir = os.path.join(self.tmpdir, f"rete_data_{len(self._procs)}")
+        os.makedirs(data_dir, exist_ok=True)
         cmd = [
             self.rust_binary,
+            "--data-dir", data_dir,
             "--serial", serial_port,
         ]
         if extra_args:

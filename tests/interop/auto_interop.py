@@ -70,15 +70,16 @@ def main():
         # --- Start Rust node with --auto ---
         # start_rust requires --connect, but for AutoInterface we don't use TCP.
         # Use the Rust binary directly with --auto flags.
-        rust_id_file = os.path.join(t.tmpdir, "rust_identity")
+        rust_data_dir = os.path.join(t.tmpdir, "rust_data")
+        os.makedirs(rust_data_dir, exist_ok=True)
         t._log(f"starting Rust node with --auto --auto-group {TEST_GROUP_ID}...")
 
         rust_proc = subprocess.Popen(
             [
                 t.rust_binary,
+                "--data-dir", rust_data_dir,
                 "--auto",
                 "--auto-group", TEST_GROUP_ID,
-                "--identity-file", rust_id_file,
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

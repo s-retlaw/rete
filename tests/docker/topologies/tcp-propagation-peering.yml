@@ -27,7 +27,7 @@ services:
     stdin_open: true
     volumes:
       - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
-    command: ["--connect", "rnsd:4242", "--propagation", "--autopeer", "--lxmf-name", "NodeA", "--lxmf-announce"]
+    command: ["--data-dir", "/tmp/rete-a", "--connect", "rnsd:4242", "--propagation", "--autopeer", "--lxmf-name", "NodeA", "--lxmf-announce"]
     depends_on:
       rnsd:
         condition: service_healthy
@@ -41,7 +41,7 @@ services:
     stdin_open: true
     volumes:
       - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
-    command: ["--connect", "rnsd:4242", "--propagation", "--autopeer", "--lxmf-name", "NodeB", "--lxmf-announce"]
+    command: ["--data-dir", "/tmp/rete-b", "--connect", "rnsd:4242", "--propagation", "--autopeer", "--lxmf-name", "NodeB", "--lxmf-announce"]
     depends_on:
       rnsd:
         condition: service_healthy

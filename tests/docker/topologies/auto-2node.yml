@@ -15,7 +15,7 @@ services:
       - rete-lan
     volumes:
       - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
-    command: ["--auto", "--auto-group", "${AUTO_GROUP:-docker_autotest}"]
+    command: ["--data-dir", "/tmp/rete", "--auto", "--auto-group", "${AUTO_GROUP:-docker_autotest}"]
     environment:
       - RUST_LOG=${RUST_LOG:-info}
     sysctls:

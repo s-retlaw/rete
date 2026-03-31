@@ -39,18 +39,19 @@ def main():
 
         instance_name = f"test_{os.getpid()}"
 
-        # Each node gets a unique identity file so announces have distinct
+        # Each node gets its own --data-dir so announces have distinct
         # destination hashes and are not deduplicated.
-        server_id = os.path.join(t.tmpdir, "server_identity")
-        client1_id = os.path.join(t.tmpdir, "client1_identity")
-        client2_id = os.path.join(t.tmpdir, "client2_identity")
+        client1_dir = os.path.join(t.tmpdir, "client1_data")
+        client2_dir = os.path.join(t.tmpdir, "client2_data")
+        os.makedirs(client1_dir, exist_ok=True)
+        os.makedirs(client2_dir, exist_ok=True)
 
         # --- Start Rust server (TCP + local socket) ---
+        # (start_rust auto-injects --data-dir)
         server_lines = t.start_rust(
             extra_args=[
                 "--local-server", instance_name,
                 "--transport",
-                "--identity-file", server_id,
             ],
         )
         time.sleep(3)
@@ -71,8 +72,8 @@ def main():
         client1_proc = subprocess.Popen(
             [
                 t.rust_binary,
+                "--data-dir", client1_dir,
                 "--local-client", instance_name,
-                "--identity-file", client1_id,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -97,8 +98,8 @@ def main():
         client2_proc = subprocess.Popen(
             [
                 t.rust_binary,
+                "--data-dir", client2_dir,
                 "--local-client", instance_name,
-                "--identity-file", client2_id,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

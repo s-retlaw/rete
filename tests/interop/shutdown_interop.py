@@ -27,22 +27,20 @@ def main():
     with InteropTest("shutdown-interop", default_port=4260) as t:
         t.start_rnsd()
 
-        # Use a subdirectory of tmpdir as HOME so snapshot goes to a known location
-        fake_home = os.path.join(t.tmpdir, "fakehome")
-        os.makedirs(fake_home, exist_ok=True)
-        snapshot_path = os.path.join(fake_home, ".rete", "snapshot.json")
+        # Use a subdirectory of tmpdir as data-dir so snapshot goes to a known location
+        rust_data_dir = os.path.join(t.tmpdir, "rust_data")
+        os.makedirs(rust_data_dir, exist_ok=True)
+        snapshot_path = os.path.join(rust_data_dir, "snapshot.json")
 
-        # Start Rust node manually with custom HOME environment
-        env = os.environ.copy()
-        env["HOME"] = fake_home
         cmd = [
             t.rust_binary,
+            "--data-dir", rust_data_dir,
             "--connect", f"127.0.0.1:{t.port}",
         ]
-        t._log("starting Rust node with custom HOME...")
+        t._log("starting Rust node with --data-dir...")
         rust_proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=env,
+            stderr=subprocess.PIPE,
         )
         t._procs.append(rust_proc)
         t._rust_proc = rust_proc

@@ -55,7 +55,6 @@ struct Config {
 #[derive(Debug, Default, serde::Deserialize)]
 struct NodeConfig {
     transport: Option<bool>,
-    identity_file: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -126,9 +125,6 @@ fn generate_default_config() -> &'static str {
 [node]
 # Enable transport mode (relay packets for other nodes)
 # transport = true
-
-# Path to identity file (default: ~/.rete/identity)
-# identity_file = "~/.rete/identity"
 
 [interfaces.tcp_server]
 # Listen for incoming TCP connections
@@ -292,17 +288,9 @@ fn bz2_decompress(data: &[u8]) -> Option<Vec<u8>> {
 // Identity persistence
 // ---------------------------------------------------------------------------
 
-fn default_rete_dir() -> PathBuf {
+fn default_data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".rete")
-}
-
-fn default_identity_path() -> PathBuf {
-    default_rete_dir().join("identity")
-}
-
-fn default_snapshot_path() -> PathBuf {
-    default_rete_dir().join("snapshot.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -564,22 +552,18 @@ async fn main() {
         return;
     }
 
-    // Load config file: --config <path> or fallback to ~/.rete/config.toml
-    let config_path = args
+    // --data-dir <path>: override default data directory (~/.rete/)
+    // All state files (identity, config.toml, snapshot.json) resolve from here.
+    let data_dir = args
         .windows(2)
-        .find(|w| w[0] == "--config")
-        .map(|w| PathBuf::from(&w[1]));
-    let cfg = if let Some(ref path) = config_path {
-        // Explicit --config: error if not found
-        load_config(path).unwrap_or_else(|| {
-            eprintln!("[rete] config file not found: {}", path.display());
-            std::process::exit(1);
-        })
-    } else {
-        // Implicit fallback: silently skip if not found
-        let default_path = default_rete_dir().join("config.toml");
-        load_config(&default_path).unwrap_or_default()
-    };
+        .find(|w| w[0] == "--data-dir")
+        .map(|w| PathBuf::from(&w[1]))
+        .unwrap_or_else(default_data_dir);
+    eprintln!("[rete] data dir: {}", data_dir.display());
+
+    // Load config file from data_dir/config.toml (silently skip if not found)
+    let config_path = data_dir.join("config.toml");
+    let cfg = load_config(&config_path).unwrap_or_default();
 
     // Parse CLI flags — CLI values override config file values.
 
@@ -613,13 +597,6 @@ async fn main() {
         .and_then(|w| w[1].parse().ok())
         .or_else(|| cfg.interfaces.serial.as_ref().and_then(|s| s.baud))
         .unwrap_or(DEFAULT_BAUD);
-
-    // --identity-file <path>
-    let identity_file: Option<PathBuf> = args
-        .windows(2)
-        .find(|w| w[0] == "--identity-file")
-        .map(|w| PathBuf::from(&w[1]))
-        .or_else(|| cfg.node.identity_file.as_ref().map(PathBuf::from));
 
     // --auto-reply <message> (send DATA after receiving an announce)
     let auto_reply = args
@@ -719,7 +696,7 @@ async fn main() {
     }
 
     // Create or load identity
-    let id_path = identity_file.unwrap_or_else(default_identity_path);
+    let id_path = data_dir.join("identity");
     let identity = load_or_create_identity(&id_path);
 
     let id_hash = identity.hash();
@@ -734,7 +711,7 @@ async fn main() {
     }
 
     // Load snapshot from previous run (if any)
-    let mut snapshot_store = JsonFileStore::new(default_snapshot_path());
+    let mut snapshot_store = JsonFileStore::new(data_dir.join("snapshot.json"));
     match snapshot_store.load() {
         Ok(Some(snap)) => {
             let n_paths = snap.paths.len();

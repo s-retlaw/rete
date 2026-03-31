@@ -2,7 +2,7 @@
 """Config file interop test: Rust rete node configured via TOML file.
 
 Tests:
-  1. Node starts with --config <path> (no other interface flags)
+  1. Node starts with --data-dir containing config.toml (no other interface flags)
   2. TCP connection works from config file settings
   3. Transport mode activates from config file
   4. Node receives announce from Python helper
@@ -23,8 +23,10 @@ def main():
     with InteropTest("config-file", default_port=4280) as t:
         t.start_rnsd()
 
-        # Write a TOML config file that configures the node
-        config_path = os.path.join(t.tmpdir, "config.toml")
+        # Write a TOML config file into a data-dir
+        data_dir = os.path.join(t.tmpdir, "rust_data")
+        os.makedirs(data_dir, exist_ok=True)
+        config_path = os.path.join(data_dir, "config.toml")
         with open(config_path, "w") as f:
             f.write(f"""\
 [node]
@@ -34,19 +36,18 @@ transport = true
 connect = ["127.0.0.1:{t.port}"]
 """)
 
-        # Start Rust node with ONLY --config (no --connect or --transport)
-        # We pass extra_args but NOT --connect, so the node must get its
-        # TCP connection from the config file.
+        # Start Rust node with ONLY --data-dir (no --connect or --transport)
+        # The node must get its TCP connection from config.toml in the data dir.
         cmd = [
             t.rust_binary,
-            "--config", config_path,
+            "--data-dir", data_dir,
         ]
 
         import subprocess
         import threading
         from interop_helpers import read_stdout_lines
 
-        t._log("starting Rust node with config file...")
+        t._log("starting Rust node with config file in data-dir...")
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
@@ -63,7 +64,7 @@ connect = ["127.0.0.1:{t.port}"]
         rust_dest = t.wait_for_line(rust, "IDENTITY:", timeout=15)
         t.check(
             rust_dest is not None,
-            "Node starts with --config (config file provides TCP connection)",
+            "Node starts with config.toml in --data-dir (config provides TCP connection)",
         )
         if rust_dest is None:
             # Dump stderr for debugging
@@ -78,12 +79,8 @@ connect = ["127.0.0.1:{t.port}"]
         stats_line = t.wait_for_line(rust, "STATS:", timeout=10)
         transport_active = False
         if stats_line:
-            # STATS:{json} — extract and check
             try:
                 stats = json.loads(stats_line)
-                # The stats JSON itself doesn't have a "transport" boolean,
-                # but if transport mode is active, the node can forward packets.
-                # We verify transport indirectly by checking the stats exist.
                 transport_active = "transport" in stats or "uptime_secs" in stats
             except json.JSONDecodeError:
                 pass
@@ -138,8 +135,9 @@ print("PY_DONE", flush=True)
 
         # ---- Test 3: Config file with CLI override ----
         # Write config with transport = false, then override with --transport CLI flag
-        config_path2 = os.path.join(t.tmpdir, "config2.toml")
-        with open(config_path2, "w") as f:
+        data_dir2 = os.path.join(t.tmpdir, "rust_data2")
+        os.makedirs(data_dir2, exist_ok=True)
+        with open(os.path.join(data_dir2, "config.toml"), "w") as f:
             f.write(f"""\
 [node]
 transport = false
@@ -148,9 +146,8 @@ transport = false
 connect = ["127.0.0.1:{t.port}"]
 """)
 
-        # Start a second Rust node with --config + --transport override
         proc2 = subprocess.Popen(
-            [t.rust_binary, "--config", config_path2, "--transport"],
+            [t.rust_binary, "--data-dir", data_dir2, "--transport"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         t._procs.append(proc2)

@@ -38,19 +38,17 @@ def main():
         t.start_rnsd()
         time.sleep(1)
 
-        # Create isolated home directories
-        home_a = os.path.join(t.tmpdir, "home_a")
-        home_b = os.path.join(t.tmpdir, "home_b")
-        os.makedirs(home_a, exist_ok=True)
-        os.makedirs(home_b, exist_ok=True)
+        # Each node gets its own data dir for isolated identity + snapshot
+        data_dir_a = os.path.join(t.tmpdir, "data_a")
+        data_dir_b = os.path.join(t.tmpdir, "data_b")
+        os.makedirs(data_dir_a, exist_ok=True)
+        os.makedirs(data_dir_b, exist_ok=True)
 
-        # --- Start Rust node A (propagation, lxmf-announce, but NOT autopeer yet) ---
-        env_a = os.environ.copy()
-        env_a["HOME"] = home_a
-
+        # --- Start Rust node A ---
         rust_a_proc = subprocess.Popen(
             [
                 t.rust_binary,
+                "--data-dir", data_dir_a,
                 "--connect", f"127.0.0.1:{t.port}",
                 "--propagation",
                 "--lxmf-name", "NodeA",
@@ -60,7 +58,6 @@ def main():
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=env_a,
         )
         t._procs.append(rust_a_proc)
         t._rust_proc = rust_a_proc
@@ -226,12 +223,10 @@ print("PY_SENDER_DONE", flush=True)
             return
 
         # --- Now start node B ---
-        env_b = os.environ.copy()
-        env_b["HOME"] = home_b
-
         rust_b_proc = subprocess.Popen(
             [
                 t.rust_binary,
+                "--data-dir", data_dir_b,
                 "--connect", f"127.0.0.1:{t.port}",
                 "--propagation",
                 "--autopeer",
@@ -241,7 +236,6 @@ print("PY_SENDER_DONE", flush=True)
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=env_b,
         )
         t._procs.append(rust_b_proc)
 
