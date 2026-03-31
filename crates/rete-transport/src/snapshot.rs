@@ -57,6 +57,22 @@ pub struct Snapshot {
     pub identities: Vec<IdentityEntry>,
 }
 
+/// Storage backend for transport state snapshots.
+///
+/// Implementors handle serialization format and storage medium:
+/// - Hosted: JSON file on filesystem
+/// - Embedded: postcard to flash via embedded-storage traits
+pub trait SnapshotStore {
+    /// Error type for storage operations.
+    type Error: core::fmt::Debug;
+
+    /// Persist a snapshot to the backing store.
+    fn save(&mut self, snapshot: &Snapshot) -> Result<(), Self::Error>;
+
+    /// Load a previously persisted snapshot, or `None` if no snapshot exists.
+    fn load(&mut self) -> Result<Option<Snapshot>, Self::Error>;
+}
+
 /// Custom serde for `[u8; 64]` — serde doesn't implement Serialize/Deserialize
 /// for arrays larger than 32 elements.
 #[cfg(feature = "serde")]

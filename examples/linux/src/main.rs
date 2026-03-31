@@ -13,6 +13,7 @@
 //!   cargo run -p rete-example-linux -- --auto --auto-group mynetwork
 //!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242 --propagation
 //!   cargo run -p rete-example-linux -- --listen 0.0.0.0:4242 --transport
+//!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242 --monitoring 127.0.0.1:9100
 
 use rete_core::Identity;
 use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
@@ -23,6 +24,7 @@ use rete_stack::{OutboundPacket, RequestHandler, RequestPolicy};
 use rete_tokio::local::{LocalServer, ReconnectingLocalClient};
 use rete_tokio::tcp_server::TcpServer;
 use rete_tokio::{interface_task, InboundMsg, InterfaceSlot, NodeCommand, NodeEvent, TokioNode};
+use rete_transport::SnapshotStore;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -34,6 +36,132 @@ const APP_NAME: &str = "rete";
 const ASPECTS: &[&str] = &["example", "v1"];
 /// Default propagation message TTL: 30 days in seconds.
 const PROPAGATION_TTL_SECS: u64 = 2_592_000;
+
+// ---------------------------------------------------------------------------
+// TOML configuration file
+// ---------------------------------------------------------------------------
+
+/// Top-level config file structure. All fields are `Option` so CLI flags
+/// can override individual values while the rest come from the file.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct Config {
+    node: NodeConfig,
+    interfaces: InterfacesConfig,
+    ifac: IfacConfig,
+    logging: LoggingConfig,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct NodeConfig {
+    transport: Option<bool>,
+    identity_file: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct InterfacesConfig {
+    tcp_server: Option<TcpServerConfig>,
+    tcp_client: Option<TcpClientConfig>,
+    serial: Option<SerialConfig>,
+    auto: Option<AutoConfig>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct TcpServerConfig {
+    listen: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct TcpClientConfig {
+    connect: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct SerialConfig {
+    port: Option<String>,
+    baud: Option<u32>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AutoConfig {
+    enabled: Option<bool>,
+    group: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct IfacConfig {
+    netname: Option<String>,
+    netkey: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct LoggingConfig {
+    packet_log: Option<bool>,
+}
+
+fn load_config(path: &std::path::Path) -> Option<Config> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match toml::from_str(&text) {
+            Ok(cfg) => {
+                eprintln!("[rete] loaded config from {}", path.display());
+                Some(cfg)
+            }
+            Err(e) => {
+                eprintln!("[rete] failed to parse config {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("[rete] failed to read config {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn generate_default_config() -> &'static str {
+    r#"# rete node configuration
+# CLI flags override values in this file.
+
+[node]
+# Enable transport mode (relay packets for other nodes)
+# transport = true
+
+# Path to identity file (default: ~/.rete/identity)
+# identity_file = "~/.rete/identity"
+
+[interfaces.tcp_server]
+# Listen for incoming TCP connections
+# listen = "0.0.0.0:4242"
+
+[interfaces.tcp_client]
+# Connect to these TCP servers
+# connect = ["127.0.0.1:4242"]
+
+[interfaces.serial]
+# Serial port path
+# port = "/dev/ttyACM0"
+# baud = 115200
+
+[interfaces.auto]
+# Enable AutoInterface (IPv6 link-local multicast peer discovery)
+# enabled = true
+# group = "reticulum"
+
+[ifac]
+# Interface Access Control
+# netname = "mynetwork"
+# netkey = "secret"
+
+[logging]
+# Log every inbound/outbound packet header to stderr
+# packet_log = false
+"#
+}
+
+// ---------------------------------------------------------------------------
+// Packet logging
+// ---------------------------------------------------------------------------
 
 /// Log a raw packet's parsed header to stderr (used as packet_log_fn callback).
 fn log_packet(raw: &[u8], direction: &str, iface_idx: u8) {
@@ -181,38 +309,39 @@ fn default_snapshot_path() -> PathBuf {
 // Path table snapshot persistence
 // ---------------------------------------------------------------------------
 
-fn load_snapshot(path: &std::path::Path) -> Option<rete_transport::Snapshot> {
-    match std::fs::read_to_string(path) {
-        Ok(json) => match serde_json::from_str(&json) {
-            Ok(snap) => {
-                eprintln!("[rete] loaded snapshot from {}", path.display());
-                Some(snap)
-            }
-            Err(e) => {
-                eprintln!("[rete] failed to parse snapshot: {e}");
-                None
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            eprintln!("[rete] failed to read snapshot: {e}");
-            None
-        }
+/// JSON file-based snapshot store for hosted/desktop nodes.
+struct JsonFileStore {
+    path: PathBuf,
+}
+
+impl JsonFileStore {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
     }
 }
 
-fn save_snapshot(path: &std::path::Path, snap: &rete_transport::Snapshot) {
-    match serde_json::to_string(snap) {
-        Ok(json) => {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::write(path, json) {
-                eprintln!("[rete] failed to write snapshot: {e}");
-            }
+impl rete_transport::SnapshotStore for JsonFileStore {
+    type Error = std::io::Error;
+
+    fn save(&mut self, snapshot: &rete_transport::Snapshot) -> Result<(), Self::Error> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        Err(e) => {
-            eprintln!("[rete] failed to serialize snapshot: {e}");
+        let file = std::fs::File::create(&self.path)?;
+        serde_json::to_writer(file, snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    fn load(&mut self) -> Result<Option<rete_transport::Snapshot>, Self::Error> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(json) => {
+                let snap: rete_transport::Snapshot = serde_json::from_str(&json)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                eprintln!("[rete] loaded snapshot from {}", self.path.display());
+                Ok(Some(snap))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
         }
     }
 }
@@ -390,6 +519,18 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
     }
 }
 
+fn spawn_signal_handler(cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>) {
+    tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+        let _ = cmd_tx.send(NodeCommand::Shutdown).await;
+    });
+}
+
 fn spawn_stdin_reader(cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>) {
     tokio::task::spawn_blocking(move || {
         use std::io::BufRead;
@@ -417,33 +558,70 @@ fn spawn_stdin_reader(cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>) {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Parse --connect <addr> (can be repeated for multi-interface)
-    let addrs: Vec<&str> = args
+    // --generate-config: print default config to stdout and exit
+    if args.iter().any(|a| a == "--generate-config") {
+        print!("{}", generate_default_config());
+        return;
+    }
+
+    // Load config file: --config <path> or fallback to ~/.rete/config.toml
+    let config_path = args
+        .windows(2)
+        .find(|w| w[0] == "--config")
+        .map(|w| PathBuf::from(&w[1]));
+    let cfg = if let Some(ref path) = config_path {
+        // Explicit --config: error if not found
+        load_config(path).unwrap_or_else(|| {
+            eprintln!("[rete] config file not found: {}", path.display());
+            std::process::exit(1);
+        })
+    } else {
+        // Implicit fallback: silently skip if not found
+        let default_path = default_rete_dir().join("config.toml");
+        load_config(&default_path).unwrap_or_default()
+    };
+
+    // Parse CLI flags — CLI values override config file values.
+
+    // --connect <addr> (can be repeated for multi-interface)
+    let cli_addrs: Vec<String> = args
         .windows(2)
         .filter(|w| w[0] == "--connect")
-        .map(|w| w[1].as_str())
+        .map(|w| w[1].clone())
         .collect();
+    let addrs: Vec<String> = if !cli_addrs.is_empty() {
+        cli_addrs
+    } else {
+        cfg.interfaces
+            .tcp_client
+            .as_ref()
+            .and_then(|c| c.connect.clone())
+            .unwrap_or_default()
+    };
 
-    // Parse --serial <path>
-    let serial_path = args
+    // --serial <path>
+    let serial_path: Option<String> = args
         .windows(2)
         .find(|w| w[0] == "--serial")
-        .map(|w| w[1].as_str());
+        .map(|w| w[1].clone())
+        .or_else(|| cfg.interfaces.serial.as_ref().and_then(|s| s.port.clone()));
 
-    // Parse --baud <rate> (default 115200, ignored for USB-CDC)
+    // --baud <rate> (default 115200)
     let baud: u32 = args
         .windows(2)
         .find(|w| w[0] == "--baud")
         .and_then(|w| w[1].parse().ok())
+        .or_else(|| cfg.interfaces.serial.as_ref().and_then(|s| s.baud))
         .unwrap_or(DEFAULT_BAUD);
 
-    // Parse --identity-file <path> (default: ~/.rete/identity)
-    let identity_file = args
+    // --identity-file <path>
+    let identity_file: Option<PathBuf> = args
         .windows(2)
         .find(|w| w[0] == "--identity-file")
-        .map(|w| PathBuf::from(&w[1]));
+        .map(|w| PathBuf::from(&w[1]))
+        .or_else(|| cfg.node.identity_file.as_ref().map(PathBuf::from));
 
-    // Parse --auto-reply <message> (send DATA after receiving an announce)
+    // --auto-reply <message> (send DATA after receiving an announce)
     let auto_reply = args
         .windows(2)
         .find(|w| w[0] == "--auto-reply")
@@ -453,51 +631,74 @@ async fn main() {
     let auto_reply_ping = args.iter().any(|a| a == "--auto-reply-ping");
 
     // --transport: enable transport mode (relay HEADER_2 packets)
-    let transport_mode = args.iter().any(|a| a == "--transport");
+    let transport_mode =
+        args.iter().any(|a| a == "--transport") || cfg.node.transport.unwrap_or(false);
 
-    // Parse --local-server <instance_name> (run as shared instance server)
+    // --local-server <instance_name>
     let local_server_name = args
         .windows(2)
         .find(|w| w[0] == "--local-server")
         .map(|w| w[1].clone());
 
-    // Parse --local-client <instance_name> (connect to shared instance as client)
+    // --local-client <instance_name>
     let local_client_name = args
         .windows(2)
         .find(|w| w[0] == "--local-client")
         .map(|w| w[1].clone());
 
-    // Parse --listen <addr> (TCP server bind address, e.g. "0.0.0.0:4242")
-    let listen_addr = args
+    // --listen <addr>
+    let listen_addr: Option<String> = args
         .windows(2)
         .find(|w| w[0] == "--listen")
-        .map(|w| w[1].clone());
+        .map(|w| w[1].clone())
+        .or_else(|| {
+            cfg.interfaces
+                .tcp_server
+                .as_ref()
+                .and_then(|s| s.listen.clone())
+        });
 
-    // Parse --ifac-netname <name> (IFAC network name for interface access control)
-    let ifac_netname = args
+    // --ifac-netname <name>
+    let ifac_netname: Option<String> = args
         .windows(2)
         .find(|w| w[0] == "--ifac-netname")
-        .map(|w| w[1].clone());
+        .map(|w| w[1].clone())
+        .or_else(|| cfg.ifac.netname.clone());
 
-    // Parse --ifac-netkey <key> (IFAC network key/passphrase for interface access control)
-    let ifac_netkey = args
+    // --ifac-netkey <key>
+    let ifac_netkey: Option<String> = args
         .windows(2)
         .find(|w| w[0] == "--ifac-netkey")
-        .map(|w| w[1].clone());
+        .map(|w| w[1].clone())
+        .or_else(|| cfg.ifac.netkey.clone());
 
-    // --packet-log: log every inbound/outbound packet header to stderr
-    let packet_log = args.iter().any(|a| a == "--packet-log");
+    // --packet-log
+    let packet_log =
+        args.iter().any(|a| a == "--packet-log") || cfg.logging.packet_log.unwrap_or(false);
     if packet_log {
         eprintln!("[rete] packet logging enabled");
     }
 
-    // --auto: enable AutoInterface (IPv6 link-local multicast peer discovery)
-    let auto_enabled = args.iter().any(|a| a == "--auto");
+    // --auto: enable AutoInterface
+    let auto_enabled = args.iter().any(|a| a == "--auto")
+        || cfg
+            .interfaces
+            .auto
+            .as_ref()
+            .and_then(|a| a.enabled)
+            .unwrap_or(false);
 
-    // --auto-group <group_id>: override the AutoInterface group ID (default: "reticulum")
-    let auto_group = args
+    // --auto-group <group_id>
+    let auto_group: Option<String> = args
         .windows(2)
         .find(|w| w[0] == "--auto-group")
+        .map(|w| w[1].clone())
+        .or_else(|| cfg.interfaces.auto.as_ref().and_then(|a| a.group.clone()));
+
+    // Parse --monitoring <addr:port> (HTTP monitoring endpoint for health/metrics)
+    let monitoring_addr: Option<String> = args
+        .windows(2)
+        .find(|w| w[0] == "--monitoring")
         .map(|w| w[1].clone());
 
     // Check IFAC is configured (derive will happen per-interface)
@@ -533,12 +734,18 @@ async fn main() {
     }
 
     // Load snapshot from previous run (if any)
-    let snapshot_path = default_snapshot_path();
-    if let Some(snap) = load_snapshot(&snapshot_path) {
-        let n_paths = snap.paths.len();
-        let n_ids = snap.identities.len();
-        node.core.load_snapshot(&snap);
-        eprintln!("[rete] restored {n_paths} paths, {n_ids} identities from snapshot");
+    let mut snapshot_store = JsonFileStore::new(default_snapshot_path());
+    match snapshot_store.load() {
+        Ok(Some(snap)) => {
+            let n_paths = snap.paths.len();
+            let n_ids = snap.identities.len();
+            node.core.load_snapshot(&snap);
+            eprintln!("[rete] restored {n_paths} paths, {n_ids} identities from snapshot");
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("[rete] failed to load snapshot: {e:?}");
+        }
     }
 
     if transport_mode {
@@ -623,13 +830,30 @@ async fn main() {
         eprintln!("[rete] LXMF propagation announce queued");
     }
 
-    // Wrap lxmf_router in RefCell for interior mutability (needed for
-    // propagation deposit in event handler + command handler access).
+    // Wrap lxmf_router and snapshot_store in RefCell for interior mutability
+    // (needed for propagation deposit in event handler + command handler access).
     let lxmf_router = RefCell::new(lxmf_router);
+    let snapshot_store = RefCell::new(snapshot_store);
 
     // Create command channel + stdin reader
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<NodeCommand>(64);
+    spawn_signal_handler(cmd_tx.clone());
     spawn_stdin_reader(cmd_tx);
+
+    // Create watch channel for stats (used by monitoring endpoint)
+    let (stats_tx, stats_rx) = tokio::sync::watch::channel::<Option<rete_stack::NodeStats>>(None);
+
+    // Start HTTP monitoring server if requested
+    if let Some(ref addr) = monitoring_addr {
+        let addr = addr
+            .parse::<std::net::SocketAddr>()
+            .expect("invalid monitoring address");
+        let rx = stats_rx.clone();
+        tokio::spawn(async move {
+            run_monitoring_server(addr, rx).await;
+        });
+        eprintln!("[rete] monitoring endpoint on http://{}", addr);
+    }
 
     // Dispatch based on interface type
     if auto_enabled
@@ -664,7 +888,7 @@ async fn main() {
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,
-            |e, core, rng| on_event(e, &lxmf_router, core, rng),
+            |e, core, rng| on_event(e, &lxmf_router, &snapshot_store, &stats_tx, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
             rand::thread_rng(),
         )
@@ -678,13 +902,14 @@ async fn main() {
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,
-            |e, core, rng| on_event(e, &lxmf_router, core, rng),
+            |e, core, rng| on_event(e, &lxmf_router, &snapshot_store, &stats_tx, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
             rand::thread_rng(),
         )
         .await;
-    } else if let Some(path) =
-        serial_path.filter(|_| addrs.is_empty() && local_server_name.is_none())
+    } else if let Some(path) = serial_path
+        .as_deref()
+        .filter(|_| addrs.is_empty() && local_server_name.is_none())
     {
         eprintln!("[rete] opening serial port {} at {} baud ...", path, baud);
         let mut iface = match SerialInterface::open(path, baud) {
@@ -698,7 +923,7 @@ async fn main() {
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,
-            |e, core, rng| on_event(e, &lxmf_router, core, rng),
+            |e, core, rng| on_event(e, &lxmf_router, &snapshot_store, &stats_tx, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
             rand::thread_rng(),
         )
@@ -772,7 +997,7 @@ async fn main() {
         }
 
         // Add serial interface (if configured in multi-interface mode)
-        if let Some(path) = serial_path {
+        if let Some(ref path) = serial_path {
             let serial_idx = next_iface_idx;
             next_iface_idx += 1;
             eprintln!(
@@ -863,11 +1088,11 @@ async fn main() {
         drop(inbound_tx);
 
         node.run_multi_with_commands(slots, inbound_rx, cmd_rx, |e, core, rng| {
-            on_event(e, &lxmf_router, core, rng)
+            on_event(e, &lxmf_router, &snapshot_store, &stats_tx, core, rng)
         })
         .await;
     } else {
-        let addr = addrs.first().copied().unwrap_or(DEFAULT_ADDR);
+        let addr = addrs.first().map(|s| s.as_str()).unwrap_or(DEFAULT_ADDR);
         eprintln!("[rete] connecting to {} ...", addr);
         let mut iface = match TcpInterface::connect(addr).await {
             Ok(i) => i,
@@ -885,17 +1110,204 @@ async fn main() {
         node.run_with_app_handler(
             &mut iface,
             cmd_rx,
-            |e, core, rng| on_event(e, &lxmf_router, core, rng),
+            |e, core, rng| on_event(e, &lxmf_router, &snapshot_store, &stats_tx, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
             rand::thread_rng(),
         )
         .await;
     }
+
+    // Final snapshot save on shutdown
+    {
+        let snap = node
+            .core
+            .save_snapshot(rete_transport::SnapshotDetail::Standard);
+        if let Err(e) = snapshot_store.borrow_mut().save(&snap) {
+            eprintln!("[rete] failed to save final snapshot: {e:?}");
+        } else {
+            eprintln!(
+                "[rete] final snapshot saved ({} paths, {} identities)",
+                snap.paths.len(),
+                snap.identities.len()
+            );
+        }
+    }
+    println!("SHUTDOWN_COMPLETE");
+    // Flush stdout before exiting so piped readers see the marker.
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    // Force exit to avoid blocking on the stdin reader thread, which
+    // cannot be interrupted on Unix (blocking read on stdin).
+    std::process::exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// HTTP monitoring server
+// ---------------------------------------------------------------------------
+
+async fn run_monitoring_server(
+    addr: std::net::SocketAddr,
+    stats_rx: tokio::sync::watch::Receiver<Option<rete_stack::NodeStats>>,
+) {
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[rete] monitoring: failed to bind {addr}: {e}");
+            return;
+        }
+    };
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let rx = stats_rx.clone();
+        tokio::spawn(async move {
+            handle_monitoring_connection(stream, rx).await;
+        });
+    }
+}
+
+async fn handle_monitoring_connection(
+    stream: tokio::net::TcpStream,
+    stats_rx: tokio::sync::watch::Receiver<Option<rete_stack::NodeStats>>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (reader, mut writer) = stream.into_split();
+    let mut buf_reader = BufReader::new(reader);
+    let mut request_line = String::new();
+
+    // Read the first line of the HTTP request
+    if buf_reader.read_line(&mut request_line).await.is_err() {
+        return;
+    }
+
+    // Parse path from "GET /path HTTP/1.x"
+    let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+
+    // Drain remaining headers (read until empty line)
+    let mut hdr_buf = String::with_capacity(256);
+    loop {
+        hdr_buf.clear();
+        match buf_reader.read_line(&mut hdr_buf).await {
+            Ok(0) => break,
+            Ok(_) if hdr_buf.trim().is_empty() => break,
+            Err(_) => break,
+            _ => continue,
+        }
+    }
+
+    let (status, content_type, body) = match path {
+        "/health" => (
+            "200 OK",
+            "application/json",
+            r#"{"status":"ok"}"#.to_string(),
+        ),
+        "/stats" => {
+            let stats = stats_rx.borrow().clone();
+            match stats {
+                Some(s) => match serde_json::to_string(&s) {
+                    Ok(json) => ("200 OK", "application/json", json),
+                    Err(_) => (
+                        "500 Internal Server Error",
+                        "text/plain",
+                        "serialization error".to_string(),
+                    ),
+                },
+                None => (
+                    "503 Service Unavailable",
+                    "application/json",
+                    r#"{"error":"stats not yet available"}"#.to_string(),
+                ),
+            }
+        }
+        "/metrics" => {
+            let stats = stats_rx.borrow().clone();
+            match stats {
+                Some(s) => (
+                    "200 OK",
+                    "text/plain; version=0.0.4; charset=utf-8",
+                    format_prometheus(&s),
+                ),
+                None => (
+                    "503 Service Unavailable",
+                    "text/plain",
+                    "# stats not yet available\n".to_string(),
+                ),
+            }
+        }
+        _ => ("404 Not Found", "text/plain", "not found\n".to_string()),
+    };
+
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = writer.write_all(response.as_bytes()).await;
+    let _ = writer.shutdown().await;
+}
+
+fn format_prometheus(stats: &rete_stack::NodeStats) -> String {
+    use std::fmt::Write;
+    let t = &stats.transport;
+    let mut s = String::with_capacity(2048);
+
+    s.push_str("# HELP rete_node_info Node identification\n# TYPE rete_node_info gauge\n");
+    let _ = writeln!(
+        s,
+        "rete_node_info{{identity_hash=\"{}\"}} 1",
+        stats.identity_hash
+    );
+
+    s.push_str("# HELP rete_uptime_seconds Seconds since the node started\n# TYPE rete_uptime_seconds gauge\n");
+    let _ = writeln!(s, "rete_uptime_seconds {}", stats.uptime_secs);
+
+    macro_rules! prom_counter {
+        ($field:ident, $help:expr) => {
+            let _ = write!(
+                s,
+                "# HELP rete_{}_total {}\n# TYPE rete_{}_total counter\nrete_{}_total {}\n",
+                stringify!($field),
+                $help,
+                stringify!($field),
+                stringify!($field),
+                t.$field
+            );
+        };
+    }
+
+    prom_counter!(packets_received, "Total packets received");
+    prom_counter!(packets_sent, "Total packets sent");
+    prom_counter!(packets_forwarded, "Packets forwarded for other nodes");
+    prom_counter!(packets_dropped_dedup, "Packets dropped as duplicates");
+    prom_counter!(packets_dropped_invalid, "Packets dropped as invalid");
+    prom_counter!(announces_received, "Valid announces received");
+    prom_counter!(announces_sent, "Announces sent");
+    prom_counter!(announces_retransmitted, "Announce retransmissions");
+    prom_counter!(
+        announces_rate_limited,
+        "Announces suppressed by rate limiter"
+    );
+    prom_counter!(links_established, "Links established");
+    prom_counter!(links_closed, "Links closed");
+    prom_counter!(links_failed, "Link handshake failures");
+    prom_counter!(link_requests_received, "Link requests received");
+    prom_counter!(paths_learned, "Paths learned or updated");
+    prom_counter!(paths_expired, "Paths expired and removed");
+    prom_counter!(crypto_failures, "Cryptographic failures");
+
+    s.push_str("# HELP rete_started_at_seconds Unix timestamp of first activity\n# TYPE rete_started_at_seconds gauge\n");
+    let _ = writeln!(s, "rete_started_at_seconds {}", t.started_at);
+
+    s
 }
 
 fn on_event(
     event: NodeEvent,
     lxmf_router: &RefCell<LxmfRouter>,
+    snapshot_store: &RefCell<JsonFileStore>,
+    stats_tx: &tokio::sync::watch::Sender<Option<rete_stack::NodeStats>>,
     core: &mut rete_stack::HostedNodeCore,
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
 ) -> Vec<OutboundPacket> {
@@ -915,12 +1327,21 @@ fn on_event(
         let ticks = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
         if ticks.is_multiple_of(60) && core.path_count() > 0 {
             let snap = core.save_snapshot(rete_transport::SnapshotDetail::Standard);
-            save_snapshot(&default_snapshot_path(), &snap);
-            eprintln!(
-                "[rete] snapshot saved: {} paths, {} identities",
-                snap.paths.len(),
-                snap.identities.len()
-            );
+            if let Err(e) = snapshot_store.borrow_mut().save(&snap) {
+                eprintln!("[rete] failed to save snapshot: {e:?}");
+            } else {
+                eprintln!(
+                    "[rete] snapshot saved: {} paths, {} identities",
+                    snap.paths.len(),
+                    snap.identities.len()
+                );
+            }
+        }
+
+        // Publish stats for monitoring endpoint (only if someone is listening)
+        if stats_tx.receiver_count() > 0 {
+            let stats = core.stats(now);
+            let _ = stats_tx.send(Some(stats));
         }
     }
 

@@ -46,7 +46,7 @@ pub use request::{
 pub use resource::{
     hashmap_max_len, Resource, ResourceFlags, ResourceState, HASHMAP_MAX_LEN_DEFAULT,
 };
-pub use snapshot::{IdentityEntry, PathEntry, Snapshot, SnapshotDetail};
+pub use snapshot::{IdentityEntry, PathEntry, Snapshot, SnapshotDetail, SnapshotStore};
 pub use transport::{
     IngestResult, ReverseEntry, SendError, TickResult, Transport, TransportStats,
     PATH_REQUEST_DEST, RECEIPT_TIMEOUT, REVERSE_TIMEOUT,
