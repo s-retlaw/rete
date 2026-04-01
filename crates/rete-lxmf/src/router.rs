@@ -91,8 +91,8 @@ pub enum LxmfEvent {
 pub struct PropagationRetrievalResult {
     /// Response data (msgpack-encoded count) to send via `send_response()`.
     pub response_data: Vec<u8>,
-    /// Packed message data and hashes to send as Resources.
-    pub messages: Vec<(Vec<u8>, [u8; 32])>,
+    /// Message hashes to send as Resources (data loaded on-demand).
+    pub message_hashes: Vec<[u8; 32]>,
 }
 
 /// State machine for propagation auto-forward.
@@ -663,17 +663,29 @@ impl<S: MessageStore> LxmfRouter<S> {
         })
     }
 
-    /// Retrieve pending messages for a destination from the propagation store.
+    /// Get message hashes for a destination from the propagation store.
     ///
-    /// Returns the packed LXMF message data for each pending message,
-    /// or an empty Vec if propagation is not enabled or no messages are pending.
-    pub fn propagation_retrieve(
-        &self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
-    ) -> Vec<crate::propagation::StoredMessage> {
+    /// Returns hashes without loading message data.
+    pub fn propagation_hashes_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Vec<[u8; 32]> {
         match &self.propagation {
-            Some(prop) => prop.retrieve(dest_hash),
+            Some(prop) => prop.hashes_for(dest_hash),
             None => Vec::new(),
+        }
+    }
+
+    /// Check if a specific message exists in the propagation store.
+    pub fn propagation_has_message(&self, message_hash: &[u8; 32]) -> bool {
+        match &self.propagation {
+            Some(prop) => prop.has_message(message_hash),
+            None => false,
+        }
+    }
+
+    /// Count messages for a destination in the propagation store.
+    pub fn propagation_count_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> usize {
+        match &self.propagation {
+            Some(prop) => prop.count_for(dest_hash),
+            None => 0,
         }
     }
 
@@ -775,10 +787,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Get a mutable reference to a peer by dest hash.
-    pub fn get_peer_mut(
-        &mut self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
-    ) -> Option<&mut LxmPeer> {
+    pub fn get_peer_mut(&mut self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&mut LxmPeer> {
         self.peers.get_mut(dest_hash)
     }
 
@@ -817,12 +826,7 @@ impl<S: MessageStore> LxmfRouter<S> {
             .peers
             .iter()
             .filter(|(_, p)| p.needs_sync(now))
-            .filter(|(dest, _)| {
-                !self
-                    .pending_syncs
-                    .iter()
-                    .any(|s| s.peer_dest() == *dest)
-            })
+            .filter(|(dest, _)| !self.pending_syncs.iter().any(|s| s.peer_dest() == *dest))
             .map(|(dest, _)| *dest)
             .collect();
 
@@ -832,10 +836,8 @@ impl<S: MessageStore> LxmfRouter<S> {
                     p.state = crate::peer::PeerState::LinkEstablishing;
                     p.sync_attempted(now);
                 }
-                self.pending_syncs.push(SyncJob::Linking {
-                    peer_dest,
-                    link_id,
-                });
+                self.pending_syncs
+                    .push(SyncJob::Linking { peer_dest, link_id });
                 packets.push(pkt);
             }
         }
@@ -946,9 +948,10 @@ impl<S: MessageStore> LxmfRouter<S> {
         rng: &mut R,
         now: u64,
     ) -> Vec<OutboundPacket> {
-        let idx = self.pending_syncs.iter().position(
-            |s| matches!(s, SyncJob::OfferSent { link_id: lid, .. } if lid == link_id),
-        );
+        let idx = self
+            .pending_syncs
+            .iter()
+            .position(|s| matches!(s, SyncJob::OfferSent { link_id: lid, .. } if lid == link_id));
 
         let Some(idx) = idx else {
             return Vec::new();
@@ -991,7 +994,7 @@ impl<S: MessageStore> LxmfRouter<S> {
 
         let message_data: Vec<Vec<u8>> = wanted
             .iter()
-            .filter_map(|hash| prop.get_data(hash).map(|d| d.to_vec()))
+            .filter_map(|hash| prop.get_data(hash))
             .collect();
 
         if message_data.is_empty() {
@@ -1102,7 +1105,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         // Check which messages we already have
         let wanted: Vec<[u8; 32]> = offered
             .iter()
-            .filter(|h| prop.get_data(h).is_none())
+            .filter(|h| !prop.has_message(h))
             .copied()
             .collect();
 
@@ -1202,8 +1205,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         now: u64,
     ) -> Option<(OutboundPacket, [u8; TRUNCATED_HASH_LEN])> {
         // Check we have messages
-        let messages = self.propagation_retrieve(dest_hash);
-        if messages.is_empty() {
+        if self.propagation_count_for(dest_hash) == 0 {
             return None;
         }
 
@@ -1252,13 +1254,12 @@ impl<S: MessageStore> LxmfRouter<S> {
         };
 
         // Get all message hashes for this destination
-        let messages = self.propagation_retrieve(&dest_hash);
-        if messages.is_empty() {
+        let message_hashes = self.propagation_hashes_for(&dest_hash);
+        if message_hashes.is_empty() {
             self.pending_forwards.remove(idx);
             return Vec::new();
         }
 
-        let message_hashes: Vec<[u8; 32]> = messages.iter().map(|m| m.message_hash).collect();
         let first_hash = message_hashes[0];
 
         // Transition to Sending state (move the Vec, no clone)
@@ -1350,7 +1351,7 @@ impl<S: MessageStore> LxmfRouter<S> {
             return Vec::new();
         };
 
-        let compressed = bz2_compress(data);
+        let compressed = bz2_compress(&data);
 
         match core.start_resource(link_id, &compressed, rng) {
             Ok(pkt) => vec![pkt],
@@ -1411,20 +1412,15 @@ impl<S: MessageStore> LxmfRouter<S> {
         let mut dest_hash = [0u8; TRUNCATED_HASH_LEN];
         dest_hash.copy_from_slice(&data[..TRUNCATED_HASH_LEN]);
 
-        let stored = self.propagation_retrieve(&dest_hash);
+        let message_hashes = self.propagation_hashes_for(&dest_hash);
 
         // Build response data: msgpack uint32 with the count
-        let count = stored.len();
+        let count = message_hashes.len();
         let response_data = encode_msgpack_uint(count as u32);
-
-        let messages: Vec<(Vec<u8>, [u8; 32])> = stored
-            .into_iter()
-            .map(|m| (m.data, m.message_hash))
-            .collect();
 
         Some(PropagationRetrievalResult {
             response_data,
-            messages,
+            message_hashes,
         })
     }
 
@@ -1441,15 +1437,14 @@ impl<S: MessageStore> LxmfRouter<S> {
     >(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
-        messages: Vec<(Vec<u8>, [u8; 32])>,
+        message_hashes: Vec<[u8; 32]>,
         core: &mut NodeCore<P, A, D, L>,
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
-        if messages.is_empty() {
+        if message_hashes.is_empty() {
             return Vec::new();
         }
 
-        let message_hashes: Vec<[u8; 32]> = messages.iter().map(|(_, h)| *h).collect();
         let first_hash = message_hashes[0];
 
         self.pending_retrievals.push(RetrievalJob::Sending {
@@ -1627,8 +1622,8 @@ fn parse_offer_response(data: &[u8], offered: &[[u8; 32]]) -> Vec<[u8; 32]> {
         return Vec::new();
     }
     match data[0] {
-        0xc2 => Vec::new(),          // false: want none
-        0xc3 => offered.to_vec(),    // true: want all
+        0xc2 => Vec::new(),       // false: want none
+        0xc3 => offered.to_vec(), // true: want all
         _ => {
             // Try to decode as array of hashes
             decode_offer_hashes(data).unwrap_or_default()
@@ -2151,9 +2146,9 @@ mod tests {
 
         router.propagation_deposit(&packed, 1000);
 
-        let msgs = router.propagation_retrieve(&dest);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].dest_hash, dest);
+        let hashes = router.propagation_hashes_for(&dest);
+        assert_eq!(hashes.len(), 1);
+        assert!(router.propagation_has_message(&hashes[0]));
     }
 
     #[test]
@@ -2224,7 +2219,7 @@ mod tests {
         assert!(!router.propagation_enabled());
         assert!(router.propagation_dest_hash().is_none());
         assert!(router.propagation_deposit(&[0u8; 100], 1000).is_none());
-        assert!(router.propagation_retrieve(&[0x42; 16]).is_empty());
+        assert!(router.propagation_hashes_for(&[0x42; 16]).is_empty());
         assert!(!router.propagation_mark_delivered(&[0u8; 32]));
         assert_eq!(router.prune_propagation(1000, 100), 0);
         assert_eq!(router.propagation_message_count(), 0);
@@ -2340,7 +2335,7 @@ mod tests {
 
         assert!(router.propagation_mark_delivered(&msg_hash));
         assert_eq!(router.propagation_message_count(), 0);
-        assert!(router.propagation_retrieve(&dest).is_empty());
+        assert!(router.propagation_hashes_for(&dest).is_empty());
     }
 
     // -------------------------------------------------------------------
@@ -2678,16 +2673,16 @@ mod tests {
         assert!(result.is_some());
 
         let result = result.unwrap();
-        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.message_hashes.len(), 2);
 
         // response_data should encode the count 2
         // msgpack positive fixint for 2 is just [0x02]
         assert_eq!(result.response_data, vec![0x02]);
 
-        // Each message should have non-empty data and a non-zero hash
-        for (data, hash) in &result.messages {
-            assert!(!data.is_empty());
+        // Each hash should be non-zero and resolvable via get_data
+        for hash in &result.message_hashes {
             assert_ne!(hash, &[0u8; 32]);
+            assert!(router.propagation_has_message(hash));
         }
     }
 
@@ -2703,7 +2698,7 @@ mod tests {
         assert!(result.is_some());
 
         let result = result.unwrap();
-        assert_eq!(result.messages.len(), 0);
+        assert_eq!(result.message_hashes.len(), 0);
         assert_eq!(result.response_data, vec![0x00]); // count = 0
     }
 
@@ -2761,11 +2756,11 @@ mod tests {
         let result = router
             .handle_propagation_request(&path_hash, &dest)
             .unwrap();
-        let messages = result.messages;
+        let message_hashes = result.message_hashes;
 
         // Start retrieval send
         let link_id = [0xAA; 16];
-        let _pkts = router.start_retrieval_send(&link_id, messages, &mut core, &mut rng);
+        let _pkts = router.start_retrieval_send(&link_id, message_hashes, &mut core, &mut rng);
 
         assert!(router.has_retrieval_job_for_link(&link_id));
 
@@ -2803,11 +2798,11 @@ mod tests {
         let result = router
             .handle_propagation_request(&path_hash, &dest)
             .unwrap();
-        let messages = result.messages;
-        assert_eq!(messages.len(), 2);
+        let message_hashes = result.message_hashes;
+        assert_eq!(message_hashes.len(), 2);
 
         let link_id = [0xAA; 16];
-        let _pkts = router.start_retrieval_send(&link_id, messages, &mut core, &mut rng);
+        let _pkts = router.start_retrieval_send(&link_id, message_hashes, &mut core, &mut rng);
 
         // Complete first resource
         router.advance_retrieval_on_resource_complete(&link_id, &[0xBB; 16], &mut core, &mut rng);
@@ -2835,10 +2830,10 @@ mod tests {
         let result = router
             .handle_propagation_request(&path_hash, &dest)
             .unwrap();
-        let messages = result.messages;
+        let message_hashes = result.message_hashes;
 
         let link_id = [0xAA; 16];
-        let _pkts = router.start_retrieval_send(&link_id, messages, &mut core, &mut rng);
+        let _pkts = router.start_retrieval_send(&link_id, message_hashes, &mut core, &mut rng);
         assert!(router.has_retrieval_job_for_link(&link_id));
 
         // Simulate link closed
@@ -2883,7 +2878,7 @@ mod tests {
                 assert_eq!(lid, link_id);
                 assert_eq!(rid, request_id);
                 assert_eq!(dh, dest);
-                assert_eq!(result.messages.len(), 1);
+                assert_eq!(result.message_hashes.len(), 1);
             }
             other => panic!("expected PropagationRetrievalRequest, got {:?}", other),
         }
@@ -3150,7 +3145,9 @@ mod tests {
         let offer_data = encode_offer_hashes(&hashes);
         let path_hash = Router::offer_path_hash();
 
-        let response = router.handle_offer_request(&path_hash, &offer_data).unwrap();
+        let response = router
+            .handle_offer_request(&path_hash, &offer_data)
+            .unwrap();
         assert_eq!(response, vec![0xc3]); // true = want all
     }
 
@@ -3163,21 +3160,35 @@ mod tests {
         // Deposit messages first
         let data1 = make_fake_lxmf_data([0x42; 16], 0xAA);
         let data2 = make_fake_lxmf_data([0x42; 16], 0xBB);
-        let (_, h1) = router.propagation_deposit(&data1, 1000).map(|e| match e {
-            LxmfEvent::PropagationDeposit { dest_hash, message_hash } => (dest_hash, message_hash),
-            _ => panic!("expected deposit"),
-        }).unwrap();
-        let (_, h2) = router.propagation_deposit(&data2, 1000).map(|e| match e {
-            LxmfEvent::PropagationDeposit { dest_hash, message_hash } => (dest_hash, message_hash),
-            _ => panic!("expected deposit"),
-        }).unwrap();
+        let (_, h1) = router
+            .propagation_deposit(&data1, 1000)
+            .map(|e| match e {
+                LxmfEvent::PropagationDeposit {
+                    dest_hash,
+                    message_hash,
+                } => (dest_hash, message_hash),
+                _ => panic!("expected deposit"),
+            })
+            .unwrap();
+        let (_, h2) = router
+            .propagation_deposit(&data2, 1000)
+            .map(|e| match e {
+                LxmfEvent::PropagationDeposit {
+                    dest_hash,
+                    message_hash,
+                } => (dest_hash, message_hash),
+                _ => panic!("expected deposit"),
+            })
+            .unwrap();
 
         // Offer those same hashes — we already have them
         let hashes = vec![h1, h2];
         let offer_data = encode_offer_hashes(&hashes);
         let path_hash = Router::offer_path_hash();
 
-        let response = router.handle_offer_request(&path_hash, &offer_data).unwrap();
+        let response = router
+            .handle_offer_request(&path_hash, &offer_data)
+            .unwrap();
         assert_eq!(response, vec![0xc2]); // false = want none
     }
 
@@ -3189,10 +3200,16 @@ mod tests {
 
         // Deposit one message
         let data1 = make_fake_lxmf_data([0x42; 16], 0xAA);
-        let (_, h1) = router.propagation_deposit(&data1, 1000).map(|e| match e {
-            LxmfEvent::PropagationDeposit { dest_hash, message_hash } => (dest_hash, message_hash),
-            _ => panic!("expected deposit"),
-        }).unwrap();
+        let (_, h1) = router
+            .propagation_deposit(&data1, 1000)
+            .map(|e| match e {
+                LxmfEvent::PropagationDeposit {
+                    dest_hash,
+                    message_hash,
+                } => (dest_hash, message_hash),
+                _ => panic!("expected deposit"),
+            })
+            .unwrap();
 
         // Offer h1 (which we have) and a new hash (which we don't)
         let h2 = [0xFF; 32];
@@ -3200,7 +3217,9 @@ mod tests {
         let offer_data = encode_offer_hashes(&hashes);
         let path_hash = Router::offer_path_hash();
 
-        let response = router.handle_offer_request(&path_hash, &offer_data).unwrap();
+        let response = router
+            .handle_offer_request(&path_hash, &offer_data)
+            .unwrap();
         // Should be an array with just h2
         let wanted = decode_offer_hashes(&response).unwrap();
         assert_eq!(wanted, vec![h2]);
@@ -3233,10 +3252,9 @@ mod tests {
         router.peer(peer_dest, [0x33; TRUNCATED_HASH_LEN]);
 
         // Simulate an active sync job
-        router.pending_syncs.push(SyncJob::Linking {
-            peer_dest,
-            link_id,
-        });
+        router
+            .pending_syncs
+            .push(SyncJob::Linking { peer_dest, link_id });
 
         // Close the link
         router.cleanup_sync_jobs_for_link(&link_id);

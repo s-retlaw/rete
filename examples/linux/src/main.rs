@@ -15,6 +15,8 @@
 //!   cargo run -p rete-example-linux -- --listen 0.0.0.0:4242 --transport
 //!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242 --monitoring 127.0.0.1:9100
 
+mod file_store;
+
 use rete_core::Identity;
 use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
 use rete_iface_serial::SerialInterface;
@@ -766,7 +768,8 @@ async fn main() {
     }
 
     // Register LXMF delivery destination
-    let mut lxmf_router = LxmfRouter::register(&mut node.core);
+    let mut lxmf_router =
+        LxmfRouter::<file_store::AnyMessageStore>::register_with_store(&mut node.core);
 
     // Parse --lxmf-name <display_name>
     let lxmf_name = args
@@ -785,7 +788,25 @@ async fn main() {
     // --propagation: enable LXMF propagation node (store-and-forward)
     let propagation_enabled = args.iter().any(|a| a == "--propagation");
     if propagation_enabled {
-        lxmf_router.register_propagation(&mut node.core);
+        let messages_dir = data_dir.join("messages");
+        match file_store::FileMessageStore::open(messages_dir.clone()) {
+            Ok(store) => {
+                lxmf_router.register_propagation_with_store(
+                    &mut node.core,
+                    file_store::AnyMessageStore::File(store),
+                );
+                eprintln!(
+                    "[rete] propagation using file-backed store in {}",
+                    messages_dir.display()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[rete] WARNING: failed to open file store: {e}, falling back to in-memory"
+                );
+                lxmf_router.register_propagation(&mut node.core);
+            }
+        }
         eprintln!(
             "[rete] LXMF propagation hash: {}",
             hex::encode(lxmf_router.propagation_dest_hash().unwrap())
@@ -1294,7 +1315,7 @@ fn format_prometheus(stats: &rete_stack::NodeStats) -> String {
 
 fn on_event(
     event: NodeEvent,
-    lxmf_router: &RefCell<LxmfRouter>,
+    lxmf_router: &RefCell<LxmfRouter<file_store::AnyMessageStore>>,
     snapshot_store: &RefCell<JsonFileStore>,
     stats_tx: &tokio::sync::watch::Sender<Option<rete_stack::NodeStats>>,
     core: &mut rete_stack::HostedNodeCore,
@@ -1334,9 +1355,7 @@ fn on_event(
         }
 
         // Check peer syncs
-        let sync_pkts = lxmf_router
-            .borrow_mut()
-            .check_peer_syncs(core, rng, now);
+        let sync_pkts = lxmf_router.borrow_mut().check_peer_syncs(core, rng, now);
         if !sync_pkts.is_empty() {
             eprintln!("[rete] peer sync: initiated {} link(s)", sync_pkts.len());
             return sync_pkts;
@@ -1394,7 +1413,7 @@ fn on_event(
             dest_hash,
             result,
         } => {
-            let count = result.messages.len();
+            let count = result.message_hashes.len();
             eprintln!(
                 "[rete] PROP_RETRIEVAL_REQUEST link={} dest={} count={}",
                 hex::encode(link_id),
@@ -1418,11 +1437,11 @@ fn on_event(
             }
 
             // Start sending messages as Resources via retrieval job
-            if !result.messages.is_empty() {
-                let msgs = result.messages;
+            if !result.message_hashes.is_empty() {
+                let hashes = result.message_hashes;
                 let retrieval_pkts = lxmf_router
                     .borrow_mut()
-                    .start_retrieval_send(&link_id, msgs, core, rng);
+                    .start_retrieval_send(&link_id, hashes, core, rng);
                 packets.extend(retrieval_pkts);
             }
 
@@ -1529,14 +1548,14 @@ fn on_event(
                     }
 
                     // Try sync jobs
-                    let pkts = lxmf_router
-                        .borrow_mut()
-                        .advance_sync_on_link_established(link_id, core, rng, rete_tokio::current_time_secs());
+                    let pkts = lxmf_router.borrow_mut().advance_sync_on_link_established(
+                        link_id,
+                        core,
+                        rng,
+                        rete_tokio::current_time_secs(),
+                    );
                     if !pkts.is_empty() {
-                        eprintln!(
-                            "[rete] PEER_SYNC_IDENTIFYING link={}",
-                            hex::encode(link_id),
-                        );
+                        eprintln!("[rete] PEER_SYNC_IDENTIFYING link={}", hex::encode(link_id),);
                         on_node_event(event);
                         return pkts;
                     }
@@ -1617,9 +1636,7 @@ fn on_event(
 
                     // Try depositing as inbound sync resource
                     if lxmf_router.borrow().has_sync_job_for_link(link_id) {
-                        let deposited = lxmf_router
-                            .borrow_mut()
-                            .deposit_sync_resource(data, now);
+                        let deposited = lxmf_router.borrow_mut().deposit_sync_resource(data, now);
                         if !deposited.is_empty() {
                             for (dest, hash) in &deposited {
                                 eprintln!(
@@ -1642,9 +1659,7 @@ fn on_event(
                     lxmf_router
                         .borrow_mut()
                         .cleanup_forward_jobs_for_link(link_id);
-                    lxmf_router
-                        .borrow_mut()
-                        .cleanup_sync_jobs_for_link(link_id);
+                    lxmf_router.borrow_mut().cleanup_sync_jobs_for_link(link_id);
                 }
                 _ => {}
             }
@@ -1905,7 +1920,7 @@ fn on_node_event(event: NodeEvent) {
 fn handle_lxmf_command(
     cmd: NodeCommand,
     core: &mut rete_stack::HostedNodeCore,
-    lxmf_router: &RefCell<LxmfRouter>,
+    lxmf_router: &RefCell<LxmfRouter<file_store::AnyMessageStore>>,
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
 ) -> Option<Vec<OutboundPacket>> {
     let NodeCommand::AppCommand {
