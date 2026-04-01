@@ -12,7 +12,7 @@ use rete_transport::{IngestResult, PATH_REQUEST_DEST};
 use crate::destination::DestinationType;
 use crate::{NodeEvent, ProofStrategy};
 
-use super::{IngestOutcome, NodeCore, OutboundPacket, PacketRouting, RequestPolicy, SplitRecvEntry};
+use super::{IngestOutcome, NodeCore, OutboundPacket, PacketRouting, SplitRecvEntry};
 
 impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
     /// Process an inbound raw packet and return the outcome.
@@ -268,7 +268,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                     if let Some(handler) =
                         self.find_request_handler(&dest_hash, &path_hash)
                     {
-                        if handler.policy != RequestPolicy::AllowNone {
+                        if handler.policy.allows(remote_identity.as_ref()) {
                             let ctx = super::RequestContext {
                                 destination_hash: dest_hash,
                                 path: &handler.path,

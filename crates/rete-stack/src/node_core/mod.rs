@@ -55,12 +55,29 @@ pub struct RequestContext<'a> {
 pub type RequestHandlerFn = fn(&RequestContext<'_>, &[u8]) -> Option<Vec<u8>>;
 
 /// Request access policy (matches Python ALLOW_NONE/ALL/LIST).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestPolicy {
     /// Reject all requests (default).
     AllowNone,
     /// Allow requests from any identity.
     AllowAll,
+    /// Allow requests only from the listed identity hashes.
+    /// Requires the remote peer to have sent LINKIDENTIFY.
+    AllowList(Vec<[u8; TRUNCATED_HASH_LEN]>),
+}
+
+impl RequestPolicy {
+    /// Check whether a request from the given identity is allowed.
+    pub fn allows(&self, identity: Option<&[u8; TRUNCATED_HASH_LEN]>) -> bool {
+        match self {
+            RequestPolicy::AllowNone => false,
+            RequestPolicy::AllowAll => true,
+            RequestPolicy::AllowList(list) => match identity {
+                Some(id) => list.iter().any(|h| h == id),
+                None => false,
+            },
+        }
+    }
 }
 
 /// A registered request handler entry.
@@ -576,6 +593,7 @@ pub type EmbeddedNodeCore = NodeCore<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use rete_core::{HeaderType, Packet, PacketType, TRANSPORT_TYPE_TRANSPORT};
 
     type TestNodeCore = NodeCore<64, 16, 128, 4>;
@@ -2350,6 +2368,105 @@ mod tests {
         assert_eq!(
             resp_link.identified_identity_hash(),
             Some(&expected_hash),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4B: AllowList request policy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn allow_list_matching_identity_allowed() {
+        let (init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Identify the initiator on the link
+        let identify_pkt = init
+            .link_identify(&link_id, &mut rng)
+            .expect("should identify");
+        resp.handle_ingest(&identify_pkt.data, 200, 0, &mut rng);
+
+        // Register handler with AllowList containing the initiator's identity
+        let dh = *resp.dest_hash();
+        resp.register_request_handler(
+            &dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |_ctx, data| Some(data.to_vec()),
+                policy: RequestPolicy::AllowList(vec![init.identity.hash()]),
+            },
+        );
+
+        let (req_pkt, _req_id) = init
+            .send_request(&link_id, "/test/echo", b"ping", 201, &mut rng)
+            .expect("should send request");
+
+        let outcome = resp.handle_ingest(&req_pkt.data, 202, 0, &mut rng);
+        assert!(
+            !outcome.packets.is_empty(),
+            "matching identity should be allowed — response expected"
+        );
+    }
+
+    #[test]
+    fn allow_list_non_matching_identity_rejected() {
+        let (init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Identify the initiator on the link
+        let identify_pkt = init
+            .link_identify(&link_id, &mut rng)
+            .expect("should identify");
+        resp.handle_ingest(&identify_pkt.data, 200, 0, &mut rng);
+
+        // Register handler with AllowList containing a *different* identity hash
+        let dh = *resp.dest_hash();
+        let wrong_hash = [0xAB; 16];
+        resp.register_request_handler(
+            &dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |_ctx, data| Some(data.to_vec()),
+                policy: RequestPolicy::AllowList(vec![wrong_hash]),
+            },
+        );
+
+        let (req_pkt, _req_id) = init
+            .send_request(&link_id, "/test/echo", b"ping", 201, &mut rng)
+            .expect("should send request");
+
+        let outcome = resp.handle_ingest(&req_pkt.data, 202, 0, &mut rng);
+        assert!(
+            outcome.packets.is_empty(),
+            "non-matching identity should be rejected — no response"
+        );
+    }
+
+    #[test]
+    fn allow_list_unidentified_link_rejected() {
+        let (init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Do NOT call link_identify — link stays unidentified
+
+        let dh = *resp.dest_hash();
+        resp.register_request_handler(
+            &dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |_ctx, data| Some(data.to_vec()),
+                policy: RequestPolicy::AllowList(vec![init.identity.hash()]),
+            },
+        );
+
+        let (req_pkt, _req_id) = init
+            .send_request(&link_id, "/test/echo", b"ping", 201, &mut rng)
+            .expect("should send request");
+
+        let outcome = resp.handle_ingest(&req_pkt.data, 202, 0, &mut rng);
+        assert!(
+            outcome.packets.is_empty(),
+            "unidentified link should be rejected — no response"
         );
     }
 }

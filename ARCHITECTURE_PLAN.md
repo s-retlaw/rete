@@ -383,7 +383,7 @@ pub trait RatchetStore {
 | 3C | Persist link identity | **Done** |
 | 3D | Replace unwrap/expect | **Done** |
 | 4A | RequestContext + handler signature | **Done** |
-| 4B | ALLOW_LIST policy | Not started |
+| 4B | ALLOW_LIST policy | **Done** |
 | 5A | rete-lxmf-core crate | Not started |
 | 5B | Remove std from router | Not started |
 | 6 | ResponseCompressionPolicy | Not started |
