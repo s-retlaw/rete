@@ -9,6 +9,7 @@ use rete_core::{
 };
 use rete_transport::{IngestResult, PATH_REQUEST_DEST};
 
+use crate::destination::DestinationType;
 use crate::{NodeEvent, ProofStrategy};
 
 use super::{IngestOutcome, NodeCore, OutboundPacket, PacketRouting, RequestPolicy, SplitRecvEntry};
@@ -103,17 +104,28 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 payload,
                 packet_hash,
             } => {
-                // Transport already verified this is one of our local destinations.
-                // Single lookup to get the proof strategy.
-                let proof_strategy = self
-                    .get_destination(&dest_hash)
-                    .map(|d| d.proof_strategy)
-                    .unwrap_or(ProofStrategy::ProveNone);
+                let dest = match self.get_destination(&dest_hash) {
+                    Some(d) => d,
+                    None => return IngestOutcome::empty(),
+                };
+                let proof_strategy = dest.proof_strategy;
 
                 let mut dec_buf = [0u8; MTU];
-                let decrypted = match self.identity.decrypt(payload, &mut dec_buf) {
-                    Ok(n) => dec_buf[..n].to_vec(),
-                    Err(_) => payload.to_vec(),
+                let decrypted = match dest.dest_type {
+                    DestinationType::Plain => payload.to_vec(),
+                    DestinationType::Single => {
+                        match self.identity.decrypt(payload, &mut dec_buf) {
+                            Ok(n) => dec_buf[..n].to_vec(),
+                            Err(_) => return IngestOutcome::empty(),
+                        }
+                    }
+                    DestinationType::Group => {
+                        match dest.decrypt(payload, &mut dec_buf) {
+                            Ok(n) => dec_buf[..n].to_vec(),
+                            Err(_) => return IngestOutcome::empty(),
+                        }
+                    }
+                    DestinationType::Link => return IngestOutcome::empty(),
                 };
 
                 let mut packets = Vec::new();

@@ -378,7 +378,7 @@ pub trait RatchetStore {
 | 1B | Split node_core.rs | **Done** |
 | 1C | Split router.rs | **Done** |
 | 2 | Msgpack codec consolidation | **Done** |
-| 3A | Fix decrypt fallback | Not started |
+| 3A | Fix decrypt fallback | **Done** |
 | 3B | Fix request handler dispatch | Not started |
 | 3C | Persist link identity | Not started |
 | 3D | Replace unwrap/expect | Not started |

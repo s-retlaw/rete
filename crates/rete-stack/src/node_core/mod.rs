@@ -1910,4 +1910,142 @@ mod tests {
             other => panic!("C expected ChannelMessages for reply, got {:?}", other),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Decrypt dispatch tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ingest_single_decrypt_failure_drops_packet() {
+        let mut core = make_core(b"single-fail-test");
+        let mut rng = rand::thread_rng();
+
+        // Build a DATA packet with garbage ciphertext (not properly encrypted)
+        let garbage = [0xDE; 128];
+        let mut pkt_buf = [0u8; MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Single)
+            .destination_hash(core.dest_hash())
+            .context(0x00)
+            .payload(&garbage)
+            .build()
+            .unwrap();
+
+        let outcome = core.handle_ingest(&pkt_buf[..pkt_len], 1000, 0, &mut rng);
+        // Must be dropped — not delivered as plaintext
+        assert!(
+            outcome.event.is_none(),
+            "Single decrypt failure must drop packet, not deliver garbage as plaintext"
+        );
+    }
+
+    #[test]
+    fn test_ingest_plain_destination_passthrough() {
+        let mut core = make_core(b"plain-pass-test");
+        let mut rng = rand::thread_rng();
+
+        let plain_hash = core.register_destination_typed(
+            "plainapp",
+            &["test"],
+            DestinationType::Plain,
+            Direction::In,
+        );
+
+        let raw_payload = b"unencrypted broadcast data";
+        let mut pkt_buf = [0u8; MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Plain)
+            .destination_hash(&plain_hash)
+            .context(0x00)
+            .payload(raw_payload)
+            .build()
+            .unwrap();
+
+        let outcome = core.handle_ingest(&pkt_buf[..pkt_len], 1000, 0, &mut rng);
+        match outcome.event {
+            Some(NodeEvent::DataReceived { dest_hash, payload }) => {
+                assert_eq!(dest_hash, plain_hash);
+                assert_eq!(payload, raw_payload);
+            }
+            other => panic!("expected DataReceived for Plain dest, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ingest_group_destination_decrypts() {
+        let mut core = make_core(b"group-dec-test");
+        let mut rng = rand::thread_rng();
+
+        let group_hash = core.register_destination_typed(
+            "groupapp",
+            &["test"],
+            DestinationType::Group,
+            Direction::In,
+        );
+        core.get_destination_mut(&group_hash)
+            .unwrap()
+            .create_group_keys(&mut rng)
+            .unwrap();
+
+        // Encrypt with the group destination's token
+        let plaintext = b"group secret message";
+        let mut ct_buf = [0u8; MTU];
+        let ct_len = core
+            .get_destination(&group_hash)
+            .unwrap()
+            .encrypt(plaintext, &mut rng, &mut ct_buf)
+            .unwrap();
+
+        let mut pkt_buf = [0u8; MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Group)
+            .destination_hash(&group_hash)
+            .context(0x00)
+            .payload(&ct_buf[..ct_len])
+            .build()
+            .unwrap();
+
+        let outcome = core.handle_ingest(&pkt_buf[..pkt_len], 1000, 0, &mut rng);
+        match outcome.event {
+            Some(NodeEvent::DataReceived { dest_hash, payload }) => {
+                assert_eq!(dest_hash, group_hash);
+                assert_eq!(payload, plaintext);
+            }
+            other => panic!("expected DataReceived for Group dest, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ingest_group_decrypt_failure_drops_packet() {
+        let mut core = make_core(b"group-fail-test");
+        let mut rng = rand::thread_rng();
+
+        // Register Group destination but do NOT set up group keys
+        let group_hash = core.register_destination_typed(
+            "groupapp",
+            &["nokeys"],
+            DestinationType::Group,
+            Direction::In,
+        );
+
+        let garbage = [0xAB; 128];
+        let mut pkt_buf = [0u8; MTU];
+        let pkt_len = PacketBuilder::new(&mut pkt_buf)
+            .packet_type(PacketType::Data)
+            .dest_type(DestType::Group)
+            .destination_hash(&group_hash)
+            .context(0x00)
+            .payload(&garbage)
+            .build()
+            .unwrap();
+
+        let outcome = core.handle_ingest(&pkt_buf[..pkt_len], 1000, 0, &mut rng);
+        assert!(
+            outcome.event.is_none(),
+            "Group decrypt failure must drop packet, not deliver garbage"
+        );
+    }
 }
