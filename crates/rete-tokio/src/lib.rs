@@ -127,11 +127,31 @@ pub struct TokioNode {
 
 impl TokioNode {
     /// Create a new node with the given identity and destination.
-    pub fn new(identity: Identity, app_name: &str, aspects: &[&str]) -> Self {
-        TokioNode {
-            core: HostedNodeCore::new(identity, app_name, aspects),
+    ///
+    /// **Note:** `HostedNodeCore` is ~600 KB. Prefer [`new_boxed`](Self::new_boxed)
+    /// in contexts where stack space is limited.
+    pub fn new(
+        identity: Identity,
+        app_name: &str,
+        aspects: &[&str],
+    ) -> Result<Self, rete_core::Error> {
+        Ok(TokioNode {
+            core: HostedNodeCore::new(identity, app_name, aspects)?,
             initial_send: None,
-        }
+        })
+    }
+
+    /// Heap-allocate a new node, avoiding stack overflow from the large
+    /// `HostedNodeCore` (~600 KB).
+    pub fn new_boxed(
+        identity: Identity,
+        app_name: &str,
+        aspects: &[&str],
+    ) -> Result<Box<Self>, rete_core::Error> {
+        Ok(Box::new(TokioNode {
+            core: HostedNodeCore::new(identity, app_name, aspects)?,
+            initial_send: None,
+        }))
     }
 
     /// Queue a data message to send immediately after the initial announce.
@@ -140,13 +160,21 @@ impl TokioNode {
     }
 
     /// Pre-register a peer's identity for sending DATA without waiting for an announce.
-    pub fn register_peer(&mut self, peer: &Identity, app_name: &str, aspects: &[&str]) {
+    pub fn register_peer(
+        &mut self,
+        peer: &Identity,
+        app_name: &str,
+        aspects: &[&str],
+    ) -> Result<(), rete_core::Error> {
         let now = current_time_secs();
-        self.core.register_peer(peer, app_name, aspects, now);
+        self.core.register_peer(peer, app_name, aspects, now)
     }
 
     /// Build and return a raw announce packet for this node.
-    pub fn build_announce(&self, app_data: Option<&[u8]>) -> Vec<u8> {
+    pub fn build_announce(
+        &self,
+        app_data: Option<&[u8]>,
+    ) -> Result<Vec<u8>, rete_core::Error> {
         let mut rng = rand::thread_rng();
         let now = current_time_secs();
         self.core.build_announce(app_data, &mut rng, now)

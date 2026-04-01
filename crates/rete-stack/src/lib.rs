@@ -247,7 +247,7 @@ pub use destination::{Destination, DestinationType, Direction};
 #[cfg(feature = "alloc")]
 pub use node_core::{
     EmbeddedNodeCore, HostedNodeCore, IngestOutcome, NodeCore, NodeStats, OutboundPacket,
-    PacketRouting, ProveAppFn, RequestHandler, RequestHandlerFn, RequestPolicy,
+    PacketRouting, ProveAppFn, RequestContext, RequestHandler, RequestHandlerFn, RequestPolicy,
 };
 
 #[cfg(feature = "alloc")]

@@ -60,7 +60,8 @@ pub fn stamp_workblock(material: &[u8], expand_rounds: usize) -> Vec<u8> {
         let hk = Hkdf::<Sha256>::new(Some(&salt), material);
         let mut block = [0u8; 256];
         // hkdf expand can produce up to 255*32 = 8160 bytes, 256 is fine
-        hk.expand(b"", &mut block).unwrap();
+        hk.expand(b"", &mut block)
+            .expect("256 < HKDF max output 8160");
         workblock.extend_from_slice(&block);
     }
 

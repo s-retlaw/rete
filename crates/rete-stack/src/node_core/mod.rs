@@ -30,16 +30,29 @@ pub type TransformFn = fn(&[u8]) -> Option<Vec<u8>>;
 /// Return `true` to generate a proof, `false` to skip.
 pub type ProveAppFn = fn(&[u8; TRUNCATED_HASH_LEN], &[u8; 32], &[u8]) -> bool;
 
+/// Metadata passed to request handlers about the incoming request.
+pub struct RequestContext<'a> {
+    /// Destination hash the request arrived on.
+    pub destination_hash: [u8; TRUNCATED_HASH_LEN],
+    /// The request path string.
+    pub path: &'a str,
+    /// SHA-256(path)[0:16].
+    pub path_hash: [u8; TRUNCATED_HASH_LEN],
+    /// Link ID the request arrived on.
+    pub link_id: [u8; TRUNCATED_HASH_LEN],
+    /// Request ID (truncated packet hash).
+    pub request_id: [u8; TRUNCATED_HASH_LEN],
+    /// Timestamp from the wire format (seconds since epoch).
+    pub requested_at: f64,
+    /// Identity hash of the remote peer, if they sent LINKIDENTIFY.
+    pub remote_identity: Option<[u8; TRUNCATED_HASH_LEN]>,
+}
+
 /// Callback type for request handlers.
 ///
-/// Arguments: (path, data, request_id, link_id)
+/// Arguments: (context, request_data)
 /// Return `Some(response_data)` to send a response, or `None` to send no response.
-pub type RequestHandlerFn = fn(
-    &str,                      // path
-    &[u8],                     // request data
-    &[u8; TRUNCATED_HASH_LEN], // request_id
-    &[u8; TRUNCATED_HASH_LEN], // link_id
-) -> Option<Vec<u8>>;
+pub type RequestHandlerFn = fn(&RequestContext<'_>, &[u8]) -> Option<Vec<u8>>;
 
 /// Request access policy (matches Python ALLOW_NONE/ALL/LIST).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,12 +199,11 @@ pub(super) fn compute_dest_hashes(
     identity: &Identity,
     app_name: &str,
     aspects: &[&str],
-) -> ([u8; TRUNCATED_HASH_LEN], [u8; rete_core::NAME_HASH_LEN]) {
+) -> Result<([u8; TRUNCATED_HASH_LEN], [u8; rete_core::NAME_HASH_LEN]), rete_core::Error> {
     use sha2::{Digest, Sha256};
 
     let mut name_buf = [0u8; 128];
-    let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-        .expect("app_name + aspects must fit in 128 bytes");
+    let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
     let id_hash = identity.hash();
     let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
 
@@ -199,13 +211,17 @@ pub(super) fn compute_dest_hashes(
     let mut name_hash = [0u8; rete_core::NAME_HASH_LEN];
     name_hash.copy_from_slice(&name_hash_full[..rete_core::NAME_HASH_LEN]);
 
-    (dest_hash, name_hash)
+    Ok((dest_hash, name_hash))
 }
 
 impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
     /// Create a new NodeCore with the given identity and destination.
-    pub fn new(identity: Identity, app_name: &str, aspects: &[&str]) -> Self {
-        let (dest_hash, name_hash) = compute_dest_hashes(&identity, app_name, aspects);
+    pub fn new(
+        identity: Identity,
+        app_name: &str,
+        aspects: &[&str],
+    ) -> Result<Self, rete_core::Error> {
+        let (dest_hash, name_hash) = compute_dest_hashes(&identity, app_name, aspects)?;
 
         let primary_dest = Destination::from_hashes(
             DestinationType::Single,
@@ -219,7 +235,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         let mut transport = Transport::new();
         transport.add_local_destination(dest_hash);
 
-        NodeCore {
+        Ok(NodeCore {
             identity,
             transport,
             primary_dest,
@@ -230,7 +246,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             packet_log_fn: None,
             prove_app_fn: None,
             split_recv_buf: Vec::new(),
-        }
+        })
     }
 
     /// Set the ProveApp callback for per-packet proof decisions.
@@ -566,7 +582,15 @@ mod tests {
 
     fn make_core(seed: &[u8]) -> TestNodeCore {
         let identity = Identity::from_seed(seed).unwrap();
-        TestNodeCore::new(identity, "testapp", &["aspect1"])
+        TestNodeCore::new(identity, "testapp", &["aspect1"]).unwrap()
+    }
+
+    #[test]
+    fn node_core_new_oversized_name_returns_error() {
+        let identity = Identity::from_seed(b"oversized-test").unwrap();
+        let long_name = "a".repeat(130);
+        let result = TestNodeCore::new(identity, &long_name, &[]);
+        assert!(matches!(result, Err(rete_core::Error::BufferTooSmall)));
     }
 
     #[test]
@@ -582,7 +606,7 @@ mod tests {
     fn node_core_build_announce_valid() {
         let core = make_core(b"announce-test");
         let mut rng = rand::thread_rng();
-        let raw = core.build_announce(None, &mut rng, 1000);
+        let raw = core.build_announce(None, &mut rng, 1000).unwrap();
         let pkt = Packet::parse(&raw).unwrap();
         assert_eq!(pkt.packet_type, PacketType::Announce);
         assert_eq!(pkt.destination_hash, core.dest_hash());
@@ -596,7 +620,7 @@ mod tests {
 
         // Register receiver's identity with sender
         let receiver_id = Identity::from_seed(b"receiver-node").unwrap();
-        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100);
+        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100).unwrap();
 
         let pkt = sender
             .build_data_packet(receiver.dest_hash(), b"hello", &mut rng, 100)
@@ -622,7 +646,7 @@ mod tests {
         // Build an announce from a peer
         let _peer = Identity::from_seed(b"peer-announce").unwrap();
         let peer_core = make_core(b"peer-announce");
-        let announce = peer_core.build_announce(None, &mut rng, 1000);
+        let announce = peer_core.build_announce(None, &mut rng, 1000).unwrap();
 
         let outcome = core.handle_ingest(&announce, 1000, 0, &mut rng);
         assert!(matches!(
@@ -760,7 +784,7 @@ mod tests {
         let expanded = rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
         let peer_dest = rete_core::destination_hash(expanded, Some(&peer.hash()));
 
-        core.register_peer(&peer, "testapp", &["aspect1"], 100);
+        core.register_peer(&peer, "testapp", &["aspect1"], 100).unwrap();
 
         // Should be able to build data packet to registered peer
         let pkt = core.build_data_packet(&peer_dest, b"hello peer", &mut rng, 100);
@@ -782,7 +806,7 @@ mod tests {
         // Initiator — register responder's identity so proof can be verified
         let mut init = make_core(b"init-core");
         let resp_id = Identity::from_seed(b"resp-core").unwrap();
-        init.register_peer(&resp_id, "testapp", &["aspect1"], 100);
+        init.register_peer(&resp_id, "testapp", &["aspect1"], 100).unwrap();
 
         // Initiator sends LINKREQUEST
         let (outbound, link_id) = init
@@ -840,7 +864,7 @@ mod tests {
         let mut resp = make_core(b"lrrtt-resp");
         let mut init = make_core(b"lrrtt-init");
         let resp_id = Identity::from_seed(b"lrrtt-resp").unwrap();
-        init.register_peer(&resp_id, "testapp", &["aspect1"], 100);
+        init.register_peer(&resp_id, "testapp", &["aspect1"], 100).unwrap();
 
         let (outbound, _link_id) = init
             .initiate_link(*resp.dest_hash(), 100, &mut rng)
@@ -1043,7 +1067,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let receiver_id = Identity::from_seed(b"receipt-receiver").unwrap();
-        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100);
+        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100).unwrap();
 
         assert_eq!(sender.transport.receipt_count(), 0);
         let _pkt = sender
@@ -1061,7 +1085,7 @@ mod tests {
 
         // Register each other
         let receiver_id = Identity::from_seed(b"proof-fire-receiver").unwrap();
-        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100);
+        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100).unwrap();
 
         // Sender builds data → receipt auto-registered
         let pkt = sender
@@ -1097,7 +1121,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let receiver_id = Identity::from_seed(b"receipt-expire-recv").unwrap();
-        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100);
+        sender.register_peer(&receiver_id, "testapp", &["aspect1"], 100).unwrap();
 
         let _pkt = sender
             .build_data_packet(receiver.dest_hash(), b"hello", &mut rng, 100)
@@ -1366,7 +1390,7 @@ mod tests {
     #[test]
     fn test_register_destination_adds_to_transport() {
         let mut core = make_core(b"register-dest-test");
-        let hash = core.register_destination("lxmf", &["delivery"]);
+        let hash = core.register_destination("lxmf", &["delivery"]).unwrap();
         // Should be a valid 16-byte hash, different from primary
         assert_ne!(hash, *core.dest_hash());
         // Transport should have it as local
@@ -1377,7 +1401,7 @@ mod tests {
     fn test_register_destination_returns_correct_dest_hash() {
         let core_seed = b"dest-hash-verify";
         let mut core = make_core(core_seed);
-        let hash = core.register_destination("lxmf", &["delivery"]);
+        let hash = core.register_destination("lxmf", &["delivery"]).unwrap();
 
         // Compute expected hash independently
         let identity = Identity::from_seed(core_seed).unwrap();
@@ -1390,8 +1414,8 @@ mod tests {
     #[test]
     fn test_register_destination_multiple() {
         let mut core = make_core(b"multi-dest-test");
-        let h1 = core.register_destination("lxmf", &["delivery"]);
-        let h2 = core.register_destination("myapp", &["service"]);
+        let h1 = core.register_destination("lxmf", &["delivery"]).unwrap();
+        let h2 = core.register_destination("myapp", &["service"]).unwrap();
         assert_ne!(h1, h2);
         assert!(core.get_destination(&h1).is_some());
         assert!(core.get_destination(&h2).is_some());
@@ -1401,7 +1425,7 @@ mod tests {
     fn test_primary_dest_still_accessible_after_register() {
         let mut core = make_core(b"primary-access-test");
         let primary = *core.dest_hash();
-        core.register_destination("lxmf", &["delivery"]);
+        core.register_destination("lxmf", &["delivery"]).unwrap();
         assert!(core.get_destination(&primary).is_some());
         assert_eq!(core.get_destination(&primary).unwrap().app_name, "testapp");
     }
@@ -1409,7 +1433,7 @@ mod tests {
     #[test]
     fn test_get_destination_mut() {
         let mut core = make_core(b"dest-mut-test");
-        let hash = core.register_destination("lxmf", &["delivery"]);
+        let hash = core.register_destination("lxmf", &["delivery"]).unwrap();
         let dest = core.get_destination_mut(&hash).unwrap();
         dest.set_proof_strategy(ProofStrategy::ProveAll);
         assert_eq!(
@@ -1421,7 +1445,7 @@ mod tests {
     #[test]
     fn test_ingest_data_for_secondary_dest_decrypts() {
         let mut core = make_core(b"secondary-decrypt-test");
-        let lxmf_hash = core.register_destination("lxmf", &["delivery"]);
+        let lxmf_hash = core.register_destination("lxmf", &["delivery"]).unwrap();
         let mut rng = rand::thread_rng();
 
         // Build encrypted DATA addressed to the LXMF destination
@@ -1454,7 +1478,7 @@ mod tests {
     #[test]
     fn test_ingest_data_for_secondary_dest_proves() {
         let mut core = make_core(b"secondary-prove-test");
-        let lxmf_hash = core.register_destination("lxmf", &["delivery"]);
+        let lxmf_hash = core.register_destination("lxmf", &["delivery"]).unwrap();
         // Set ProveAll on the secondary dest
         core.get_destination_mut(&lxmf_hash)
             .unwrap()
@@ -1499,7 +1523,7 @@ mod tests {
     #[test]
     fn test_queue_announce_for_secondary_dest() {
         let mut core = make_core(b"announce-secondary-test");
-        let lxmf_hash = core.register_destination("lxmf", &["delivery"]);
+        let lxmf_hash = core.register_destination("lxmf", &["delivery"]).unwrap();
         let mut rng = rand::thread_rng();
 
         assert!(core.queue_announce_for(&lxmf_hash, None, &mut rng, 1000));
@@ -1514,7 +1538,7 @@ mod tests {
     #[test]
     fn test_queue_announce_for_with_app_data() {
         let mut core = make_core(b"announce-appdata-test");
-        let lxmf_hash = core.register_destination("lxmf", &["delivery"]);
+        let lxmf_hash = core.register_destination("lxmf", &["delivery"]).unwrap();
         let mut rng = rand::thread_rng();
 
         let app_data = b"some app data";
@@ -1537,7 +1561,7 @@ mod tests {
         // the next queue attempt handles gracefully.
         type SmallNodeCore = NodeCore<64, 4, 128, 4>; // only 4 announce slots
         let identity = Identity::from_seed(b"queue-full-test").unwrap();
-        let mut core = SmallNodeCore::new(identity, "testapp", &["aspect1"]);
+        let mut core = SmallNodeCore::new(identity, "testapp", &["aspect1"]).unwrap();
         let mut rng = rand::thread_rng();
 
         // Queue 4 announces (filling the queue)
@@ -1575,7 +1599,7 @@ mod tests {
         // Step 3: A knows C's identity (register_peer)
         // -----------------------------------------------------------------
         let id_c = Identity::from_seed(b"relay-node-c").unwrap();
-        node_a.register_peer(&id_c, "testapp", &["aspect1"], 100);
+        node_a.register_peer(&id_c, "testapp", &["aspect1"], 100).unwrap();
 
         // Override A's direct path to C with a path via B's identity hash.
         // This causes initiate_link to build a HEADER_2 LINKREQUEST with
@@ -1592,7 +1616,7 @@ mod tests {
         // This lets B forward the LINKREQUEST and strip the HEADER_2
         // transport header (converting back to HEADER_1 for C).
         // -----------------------------------------------------------------
-        node_b.register_peer(&id_c, "testapp", &["aspect1"], 100);
+        node_b.register_peer(&id_c, "testapp", &["aspect1"], 100).unwrap();
 
         // -----------------------------------------------------------------
         // Step 5: Link handshake: A → B → C → B → A
@@ -1805,7 +1829,7 @@ mod tests {
         // C knows A's identity and has a path via B
         let id_a = Identity::from_seed(b"rev-relay-a").unwrap();
         let id_b = Identity::from_seed(b"rev-relay-b").unwrap();
-        node_c.register_peer(&id_a, "testapp", &["aspect1"], 100);
+        node_c.register_peer(&id_a, "testapp", &["aspect1"], 100).unwrap();
         let a_dest = *node_a.dest_hash();
         node_c.transport.insert_path(
             a_dest,
@@ -1813,7 +1837,7 @@ mod tests {
         );
 
         // B knows A's identity (for LINKREQUEST forwarding)
-        node_b.register_peer(&id_a, "testapp", &["aspect1"], 100);
+        node_b.register_peer(&id_a, "testapp", &["aspect1"], 100).unwrap();
 
         // --- Handshake: C → B → A → B → C ---
 
@@ -1950,7 +1974,8 @@ mod tests {
             &["test"],
             DestinationType::Plain,
             Direction::In,
-        );
+        )
+        .unwrap();
 
         let raw_payload = b"unencrypted broadcast data";
         let mut pkt_buf = [0u8; MTU];
@@ -1983,7 +2008,8 @@ mod tests {
             &["test"],
             DestinationType::Group,
             Direction::In,
-        );
+        )
+        .unwrap();
         core.get_destination_mut(&group_hash)
             .unwrap()
             .create_group_keys(&mut rng)
@@ -2029,7 +2055,8 @@ mod tests {
             &["nokeys"],
             DestinationType::Group,
             Direction::In,
-        );
+        )
+        .unwrap();
 
         let garbage = [0xAB; 128];
         let mut pkt_buf = [0u8; MTU];
@@ -2111,7 +2138,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_path, data, _req_id, _link_id| Some(data.to_vec()),
+                handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowAll,
             },
         );
@@ -2144,18 +2171,18 @@ mod tests {
             &primary_dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_path, _data, _req_id, _link_id| Some(b"primary".to_vec()),
+                handler: |_ctx, _data| Some(b"primary".to_vec()),
                 policy: RequestPolicy::AllowAll,
             },
         );
 
         // Register handler with SAME path on a secondary dest
-        let extra_dh = resp.register_destination("extra", &["svc"]);
+        let extra_dh = resp.register_destination("extra", &["svc"]).unwrap();
         resp.register_request_handler(
             &extra_dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_path, _data, _req_id, _link_id| Some(b"extra".to_vec()),
+                handler: |_ctx, _data| Some(b"extra".to_vec()),
                 policy: RequestPolicy::AllowAll,
             },
         );
@@ -2190,12 +2217,12 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         // Register handler ONLY on a secondary destination (not the link's target)
-        let extra_dh = resp.register_destination("extra", &["svc"]);
+        let extra_dh = resp.register_destination("extra", &["svc"]).unwrap();
         resp.register_request_handler(
             &extra_dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_path, data, _req_id, _link_id| Some(data.to_vec()),
+                handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowAll,
             },
         );
@@ -2214,6 +2241,115 @@ mod tests {
         assert!(
             outcome.packets.is_empty(),
             "no auto-response — handler is on a different destination"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4A: RequestContext fields populated correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn request_context_fields_populated() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        static HANDLER_CALLED: AtomicBool = AtomicBool::new(false);
+
+        let (init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        let dh = *resp.dest_hash();
+        resp.register_request_handler(
+            &dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |ctx, data| {
+                    HANDLER_CALLED.store(true, Ordering::SeqCst);
+                    // Verify all context fields are set
+                    assert!(!ctx.destination_hash.iter().all(|&b| b == 0));
+                    assert_eq!(ctx.path, "/test/echo");
+                    assert_eq!(ctx.path_hash, rete_transport::path_hash("/test/echo"));
+                    assert!(!ctx.link_id.iter().all(|&b| b == 0));
+                    assert!(!ctx.request_id.iter().all(|&b| b == 0));
+                    assert!(ctx.requested_at > 0.0);
+                    // remote_identity is None (link not identified)
+                    assert!(ctx.remote_identity.is_none());
+                    Some(data.to_vec())
+                },
+                policy: RequestPolicy::AllowAll,
+            },
+        );
+
+        let (req_pkt, _req_id) = init
+            .send_request(&link_id, "/test/echo", b"ping", 200, &mut rng)
+            .expect("should send request");
+
+        let outcome = resp.handle_ingest(&req_pkt.data, 201, 0, &mut rng);
+        assert!(matches!(
+            outcome.event,
+            Some(NodeEvent::RequestReceived { .. })
+        ));
+        assert!(
+            !outcome.packets.is_empty(),
+            "handler should have produced a response"
+        );
+        assert!(
+            HANDLER_CALLED.load(Ordering::SeqCst),
+            "handler must have been called"
+        );
+    }
+
+    #[test]
+    fn request_context_has_remote_identity_after_identify() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        static HANDLER_CALLED: AtomicBool = AtomicBool::new(false);
+
+        let (init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Identify the initiator on the link
+        let identify_pkt = init
+            .link_identify(&link_id, &mut rng)
+            .expect("should identify");
+        let identify_outcome = resp.handle_ingest(&identify_pkt.data, 200, 0, &mut rng);
+        assert!(matches!(
+            identify_outcome.event,
+            Some(NodeEvent::LinkIdentified { .. })
+        ));
+
+        let dh = *resp.dest_hash();
+        let expected_hash = init.identity.hash();
+        resp.register_request_handler(
+            &dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |ctx, data| {
+                    HANDLER_CALLED.store(true, Ordering::SeqCst);
+                    // remote_identity should be set after LINKIDENTIFY
+                    assert!(ctx.remote_identity.is_some());
+                    Some(data.to_vec())
+                },
+                policy: RequestPolicy::AllowAll,
+            },
+        );
+
+        let (req_pkt, _req_id) = init
+            .send_request(&link_id, "/test/echo", b"ping", 201, &mut rng)
+            .expect("should send request");
+
+        let outcome = resp.handle_ingest(&req_pkt.data, 202, 0, &mut rng);
+        assert!(
+            !outcome.packets.is_empty(),
+            "handler should have produced a response"
+        );
+        assert!(
+            HANDLER_CALLED.load(Ordering::SeqCst),
+            "handler must have been called"
+        );
+
+        // Verify the identity hash matches
+        let resp_link = resp.transport.get_link(&link_id).unwrap();
+        assert_eq!(
+            resp_link.identified_identity_hash(),
+            Some(&expected_hash),
         );
     }
 }

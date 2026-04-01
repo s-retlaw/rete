@@ -19,8 +19,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         &mut self,
         app_name: &str,
         aspects: &[&str],
-    ) -> [u8; TRUNCATED_HASH_LEN] {
-        let (dest_hash, name_hash) = compute_dest_hashes(&self.identity, app_name, aspects);
+    ) -> Result<[u8; TRUNCATED_HASH_LEN], rete_core::Error> {
+        let (dest_hash, name_hash) = compute_dest_hashes(&self.identity, app_name, aspects)?;
 
         let dest = Destination::from_hashes(
             DestinationType::Single,
@@ -34,7 +34,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         self.transport.add_local_destination(dest_hash);
         self.additional_dests.push(dest);
 
-        dest_hash
+        Ok(dest_hash)
     }
 
     /// Register an additional destination with specified type and direction.
@@ -49,7 +49,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         aspects: &[&str],
         dest_type: DestinationType,
         direction: Direction,
-    ) -> [u8; TRUNCATED_HASH_LEN] {
+    ) -> Result<[u8; TRUNCATED_HASH_LEN], rete_core::Error> {
         let id_hash = if dest_type == DestinationType::Plain {
             None
         } else {
@@ -57,8 +57,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         };
 
         let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-            .expect("app_name + aspects too long");
+        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
         let dest_hash = rete_core::destination_hash(expanded, id_hash.as_ref());
 
         let name_hash_full = <sha2::Sha256 as sha2::Digest>::digest(expanded.as_bytes());
@@ -75,7 +74,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         }
         self.additional_dests.push(dest);
 
-        dest_hash
+        Ok(dest_hash)
     }
 
     /// Look up a destination by hash (checks primary first, then additional).
@@ -102,14 +101,20 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     }
 
     /// Pre-register a peer's identity for sending DATA without waiting for an announce.
-    pub fn register_peer(&mut self, peer: &Identity, app_name: &str, aspects: &[&str], now: u64) {
+    pub fn register_peer(
+        &mut self,
+        peer: &Identity,
+        app_name: &str,
+        aspects: &[&str],
+        now: u64,
+    ) -> Result<(), rete_core::Error> {
         let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-            .expect("app_name + aspects must fit in 128 bytes");
+        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
         let peer_id_hash = peer.hash();
         let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer_id_hash));
         self.transport
             .register_identity(peer_dest_hash, peer.public_key(), now);
+        Ok(())
     }
 
     /// Look up a request handler scoped to a specific destination.

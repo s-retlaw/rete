@@ -37,7 +37,9 @@ impl<S: MessageStore> LxmfRouter<S> {
         core: &mut NodeCore<P, A, D, L>,
         store: S,
     ) {
-        let dest_hash = core.register_destination("lxmf", &["propagation"]);
+        let dest_hash = core
+            .register_destination("lxmf", &["propagation"])
+            .expect("lxmf.propagation fits in 128 bytes");
 
         if let Some(dest) = core.get_destination_mut(&dest_hash) {
             dest.set_proof_strategy(rete_stack::ProofStrategy::ProveAll);

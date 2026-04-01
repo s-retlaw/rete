@@ -143,12 +143,16 @@ pub struct EmbassyNode {
 
 impl EmbassyNode {
     /// Create a new node with the given identity and destination.
-    pub fn new(identity: Identity, app_name: &str, aspects: &[&str]) -> Self {
-        EmbassyNode {
-            core: EmbeddedNodeCore::new(identity, app_name, aspects),
+    pub fn new(
+        identity: Identity,
+        app_name: &str,
+        aspects: &[&str],
+    ) -> Result<Self, rete_core::Error> {
+        Ok(EmbassyNode {
+            core: EmbeddedNodeCore::new(identity, app_name, aspects)?,
             epoch_offset: 0,
             announce_interval: 0,
-        }
+        })
     }
 
     /// Override the announce interval (default: 300s from Python RNS spec).
@@ -182,7 +186,7 @@ impl EmbassyNode {
         &self,
         app_data: Option<&[u8]>,
         rng: &mut R,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, rete_core::Error> {
         let now = self.announce_time();
         self.core.build_announce(app_data, rng, now)
     }

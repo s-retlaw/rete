@@ -55,7 +55,7 @@ fn build_header2_data(
 /// Box-allocate a TokioNode to avoid stack overflow (HostedTransport is ~600KB).
 fn make_node(seed: &[u8]) -> Box<TokioNode> {
     let identity = Identity::from_seed(seed).unwrap();
-    Box::new(TokioNode::new(identity, "rete", &["example", "v1"]))
+    Box::new(TokioNode::new(identity, "rete", &["example", "v1"]).unwrap())
 }
 
 /// Run `run_multi` with prepared inbound messages and collect outbound per interface.

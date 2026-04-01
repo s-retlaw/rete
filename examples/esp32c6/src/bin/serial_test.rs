@@ -93,14 +93,15 @@ async fn main(_spawner: Spawner) -> ! {
     rng.0.fill_bytes(&mut prv);
     let identity = rete_core::Identity::from_private_key(&prv).expect("invalid key");
 
-    let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]);
+    let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]).expect("valid app name");
     node.core.set_proof_strategy(ProofStrategy::ProveAll);
     node.set_announce_interval(10); // Short interval for testing
 
     // Register a secondary destination for multi-dest testing
     let secondary_hash = node
         .core
-        .register_destination("rete", &["test", "secondary"]);
+        .register_destination("rete", &["test", "secondary"])
+        .expect("valid app name");
     let sh = hex4(&secondary_hash);
     println!(
         "[serial-test] secondary dest: {}",

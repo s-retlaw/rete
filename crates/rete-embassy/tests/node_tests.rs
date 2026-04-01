@@ -26,7 +26,7 @@ use rete_transport::Transport;
 
 fn make_node(seed: &[u8]) -> EmbassyNode {
     let identity = Identity::from_seed(seed).unwrap();
-    EmbassyNode::new(identity, "testapp", &["aspect1"])
+    EmbassyNode::new(identity, "testapp", &["aspect1"]).unwrap()
 }
 
 /// Create a valid announce packet from the given identity.

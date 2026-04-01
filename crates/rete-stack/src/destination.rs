@@ -78,20 +78,20 @@ impl Destination {
         dest_type: DestinationType,
         app_name: &str,
         aspects: &[&str],
-    ) -> Self {
+    ) -> Result<Self, rete_core::Error> {
         // Validate identity requirements per destination type
         match dest_type {
             DestinationType::Single | DestinationType::Link => {
-                assert!(
-                    identity.is_some(),
-                    "Single and Link destinations require an identity"
-                );
+                if identity.is_none() {
+                    return Err(rete_core::Error::MissingField("identity"));
+                }
             }
             DestinationType::Plain => {
-                assert!(
-                    identity.is_none(),
-                    "Plain destinations must not have an identity"
-                );
+                if identity.is_some() {
+                    return Err(rete_core::Error::MissingField(
+                        "Plain destinations must not have an identity",
+                    ));
+                }
             }
             DestinationType::Group => {
                 // Group can optionally have an identity
@@ -100,8 +100,7 @@ impl Destination {
 
         // Compute expanded name for hashing
         let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-            .expect("app_name + aspects must fit in 128 bytes");
+        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
 
         // name_hash = SHA-256(expanded)[0:10]
         let name_hash_full = Sha256::digest(expanded.as_bytes());
@@ -112,7 +111,7 @@ impl Destination {
         let id_hash = identity.as_ref().map(|id| id.hash());
         let dest_hash = rete_core::destination_hash(expanded, id_hash.as_ref());
 
-        Destination {
+        Ok(Destination {
             dest_type,
             direction,
             identity,
@@ -125,7 +124,7 @@ impl Destination {
             default_app_data: None,
             group_token: None,
             request_handlers: Vec::new(),
-        }
+        })
     }
 
     /// Create a destination from pre-computed hashes.
@@ -345,20 +344,21 @@ mod tests {
             DestinationType::Single,
             "testapp",
             &["aspect1"],
-        );
+        )
+        .unwrap();
         assert_eq!(*dest.hash(), expected);
     }
 
     #[test]
-    #[should_panic(expected = "Single and Link destinations require an identity")]
     fn test_single_requires_identity() {
-        Destination::new(
+        let result = Destination::new(
             None,
             Direction::In,
             DestinationType::Single,
             "testapp",
             &["aspect1"],
         );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -369,22 +369,23 @@ mod tests {
             DestinationType::Plain,
             "testapp",
             &["aspect1"],
-        );
+        )
+        .unwrap();
         assert_eq!(dest.dest_type, DestinationType::Plain);
         assert!(dest.identity().is_none());
     }
 
     #[test]
-    #[should_panic(expected = "Plain destinations must not have an identity")]
     fn test_plain_rejects_identity() {
         let identity = Identity::from_seed(b"plain-reject").unwrap();
-        Destination::new(
+        let result = Destination::new(
             Some(identity),
             Direction::In,
             DestinationType::Plain,
             "testapp",
             &["aspect1"],
         );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -395,7 +396,8 @@ mod tests {
             DestinationType::Group,
             "testapp",
             &["group1"],
-        );
+        )
+        .unwrap();
         let mut rng = rand::thread_rng();
         dest.create_group_keys(&mut rng).unwrap();
 
@@ -417,7 +419,8 @@ mod tests {
             DestinationType::Single,
             "testapp",
             &["aspect1"],
-        );
+        )
+        .unwrap();
         assert_eq!(dest.proof_strategy, ProofStrategy::ProveNone);
     }
 
@@ -430,7 +433,8 @@ mod tests {
             DestinationType::Single,
             "testapp",
             &["aspect1"],
-        );
+        )
+        .unwrap();
         assert!(dest.default_app_data.is_none());
         dest.set_default_app_data(Some(b"my app data".to_vec()));
         assert_eq!(
@@ -440,15 +444,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Single and Link destinations require an identity")]
     fn test_link_requires_identity() {
-        Destination::new(
+        let result = Destination::new(
             None,
             Direction::In,
             DestinationType::Link,
             "testapp",
             &["link1"],
         );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -459,7 +463,8 @@ mod tests {
             DestinationType::Group,
             "testapp",
             &["group1"],
-        );
+        )
+        .unwrap();
         let mut rng = rand::thread_rng();
         let mut ct = [0u8; 256];
         let result = dest.encrypt(b"test", &mut rng, &mut ct);
@@ -474,7 +479,8 @@ mod tests {
             DestinationType::Plain,
             "testapp",
             &["plain1"],
-        );
+        )
+        .unwrap();
         let mut rng = rand::thread_rng();
         let plaintext = b"hello plain";
         let mut out = [0u8; 256];
@@ -490,7 +496,8 @@ mod tests {
             DestinationType::Plain,
             "testapp",
             &["plain1"],
-        );
+        )
+        .unwrap();
         let data = b"hello plain";
         let mut out = [0u8; 256];
         let len = dest.decrypt(data, &mut out).unwrap();
@@ -505,7 +512,8 @@ mod tests {
             DestinationType::Group,
             "testapp",
             &["group1"],
-        );
+        )
+        .unwrap();
 
         // Create a 64-byte key
         let mut key = [0u8; 64];
@@ -534,7 +542,8 @@ mod tests {
             DestinationType::Single,
             "testapp",
             &["aspect1"],
-        );
+        )
+        .unwrap();
         let mut rng = rand::thread_rng();
         assert_eq!(
             dest.create_group_keys(&mut rng),
@@ -551,12 +560,28 @@ mod tests {
             DestinationType::Single,
             "testapp",
             &["aspect1"],
-        );
+        )
+        .unwrap();
 
         // Verify name_hash is SHA-256("testapp.aspect1")[0:10]
         let expected_full = Sha256::digest(b"testapp.aspect1");
         let mut expected = [0u8; NAME_HASH_LEN];
         expected.copy_from_slice(&expected_full[..NAME_HASH_LEN]);
         assert_eq!(*dest.name_hash(), expected);
+    }
+
+    #[test]
+    fn test_oversized_name_returns_error() {
+        let identity = Identity::from_seed(b"oversized-test").unwrap();
+        // 130-byte app name exceeds the 128-byte buffer
+        let long_name = "a".repeat(130);
+        let result = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            &long_name,
+            &[],
+        );
+        assert!(matches!(result, Err(rete_core::Error::BufferTooSmall)));
     }
 }

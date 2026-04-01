@@ -15,7 +15,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         app_data: Option<&[u8]>,
         rng: &mut R,
         now: u64,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, rete_core::Error> {
         let aspects_refs: Vec<&str> = self
             .primary_dest
             .aspects
@@ -31,9 +31,8 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             rng,
             now,
             &mut buf,
-        )
-        .expect("announce creation should not fail");
-        buf[..n].to_vec()
+        )?;
+        Ok(buf[..n].to_vec())
     }
 
     /// Queue a local announce into the transport's announce queue.

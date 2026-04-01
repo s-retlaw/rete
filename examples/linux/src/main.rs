@@ -705,7 +705,7 @@ async fn main() {
     eprintln!("[rete] identity hash: {}", hex::encode(id_hash));
 
     // Create node
-    let mut node = TokioNode::new(identity, APP_NAME, ASPECTS);
+    let mut node = TokioNode::new_boxed(identity, APP_NAME, ASPECTS).expect("valid app name");
     node.core.set_decompress_fn(Some(bz2_decompress));
     node.core.set_compress_fn(Some(bz2_compress));
     if packet_log {
@@ -760,7 +760,7 @@ async fn main() {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_path, data, _request_id, _link_id| Some(data.to_vec()),
+                handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowAll,
             },
         );

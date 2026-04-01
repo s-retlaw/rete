@@ -244,7 +244,9 @@ impl<S: MessageStore> LxmfRouter<S> {
     where
         S: Default,
     {
-        let dest_hash = core.register_destination("lxmf", &["delivery"]);
+        let dest_hash = core
+            .register_destination("lxmf", &["delivery"])
+            .expect("lxmf.delivery fits in 128 bytes");
 
         // LXMF delivery always proves received data
         if let Some(dest) = core.get_destination_mut(&dest_hash) {
@@ -339,7 +341,7 @@ mod tests {
 
     fn make_core(seed: &[u8]) -> TestNodeCore {
         let identity = Identity::from_seed(seed).unwrap();
-        TestNodeCore::new(identity, "testapp", &["aspect1"])
+        TestNodeCore::new(identity, "testapp", &["aspect1"]).unwrap()
     }
 
     fn make_test_msg(source_seed: &[u8], dest_hash: [u8; 16]) -> (LXMessage, Identity) {
@@ -430,7 +432,7 @@ mod tests {
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
         let recipient_dest = rete_core::destination_hash(expanded, Some(&recipient.hash()));
-        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100).unwrap();
 
         let (msg, _source) = make_test_msg(b"send-opp-test", recipient_dest);
         let result = router.send_opportunistic(&mut core, &msg, &mut rng, 100);
@@ -1025,7 +1027,7 @@ mod tests {
         // in the message, we need to register the peer with matching hash.
         // In practice, the announce has already cached the identity. For
         // unit testing, we directly register.
-        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100).unwrap();
 
         // The dest_hash [0x42; 16] won't match the registered peer's
         // computed dest_hash. start_propagation_forward calls
@@ -1070,7 +1072,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let recipient = Identity::from_seed(b"fwd-dup-recipient").unwrap();
-        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100).unwrap();
 
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
@@ -1097,7 +1099,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let recipient = Identity::from_seed(b"fwd-est-rcpt").unwrap();
-        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100).unwrap();
 
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
@@ -1138,7 +1140,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let recipient = Identity::from_seed(b"fwd-rc-rcpt").unwrap();
-        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100).unwrap();
 
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
@@ -1174,7 +1176,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let recipient = Identity::from_seed(b"fwd-multi-rcpt").unwrap();
-        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100).unwrap();
 
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();
@@ -1226,7 +1228,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let recipient = Identity::from_seed(b"fwd-cleanup-rcpt").unwrap();
-        core.register_peer(&recipient, "lxmf", &["delivery"], 100);
+        core.register_peer(&recipient, "lxmf", &["delivery"], 100).unwrap();
 
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name("lxmf", &["delivery"], &mut name_buf).unwrap();

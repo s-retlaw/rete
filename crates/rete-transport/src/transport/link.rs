@@ -469,7 +469,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 }
                 link.touch_inbound(now);
                 match crate::request::parse_request(&dec_buf[..dec_len]) {
-                    Ok((_ts, rq_path_hash, data)) => {
+                    Ok((ts, rq_path_hash, data)) => {
                         // Python RNS uses the packet's truncated hash as request_id
                         // for single-packet requests (Link.py: RequestReceipt uses
                         // packet_receipt.truncated_hash). This is SHA-256(hashable)[..16].
@@ -480,6 +480,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                             request_id: req_id,
                             path_hash: rq_path_hash,
                             data,
+                            requested_at: ts,
                         }
                     }
                     Err(_) => IngestResult::Invalid,

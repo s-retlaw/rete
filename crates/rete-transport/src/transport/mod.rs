@@ -313,6 +313,8 @@ pub enum IngestResult<'a> {
         path_hash: [u8; TRUNCATED_HASH_LEN],
         /// The request data payload.
         data: alloc::vec::Vec<u8>,
+        /// Timestamp from the wire format (seconds since epoch).
+        requested_at: f64,
     },
     /// A link.response() was received on a link.
     ResponseReceived {

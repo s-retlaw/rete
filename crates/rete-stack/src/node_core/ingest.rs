@@ -253,23 +253,40 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 request_id,
                 path_hash,
                 data,
+                requested_at,
             } => {
-                // Scope handler lookup to the link's bound destination.
+                // Extract link metadata (dest_hash + identified identity) before
+                // borrowing self for handler lookup.
                 let mut response_packets = Vec::new();
-                if let Some(handler) = self
-                    .transport
-                    .get_link(&link_id)
-                    .map(|link| link.destination_hash)
-                    .and_then(|dh| self.find_request_handler(&dh, &path_hash))
-                {
-                    if handler.policy != RequestPolicy::AllowNone {
-                        if let Some(response_data) =
-                            (handler.handler)(&handler.path, &data, &request_id, &link_id)
-                        {
-                            if let Ok(pkt) =
-                                self.send_response(&link_id, &request_id, &response_data, rng)
-                            {
-                                response_packets.push(pkt);
+                let link_meta = self.transport.get_link(&link_id).map(|link| {
+                    (
+                        link.destination_hash,
+                        link.identified_identity_hash().copied(),
+                    )
+                });
+                if let Some((dest_hash, remote_identity)) = link_meta {
+                    if let Some(handler) =
+                        self.find_request_handler(&dest_hash, &path_hash)
+                    {
+                        if handler.policy != RequestPolicy::AllowNone {
+                            let ctx = super::RequestContext {
+                                destination_hash: dest_hash,
+                                path: &handler.path,
+                                path_hash,
+                                link_id,
+                                request_id,
+                                requested_at,
+                                remote_identity,
+                            };
+                            if let Some(response_data) = (handler.handler)(&ctx, &data) {
+                                if let Ok(pkt) = self.send_response(
+                                    &link_id,
+                                    &request_id,
+                                    &response_data,
+                                    rng,
+                                ) {
+                                    response_packets.push(pkt);
+                                }
                             }
                         }
                     }

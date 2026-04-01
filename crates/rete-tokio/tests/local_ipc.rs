@@ -28,7 +28,7 @@ fn big_stack_test(f: fn()) {
 /// Box-allocate a TokioNode to avoid stack overflow.
 fn make_node(seed: &[u8]) -> Box<TokioNode> {
     let identity = Identity::from_seed(seed).unwrap();
-    Box::new(TokioNode::new(identity, "rete", &["example", "v1"]))
+    Box::new(TokioNode::new(identity, "rete", &["example", "v1"]).unwrap())
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ fn two_clients_announce_relay() {
 
                 // Client1 builds and sends an announce packet
                 let node1 = make_node(b"ipc-client-1");
-                let announce = node1.build_announce(None);
+                let announce = node1.build_announce(None).unwrap();
 
                 client1.send(&announce).await.unwrap();
 
@@ -110,7 +110,7 @@ fn client_disconnect_does_not_break_others() {
 
                 // Broadcast to remaining client2
                 let node2 = make_node(b"ipc-client-2");
-                let announce = node2.build_announce(None);
+                let announce = node2.build_announce(None).unwrap();
 
                 broadcaster.broadcast(&announce, None).await;
 
@@ -151,7 +151,7 @@ fn server_forwards_to_inbound() {
 
                 // Build an announce and send it
                 let node = make_node(b"ipc-inbound-test");
-                let announce = node.build_announce(Some(b"test-data"));
+                let announce = node.build_announce(Some(b"test-data")).unwrap();
 
                 client.send(&announce).await.unwrap();
 

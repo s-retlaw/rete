@@ -72,7 +72,7 @@ async fn main(_spawner: Spawner) -> ! {
     rng.0.fill_bytes(&mut prv);
     let identity = rete_core::Identity::from_private_key(&prv).expect("invalid key");
 
-    let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]);
+    let mut node = EmbassyNode::new(identity, "rete", &["example", "v1"]).expect("valid app name");
     let dh = node.core.dest_hash();
     println!(
         "[rete-serial] dest: {:02x}{:02x}{:02x}{:02x}",
