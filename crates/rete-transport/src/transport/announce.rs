@@ -179,12 +179,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     }
                 }
 
+                let ratchet: Option<[u8; 32]> =
+                    info.ratchet.and_then(|r| r.try_into().ok());
+
                 self.stats.announces_received += 1;
                 IngestResult::AnnounceReceived {
                     dest_hash: dh,
                     identity_hash: info.identity_hash,
                     hops: pkt.hops,
                     app_data: info.app_data,
+                    ratchet,
                 }
             }
             Err(_) => {
@@ -286,11 +290,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
     // -----------------------------------------------------------------------
 
     /// Create an announce packet for a local identity.
+    ///
+    /// When `ratchet_pub` is `Some`, the 32-byte ratchet public key is included
+    /// in the announce payload and `context_flag` is set to 1.
     pub fn create_announce<R: RngCore + CryptoRng>(
         identity: &Identity,
         app_name: &str,
         aspects: &[&str],
         app_data: Option<&[u8]>,
+        ratchet_pub: Option<&[u8; 32]>,
         rng: &mut R,
         now: u64,
         out: &mut [u8],
@@ -320,6 +328,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         pos += NAME_HASH_LEN;
         signed_data[pos..pos + 10].copy_from_slice(&random_hash);
         pos += 10;
+        if let Some(rp) = ratchet_pub {
+            signed_data[pos..pos + 32].copy_from_slice(rp);
+            pos += 32;
+        }
         if let Some(ad) = app_data {
             signed_data[pos..pos + ad.len()].copy_from_slice(ad);
             pos += ad.len();
@@ -327,6 +339,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
         let signature = identity.sign(&signed_data[..pos])?;
 
+        // Payload layout:
+        //   pub_key[64] + name_hash[10] + random_hash[10]
+        //   [+ ratchet[32] if context_flag]
+        //   + signature[64] + [app_data]
         let mut payload = [0u8; rete_core::MTU];
         let mut ppos = 0;
         payload[ppos..ppos + 64].copy_from_slice(&pub_key);
@@ -335,6 +351,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         ppos += NAME_HASH_LEN;
         payload[ppos..ppos + 10].copy_from_slice(&random_hash);
         ppos += 10;
+        if let Some(rp) = ratchet_pub {
+            payload[ppos..ppos + 32].copy_from_slice(rp);
+            ppos += 32;
+        }
         payload[ppos..ppos + 64].copy_from_slice(&signature);
         ppos += 64;
         if let Some(ad) = app_data {
@@ -345,6 +365,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         let n = PacketBuilder::new(out)
             .packet_type(PacketType::Announce)
             .dest_type(DestType::Single)
+            .context_flag(ratchet_pub.is_some())
             .destination_hash(&dest_hash)
             .context(0x00)
             .payload(&payload[..ppos])

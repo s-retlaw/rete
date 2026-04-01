@@ -9,6 +9,7 @@ mod announce;
 mod destination;
 mod ingest;
 mod link;
+pub(crate) mod ratchet;
 
 extern crate alloc;
 
@@ -18,8 +19,12 @@ use rand_core::{CryptoRng, RngCore};
 use rete_core::{DestType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN};
 use rete_transport::{SendError, Transport, RECEIPT_TIMEOUT};
 
+use alloc::boxed::Box;
+
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::{NodeEvent, ProofStrategy};
+
+pub use ratchet::{InMemoryRatchetStore, RatchetStore};
 
 /// Callback type for data compression/decompression functions.
 pub type TransformFn = fn(&[u8]) -> Option<Vec<u8>>;
@@ -80,6 +85,38 @@ impl RequestPolicy {
     }
 }
 
+/// Controls whether response data is compressed before sending.
+///
+/// Compression uses the `compress_fn` callback (typically bz2).
+/// Matches Python RNS `auto_compress` parameter on request handlers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ResponseCompressionPolicy {
+    /// Compress if response is below the default size limit (64 MB) and `compress_fn` is set.
+    #[default]
+    Default,
+    /// Always attempt compression.
+    Always,
+    /// Never compress.
+    Never,
+    /// Compress only if response size is below N bytes (skip very large data).
+    Below(usize),
+}
+
+impl ResponseCompressionPolicy {
+    /// Python RNS AUTO_COMPRESS_MAX_SIZE (64 MB).
+    const AUTO_COMPRESS_MAX_SIZE: usize = 64 * 1024 * 1024;
+
+    /// Check whether compression should be attempted for data of the given length.
+    pub fn should_compress(&self, data_len: usize) -> bool {
+        match self {
+            Self::Default => data_len <= Self::AUTO_COMPRESS_MAX_SIZE,
+            Self::Always => true,
+            Self::Never => false,
+            Self::Below(limit) => data_len <= *limit,
+        }
+    }
+}
+
 /// A registered request handler entry.
 #[derive(Clone)]
 pub struct RequestHandler {
@@ -89,6 +126,8 @@ pub struct RequestHandler {
     pub handler: RequestHandlerFn,
     /// Access control policy.
     pub policy: RequestPolicy,
+    /// Response compression policy.
+    pub compression_policy: ResponseCompressionPolicy,
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +240,10 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     /// keyed by (link_id, original_hash). When the final segment arrives, all buffered
     /// segment data is concatenated and delivered as ResourceComplete.
     pub(super) split_recv_buf: Vec<SplitRecvEntry>,
+    /// Optional ratchet key store for forward secrecy.
+    /// When `Some`, outbound encrypts use peer ratchet keys and inbound
+    /// decrypts try local ratchet keys first.
+    pub(super) ratchet_store: Option<Box<dyn RatchetStore>>,
 }
 
 /// Buffer entry for a partially-received split resource.
@@ -209,6 +252,15 @@ pub(super) struct SplitRecvEntry {
     pub(super) original_hash: [u8; 32],
     /// Accumulated plaintext data from completed segments, in order.
     pub(super) data: Vec<u8>,
+}
+
+/// Compute identity hash from a 64-byte public key: SHA-256(pub_key)[0:16].
+pub(super) fn identity_hash_from_pubkey(pub_key: &[u8; 64]) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let h = Sha256::digest(pub_key);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&h[..16]);
+    out
 }
 
 /// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
@@ -263,6 +315,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             packet_log_fn: None,
             prove_app_fn: None,
             split_recv_buf: Vec::new(),
+            ratchet_store: None,
         })
     }
 
@@ -344,6 +397,27 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         self.packet_log_fn = f;
     }
 
+    /// Set the ratchet key store for forward secrecy.
+    ///
+    /// When set, outbound encryption uses peer ratchet keys (if available),
+    /// inbound decryption tries local ratchet keys first, and outbound
+    /// announces include the local ratchet public key.
+    pub fn set_ratchet_store(&mut self, store: Box<dyn RatchetStore>) {
+        self.ratchet_store = Some(store);
+    }
+
+    /// Generate a new local ratchet keypair and store it.
+    ///
+    /// The previous ratchet key (if any) is kept for decrypting in-flight
+    /// messages. Returns the new ratchet public key, or `None` if no
+    /// ratchet store is configured.
+    pub fn rotate_ratchet<R: RngCore + CryptoRng>(&mut self, rng: &mut R) -> Option<[u8; 32]> {
+        let store = self.ratchet_store.as_mut()?;
+        let (priv_key, pub_key) = rete_core::generate_ratchet(rng);
+        store.rotate_local_ratchet(priv_key, pub_key);
+        Some(pub_key)
+    }
+
     /// Number of learned paths in the transport table.
     pub fn path_count(&self) -> usize {
         self.transport.path_count()
@@ -404,9 +478,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .ok_or(SendError::UnknownDestination)?;
         let recipient = Identity::from_public_key(&pub_key).map_err(SendError::Crypto)?;
         let mut ct_buf = [0u8; MTU];
-        let ct_len = recipient
-            .encrypt(plaintext, rng, &mut ct_buf)
-            .map_err(SendError::Crypto)?;
+        let ct_len = if let Some(ratchet_pub) = self
+            .ratchet_store
+            .as_ref()
+            .and_then(|s| s.recall_peer_ratchet(&identity_hash_from_pubkey(&pub_key)))
+        {
+            recipient
+                .encrypt_with_ratchet(plaintext, &ratchet_pub, rng, &mut ct_buf)
+                .map_err(SendError::Crypto)?
+        } else {
+            recipient
+                .encrypt(plaintext, rng, &mut ct_buf)
+                .map_err(SendError::Crypto)?
+        };
         let via = self.transport.get_path(dest_hash).and_then(|p| p.via);
         self.transport.touch_path(dest_hash, now);
         let mut pkt_buf = [0u8; MTU];
@@ -2158,6 +2242,7 @@ mod tests {
                 path: "/test/echo".into(),
                 handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowAll,
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2191,6 +2276,7 @@ mod tests {
                 path: "/test/echo".into(),
                 handler: |_ctx, _data| Some(b"primary".to_vec()),
                 policy: RequestPolicy::AllowAll,
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2202,6 +2288,7 @@ mod tests {
                 path: "/test/echo".into(),
                 handler: |_ctx, _data| Some(b"extra".to_vec()),
                 policy: RequestPolicy::AllowAll,
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2242,6 +2329,7 @@ mod tests {
                 path: "/test/echo".into(),
                 handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowAll,
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2293,6 +2381,7 @@ mod tests {
                     Some(data.to_vec())
                 },
                 policy: RequestPolicy::AllowAll,
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2346,6 +2435,7 @@ mod tests {
                     Some(data.to_vec())
                 },
                 policy: RequestPolicy::AllowAll,
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2394,6 +2484,7 @@ mod tests {
                 path: "/test/echo".into(),
                 handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowList(vec![init.identity.hash()]),
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2428,6 +2519,7 @@ mod tests {
                 path: "/test/echo".into(),
                 handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowList(vec![wrong_hash]),
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2456,6 +2548,7 @@ mod tests {
                 path: "/test/echo".into(),
                 handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowList(vec![init.identity.hash()]),
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
 
@@ -2468,5 +2561,40 @@ mod tests {
             outcome.packets.is_empty(),
             "unidentified link should be rejected — no response"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ResponseCompressionPolicy unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compression_policy_default() {
+        let policy = ResponseCompressionPolicy::Default;
+        assert!(policy.should_compress(0));
+        assert!(policy.should_compress(1024));
+        assert!(policy.should_compress(64 * 1024 * 1024)); // exactly at limit
+        assert!(!policy.should_compress(64 * 1024 * 1024 + 1)); // over limit
+    }
+
+    #[test]
+    fn test_compression_policy_always() {
+        let policy = ResponseCompressionPolicy::Always;
+        assert!(policy.should_compress(0));
+        assert!(policy.should_compress(128 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_compression_policy_never() {
+        let policy = ResponseCompressionPolicy::Never;
+        assert!(!policy.should_compress(0));
+        assert!(!policy.should_compress(1024));
+    }
+
+    #[test]
+    fn test_compression_policy_below() {
+        let policy = ResponseCompressionPolicy::Below(4096);
+        assert!(policy.should_compress(100));
+        assert!(policy.should_compress(4096)); // at limit
+        assert!(!policy.should_compress(4097)); // over limit
     }
 }

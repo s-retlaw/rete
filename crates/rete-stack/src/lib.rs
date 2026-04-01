@@ -248,7 +248,11 @@ pub use destination::{Destination, DestinationType, Direction};
 pub use node_core::{
     EmbeddedNodeCore, HostedNodeCore, IngestOutcome, NodeCore, NodeStats, OutboundPacket,
     PacketRouting, ProveAppFn, RequestContext, RequestHandler, RequestHandlerFn, RequestPolicy,
+    ResponseCompressionPolicy,
 };
+#[cfg(feature = "alloc")]
+pub use node_core::ratchet::{InMemoryRatchetStore, RatchetStore};
+
 
 #[cfg(feature = "alloc")]
 pub use rete_transport::SendError;

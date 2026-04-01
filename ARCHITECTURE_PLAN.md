@@ -385,7 +385,7 @@ pub trait RatchetStore {
 | 4A | RequestContext + handler signature | **Done** |
 | 4B | ALLOW_LIST policy | **Done** |
 | 5A | rete-lxmf-core crate | **Done** |
-| 5B | Remove std from router | Not started |
-| 6 | ResponseCompressionPolicy | Not started |
-| 7 | RatchetStore abstraction | Not started |
+| 5B | Remove std from router | **Skipped** (evaluated: router requires std for bzip2/rete-stack; 5A sufficient) |
+| 6 | ResponseCompressionPolicy | **Done** |
+| 7 | RatchetStore abstraction | **Done** |
 | 8 | Documentation update | Not started |

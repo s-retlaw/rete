@@ -69,7 +69,15 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 identity_hash,
                 hops,
                 app_data,
+                ratchet,
             } => {
+                // Store ratchet public key from announcing peer
+                if let (Some(store), Some(ratchet_pub)) =
+                    (&mut self.ratchet_store, ratchet)
+                {
+                    store.store_peer_ratchet(&identity_hash, ratchet_pub);
+                }
+
                 let mut packets = Vec::new();
 
                 // Auto-reply to announcing peer
@@ -114,9 +122,28 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 let decrypted = match dest.dest_type {
                     DestinationType::Plain => payload.to_vec(),
                     DestinationType::Single => {
-                        match self.identity.decrypt(payload, &mut dec_buf) {
-                            Ok(n) => dec_buf[..n].to_vec(),
-                            Err(_) => return IngestOutcome::empty(),
+                        let mut privkeys = Vec::new();
+                        if let Some(store) = &self.ratchet_store {
+                            if let Some(k) = store.local_ratchet_private() {
+                                privkeys.push(k);
+                            }
+                            privkeys.extend_from_slice(store.previous_ratchet_privates());
+                        }
+                        if !privkeys.is_empty() {
+                            match self.identity.decrypt_with_ratchets(
+                                payload,
+                                &privkeys,
+                                false,
+                                &mut dec_buf,
+                            ) {
+                                Ok((n, _)) => dec_buf[..n].to_vec(),
+                                Err(_) => return IngestOutcome::empty(),
+                            }
+                        } else {
+                            match self.identity.decrypt(payload, &mut dec_buf) {
+                                Ok(n) => dec_buf[..n].to_vec(),
+                                Err(_) => return IngestOutcome::empty(),
+                            }
                         }
                     }
                     DestinationType::Group => {
@@ -279,10 +306,21 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                                 remote_identity,
                             };
                             if let Some(response_data) = (handler.handler)(&ctx, &data) {
+                                let final_data = if handler
+                                    .compression_policy
+                                    .should_compress(response_data.len())
+                                {
+                                    self.compress_fn
+                                        .and_then(|f| f(&response_data))
+                                        .filter(|c| c.len() < response_data.len())
+                                        .unwrap_or(response_data)
+                                } else {
+                                    response_data
+                                };
                                 if let Ok(pkt) = self.send_response(
                                     &link_id,
                                     &request_id,
-                                    &response_data,
+                                    &final_data,
                                     rng,
                                 ) {
                                     response_packets.push(pkt);

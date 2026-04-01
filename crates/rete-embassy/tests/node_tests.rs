@@ -38,6 +38,7 @@ fn build_announce(identity: &Identity) -> Vec<u8> {
         "testapp",
         &["aspect1"],
         None,
+        None,
         &mut rng,
         1000,
         &mut buf,

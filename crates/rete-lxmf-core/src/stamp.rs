@@ -156,6 +156,7 @@ fn leading_zero_bits(data: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn test_leading_zero_bits() {

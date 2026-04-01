@@ -22,7 +22,7 @@ use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
 use rete_lxmf::{LXMessage, LxmfEvent, LxmfRouter};
-use rete_stack::{OutboundPacket, RequestHandler, RequestPolicy};
+use rete_stack::{OutboundPacket, RequestHandler, RequestPolicy, ResponseCompressionPolicy};
 use rete_tokio::local::{LocalServer, ReconnectingLocalClient};
 use rete_tokio::tcp_server::TcpServer;
 use rete_tokio::{interface_task, InboundMsg, InterfaceSlot, NodeCommand, NodeEvent, TokioNode};
@@ -762,6 +762,7 @@ async fn main() {
                 path: "/test/echo".into(),
                 handler: |_ctx, data| Some(data.to_vec()),
                 policy: RequestPolicy::AllowAll,
+                compression_policy: ResponseCompressionPolicy::Default,
             },
         );
         eprintln!("[rete] registered /test/echo request handler");

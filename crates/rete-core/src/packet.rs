@@ -391,6 +391,11 @@ impl<'a> PacketBuilder<'a> {
         self.transport_type = v;
         self
     }
+    /// Set the context flag (bit 5 of flags; default: false).
+    pub fn context_flag(mut self, v: bool) -> Self {
+        self.context_flag = v;
+        self
+    }
 
     /// Conditionally set HEADER_2 transport routing via a relay.
     ///

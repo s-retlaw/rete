@@ -219,6 +219,8 @@ pub enum IngestResult<'a> {
         hops: u8,
         /// Optional application data from the announce.
         app_data: Option<&'a [u8]>,
+        /// Optional ratchet public key (32 bytes, present when context_flag=1).
+        ratchet: Option<[u8; 32]>,
     },
     /// Packet should be forwarded to other interfaces.
     Forward {
@@ -1966,6 +1968,7 @@ mod tests {
             "test",
             &["stats"],
             None,
+            None,
             &mut rng,
             1000,
             &mut announce_buf,
@@ -2025,5 +2028,110 @@ mod tests {
         assert_eq!(transport.stats().packets_dropped_dedup, 1, "dedup counter");
         // announces_received should stay at 1 (dedup fires before announce processing)
         assert_eq!(transport.stats().announces_received, 1, "still 1 announce");
+    }
+
+    #[test]
+    fn test_create_announce_with_ratchet() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(99);
+        let sender = Identity::from_seed(b"ratchet-announce-sender").unwrap();
+        let ratchet_pub = [0x42u8; 32];
+
+        let mut buf = [0u8; rete_core::MTU];
+        let n = TestTransport::create_announce(
+            &sender,
+            "test",
+            &["ratchet"],
+            None,
+            Some(&ratchet_pub),
+            &mut rng,
+            1000,
+            &mut buf,
+        )
+        .expect("should build ratchet announce");
+
+        // Parse and verify context_flag is set
+        let pkt = rete_core::Packet::parse(&buf[..n]).expect("should parse");
+        assert!(pkt.context_flag, "context_flag should be set for ratchet announce");
+        assert_eq!(pkt.packet_type, rete_core::PacketType::Announce);
+
+        // Validate the announce and check ratchet is extracted
+        let info = crate::announce::validate_announce(
+            pkt.destination_hash,
+            pkt.payload,
+            pkt.context_flag,
+        )
+        .expect("should validate");
+        assert!(info.ratchet.is_some(), "ratchet should be present");
+        assert_eq!(info.ratchet.unwrap(), &ratchet_pub[..]);
+    }
+
+    #[test]
+    fn test_announce_without_ratchet_has_none() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(100);
+        let sender = Identity::from_seed(b"no-ratchet-sender").unwrap();
+
+        let mut buf = [0u8; rete_core::MTU];
+        let n = TestTransport::create_announce(
+            &sender,
+            "test",
+            &["noratchet"],
+            None,
+            None,
+            &mut rng,
+            1000,
+            &mut buf,
+        )
+        .expect("should build announce");
+
+        let pkt = rete_core::Packet::parse(&buf[..n]).expect("should parse");
+        assert!(!pkt.context_flag, "context_flag should NOT be set");
+
+        let info = crate::announce::validate_announce(
+            pkt.destination_hash,
+            pkt.payload,
+            pkt.context_flag,
+        )
+        .expect("should validate");
+        assert!(info.ratchet.is_none(), "ratchet should be None");
+    }
+
+    #[test]
+    fn test_ingest_ratchet_announce_returns_ratchet() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(101);
+        let sender = Identity::from_seed(b"ratchet-ingest-sender").unwrap();
+        let receiver = Identity::from_seed(b"ratchet-ingest-receiver").unwrap();
+        let ratchet_pub = [0xAB; 32];
+
+        let mut buf = [0u8; rete_core::MTU];
+        let n = TestTransport::create_announce(
+            &sender,
+            "test",
+            &["ratchet"],
+            None,
+            Some(&ratchet_pub),
+            &mut rng,
+            1000,
+            &mut buf,
+        )
+        .expect("should build");
+
+        let mut transport = TestTransport::new();
+        let result = transport.ingest(&mut buf[..n], 1000, &mut rng, &receiver);
+
+        match result {
+            IngestResult::AnnounceReceived { ratchet, .. } => {
+                assert_eq!(ratchet, Some(ratchet_pub), "ratchet should be passed through");
+            }
+            other => panic!("expected AnnounceReceived, got {:?}", other),
+        }
     }
 }

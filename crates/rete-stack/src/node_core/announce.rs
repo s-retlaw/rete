@@ -23,11 +23,16 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .map(|s| s.as_str())
             .collect();
         let mut buf = [0u8; MTU];
+        let ratchet_pub = self
+            .ratchet_store
+            .as_ref()
+            .and_then(|s| s.local_ratchet_public());
         let n = Transport::<P, A, D, L>::create_announce(
             &self.identity,
             &self.primary_dest.app_name,
             &aspects_refs,
             app_data,
+            ratchet_pub.as_ref(),
             rng,
             now,
             &mut buf,
@@ -75,12 +80,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         };
 
         let aspects_refs: Vec<&str> = dest.aspects.iter().map(|s| s.as_str()).collect();
+        let ratchet_pub = self
+            .ratchet_store
+            .as_ref()
+            .and_then(|s| s.local_ratchet_public());
         let mut buf = [0u8; MTU];
         let n = match Transport::<P, A, D, L>::create_announce(
             &self.identity,
             &dest.app_name,
             &aspects_refs,
             app_data,
+            ratchet_pub.as_ref(),
             rng,
             now,
             &mut buf,
