@@ -20,6 +20,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use rete_core::msgpack::{self, MsgpackError};
 use rete_core::TRUNCATED_HASH_LEN;
 use sha2::{Digest, Sha256};
 
@@ -45,6 +46,17 @@ pub enum RequestError {
     BadPathHashLen,
     /// Request ID has wrong length (expected 16 bytes).
     BadRequestIdLen,
+}
+
+impl From<MsgpackError> for RequestError {
+    fn from(e: MsgpackError) -> Self {
+        match e {
+            MsgpackError::Truncated => RequestError::TooShort,
+            MsgpackError::ExpectedArray => RequestError::BadArrayHeader,
+            MsgpackError::ExpectedFloat => RequestError::BadTimestamp,
+            _ => RequestError::BadBin,
+        }
+    }
 }
 
 /// Compute path hash: `SHA-256(path.as_bytes())[..16]`.
@@ -77,14 +89,13 @@ pub fn build_request(path: &str, data: &[u8], now_secs_f64: f64) -> Vec<u8> {
     buf.push(0x93);
 
     // float64
-    buf.push(0xcb);
-    buf.extend_from_slice(&now_secs_f64.to_be_bytes());
+    msgpack::write_float64(&mut buf, now_secs_f64);
 
     // path_hash as bin8 (always 16 bytes)
-    write_bin(&mut buf, &ph);
+    msgpack::write_bin(&mut buf, &ph);
 
     // data as bin
-    write_bin(&mut buf, data);
+    msgpack::write_bin(&mut buf, data);
 
     buf
 }
@@ -94,24 +105,24 @@ pub fn parse_request(packed: &[u8]) -> Result<(f64, [u8; PATH_HASH_LEN], Vec<u8>
     let mut pos = 0;
 
     // Read fixarray(3) header
-    let arr_len = read_array_len(packed, &mut pos)?;
+    let arr_len = msgpack::read_array_len(packed, &mut pos)?;
     if arr_len != 3 {
         return Err(RequestError::BadArrayHeader);
     }
 
     // Read float64 timestamp
-    let timestamp = read_float64(packed, &mut pos)?;
+    let timestamp = msgpack::read_float64(packed, &mut pos)?;
 
     // Read path_hash (bin, expect 16 bytes)
-    let ph_bytes = read_bin(packed, &mut pos)?;
+    let ph_bytes = msgpack::read_bin_or_str(packed, &mut pos)?;
     if ph_bytes.len() != PATH_HASH_LEN {
         return Err(RequestError::BadPathHashLen);
     }
     let mut ph = [0u8; PATH_HASH_LEN];
-    ph.copy_from_slice(&ph_bytes);
+    ph.copy_from_slice(ph_bytes);
 
     // Read data (bin)
-    let data = read_bin(packed, &mut pos)?;
+    let data = msgpack::read_bin_or_str(packed, &mut pos)?.to_vec();
 
     Ok((timestamp, ph, data))
 }
@@ -124,10 +135,10 @@ pub fn build_response(req_id: &[u8; REQUEST_ID_LEN], data: &[u8]) -> Vec<u8> {
     buf.push(0x92);
 
     // request_id as bin8 (always 16 bytes)
-    write_bin(&mut buf, req_id);
+    msgpack::write_bin(&mut buf, req_id);
 
     // response data as bin
-    write_bin(&mut buf, data);
+    msgpack::write_bin(&mut buf, data);
 
     buf
 }
@@ -137,160 +148,23 @@ pub fn parse_response(packed: &[u8]) -> Result<([u8; REQUEST_ID_LEN], Vec<u8>), 
     let mut pos = 0;
 
     // Read fixarray(2) header
-    let arr_len = read_array_len(packed, &mut pos)?;
+    let arr_len = msgpack::read_array_len(packed, &mut pos)?;
     if arr_len != 2 {
         return Err(RequestError::BadArrayHeader);
     }
 
     // Read request_id (bin, expect 16 bytes)
-    let rid_bytes = read_bin(packed, &mut pos)?;
+    let rid_bytes = msgpack::read_bin_or_str(packed, &mut pos)?;
     if rid_bytes.len() != REQUEST_ID_LEN {
         return Err(RequestError::BadRequestIdLen);
     }
     let mut rid = [0u8; REQUEST_ID_LEN];
-    rid.copy_from_slice(&rid_bytes);
+    rid.copy_from_slice(rid_bytes);
 
     // Read data (bin)
-    let data = read_bin(packed, &mut pos)?;
+    let data = msgpack::read_bin_or_str(packed, &mut pos)?.to_vec();
 
     Ok((rid, data))
-}
-
-// ---------------------------------------------------------------------------
-// Low-level msgpack helpers (minimal, no_std compatible)
-// ---------------------------------------------------------------------------
-
-fn write_bin(buf: &mut Vec<u8>, data: &[u8]) {
-    let len = data.len();
-    if len < 256 {
-        buf.push(0xc4); // bin8
-        buf.push(len as u8);
-    } else if len < 65536 {
-        buf.push(0xc5); // bin16
-        buf.extend_from_slice(&(len as u16).to_be_bytes());
-    } else {
-        buf.push(0xc6); // bin32
-        buf.extend_from_slice(&(len as u32).to_be_bytes());
-    }
-    buf.extend_from_slice(data);
-}
-
-fn read_array_len(data: &[u8], pos: &mut usize) -> Result<usize, RequestError> {
-    if *pos >= data.len() {
-        return Err(RequestError::TooShort);
-    }
-    let b = data[*pos];
-    *pos += 1;
-    if b & 0xf0 == 0x90 {
-        Ok((b & 0x0f) as usize)
-    } else if b == 0xdc {
-        // array16
-        if *pos + 2 > data.len() {
-            return Err(RequestError::TooShort);
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
-        *pos += 2;
-        Ok(n as usize)
-    } else {
-        Err(RequestError::BadArrayHeader)
-    }
-}
-
-fn read_float64(data: &[u8], pos: &mut usize) -> Result<f64, RequestError> {
-    if *pos >= data.len() {
-        return Err(RequestError::TooShort);
-    }
-    let b = data[*pos];
-    *pos += 1;
-    if b == 0xcb {
-        // float64
-        if *pos + 8 > data.len() {
-            return Err(RequestError::TooShort);
-        }
-        let bytes = [
-            data[*pos],
-            data[*pos + 1],
-            data[*pos + 2],
-            data[*pos + 3],
-            data[*pos + 4],
-            data[*pos + 5],
-            data[*pos + 6],
-            data[*pos + 7],
-        ];
-        *pos += 8;
-        Ok(f64::from_be_bytes(bytes))
-    } else if b == 0xca {
-        // float32
-        if *pos + 4 > data.len() {
-            return Err(RequestError::TooShort);
-        }
-        let bytes = [data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]];
-        *pos += 4;
-        Ok(f32::from_be_bytes(bytes) as f64)
-    } else {
-        Err(RequestError::BadTimestamp)
-    }
-}
-
-fn read_bin(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, RequestError> {
-    if *pos >= data.len() {
-        return Err(RequestError::TooShort);
-    }
-    let b = data[*pos];
-    *pos += 1;
-    let len = if b == 0xc4 {
-        // bin8
-        if *pos >= data.len() {
-            return Err(RequestError::TooShort);
-        }
-        let n = data[*pos] as usize;
-        *pos += 1;
-        n
-    } else if b == 0xc5 {
-        // bin16
-        if *pos + 2 > data.len() {
-            return Err(RequestError::TooShort);
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
-        *pos += 2;
-        n
-    } else if b == 0xc6 {
-        // bin32
-        if *pos + 4 > data.len() {
-            return Err(RequestError::TooShort);
-        }
-        let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-            as usize;
-        *pos += 4;
-        n
-    } else if b & 0xa0 == 0xa0 && b < 0xc0 {
-        // fixstr — treat as bin
-        (b & 0x1f) as usize
-    } else if b == 0xd9 {
-        // str8
-        if *pos >= data.len() {
-            return Err(RequestError::TooShort);
-        }
-        let n = data[*pos] as usize;
-        *pos += 1;
-        n
-    } else if b == 0xda {
-        // str16
-        if *pos + 2 > data.len() {
-            return Err(RequestError::TooShort);
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
-        *pos += 2;
-        n
-    } else {
-        return Err(RequestError::BadBin);
-    };
-    if *pos + len > data.len() {
-        return Err(RequestError::TooShort);
-    }
-    let val = data[*pos..*pos + len].to_vec();
-    *pos += len;
-    Ok(val)
 }
 
 // ---------------------------------------------------------------------------

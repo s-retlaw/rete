@@ -11,7 +11,7 @@ default = ["router"]
 router = ["rete-stack", "rete-transport", "rand_core", "bzip2"]
 
 [dependencies]
-rete-core = { workspace = true }
+rete-core = { workspace = true, features = ["alloc"] }
 rete-stack = { workspace = true, optional = true }
 rete-transport = { workspace = true, optional = true }
 rand_core = { workspace = true, optional = true }

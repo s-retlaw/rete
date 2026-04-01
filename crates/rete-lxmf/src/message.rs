@@ -1,5 +1,6 @@
 //! LXMF message — pack, unpack, sign, verify.
 
+use rete_core::msgpack;
 use rete_core::Identity;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -288,14 +289,13 @@ fn encode_msgpack_payload(
     buf.push(0x94);
 
     // float64
-    buf.push(0xcb);
-    buf.extend_from_slice(&timestamp.to_be_bytes());
+    msgpack::write_float64(&mut buf, timestamp);
 
     // title as bin
-    write_bin(&mut buf, title);
+    msgpack::write_bin(&mut buf, title);
 
     // content as bin
-    write_bin(&mut buf, content);
+    msgpack::write_bin(&mut buf, content);
 
     // fields as map
     write_map(&mut buf, fields);
@@ -312,19 +312,19 @@ fn decode_msgpack_payload(data: &[u8]) -> Result<DecodedPayload, &'static str> {
 
     // Read array header: 4 elements [ts, title, content, fields] or
     // 5 elements [ts, title, content, fields, stamp] (Python LXMF >= 0.9.x)
-    let arr_len = read_array_len(data, &mut pos)?;
+    let arr_len = msgpack::read_array_len(data, &mut pos).map_err(|e| e.as_str())?;
     if !(4..=5).contains(&arr_len) {
         return Err("expected array of 4 or 5 elements");
     }
 
     // Read timestamp (float64)
-    let timestamp = read_float64(data, &mut pos)?;
+    let timestamp = msgpack::read_float64(data, &mut pos).map_err(|e| e.as_str())?;
 
     // Read title (bin)
-    let title = read_bin(data, &mut pos)?;
+    let title = msgpack::read_bin_or_str(data, &mut pos).map_err(|e| e.as_str())?.to_vec();
 
     // Read content (bin)
-    let content = read_bin(data, &mut pos)?;
+    let content = msgpack::read_bin_or_str(data, &mut pos).map_err(|e| e.as_str())?.to_vec();
 
     // Read fields (map)
     let fields = read_map(data, &mut pos)?;
@@ -333,238 +333,23 @@ fn decode_msgpack_payload(data: &[u8]) -> Result<DecodedPayload, &'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// Low-level msgpack helpers
+// Domain-specific msgpack helpers (use rete_core::msgpack primitives)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn write_bin(buf: &mut Vec<u8>, data: &[u8]) {
-    let len = data.len();
-    if len < 256 {
-        buf.push(0xc4); // bin8
-        buf.push(len as u8);
-    } else if len < 65536 {
-        buf.push(0xc5); // bin16
-        buf.extend_from_slice(&(len as u16).to_be_bytes());
-    } else {
-        buf.push(0xc6); // bin32
-        buf.extend_from_slice(&(len as u32).to_be_bytes());
-    }
-    buf.extend_from_slice(data);
-}
-
 fn write_map(buf: &mut Vec<u8>, map: &BTreeMap<u8, Vec<u8>>) {
-    let len = map.len();
-    if len < 16 {
-        buf.push(0x80 | len as u8); // fixmap
-    } else if len < 65536 {
-        buf.push(0xde); // map16
-        buf.extend_from_slice(&(len as u16).to_be_bytes());
-    } else {
-        buf.push(0xdf); // map32
-        buf.extend_from_slice(&(len as u32).to_be_bytes());
-    }
+    msgpack::write_map_header(buf, map.len());
     for (&key, val) in map {
-        // Key: positive fixint (u8 < 128) or uint8
-        if key < 128 {
-            buf.push(key);
-        } else {
-            buf.push(0xcc);
-            buf.push(key);
-        }
-        write_bin(buf, val);
+        msgpack::write_uint(buf, key as u64);
+        msgpack::write_bin(buf, val);
     }
-}
-
-pub(crate) fn read_array_len(data: &[u8], pos: &mut usize) -> Result<usize, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    if b & 0xf0 == 0x90 {
-        Ok((b & 0x0f) as usize)
-    } else if b == 0xdc {
-        if *pos + 2 > data.len() {
-            return Err("unexpected end");
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
-        *pos += 2;
-        Ok(n as usize)
-    } else {
-        Err("expected array")
-    }
-}
-
-fn read_float64(data: &[u8], pos: &mut usize) -> Result<f64, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    if b == 0xcb {
-        if *pos + 8 > data.len() {
-            return Err("unexpected end");
-        }
-        let bytes = [
-            data[*pos],
-            data[*pos + 1],
-            data[*pos + 2],
-            data[*pos + 3],
-            data[*pos + 4],
-            data[*pos + 5],
-            data[*pos + 6],
-            data[*pos + 7],
-        ];
-        *pos += 8;
-        Ok(f64::from_be_bytes(bytes))
-    } else if b == 0xca {
-        // float32
-        if *pos + 4 > data.len() {
-            return Err("unexpected end");
-        }
-        let bytes = [data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]];
-        *pos += 4;
-        Ok(f32::from_be_bytes(bytes) as f64)
-    } else {
-        // Could be an integer type representing the timestamp
-        *pos -= 1;
-        let v = read_uint(data, pos)?;
-        Ok(v as f64)
-    }
-}
-
-fn read_uint(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    if b < 0x80 {
-        Ok(b as u64)
-    } else if b == 0xcc {
-        if *pos >= data.len() {
-            return Err("unexpected end");
-        }
-        let v = data[*pos];
-        *pos += 1;
-        Ok(v as u64)
-    } else if b == 0xcd {
-        if *pos + 2 > data.len() {
-            return Err("unexpected end");
-        }
-        let v = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
-        *pos += 2;
-        Ok(v as u64)
-    } else if b == 0xce {
-        if *pos + 4 > data.len() {
-            return Err("unexpected end");
-        }
-        let v = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-        *pos += 4;
-        Ok(v as u64)
-    } else if b == 0xcf {
-        if *pos + 8 > data.len() {
-            return Err("unexpected end");
-        }
-        let v = u64::from_be_bytes([
-            data[*pos],
-            data[*pos + 1],
-            data[*pos + 2],
-            data[*pos + 3],
-            data[*pos + 4],
-            data[*pos + 5],
-            data[*pos + 6],
-            data[*pos + 7],
-        ]);
-        *pos += 8;
-        Ok(v)
-    } else {
-        Err("expected uint")
-    }
-}
-
-pub(crate) fn read_bin(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    let len = if b == 0xc4 {
-        // bin8
-        if *pos >= data.len() {
-            return Err("unexpected end");
-        }
-        let n = data[*pos] as usize;
-        *pos += 1;
-        n
-    } else if b == 0xc5 {
-        // bin16
-        if *pos + 2 > data.len() {
-            return Err("unexpected end");
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
-        *pos += 2;
-        n
-    } else if b == 0xc6 {
-        // bin32
-        if *pos + 4 > data.len() {
-            return Err("unexpected end");
-        }
-        let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-            as usize;
-        *pos += 4;
-        n
-    } else if b & 0xa0 == 0xa0 && b < 0xc0 {
-        // fixstr — treat as bin
-        (b & 0x1f) as usize
-    } else if b == 0xd9 {
-        // str8
-        if *pos >= data.len() {
-            return Err("unexpected end");
-        }
-        let n = data[*pos] as usize;
-        *pos += 1;
-        n
-    } else if b == 0xda {
-        // str16
-        if *pos + 2 > data.len() {
-            return Err("unexpected end");
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
-        *pos += 2;
-        n
-    } else {
-        return Err("expected bin or str");
-    };
-    if *pos + len > data.len() {
-        return Err("unexpected end");
-    }
-    let val = data[*pos..*pos + len].to_vec();
-    *pos += len;
-    Ok(val)
 }
 
 fn read_map(data: &[u8], pos: &mut usize) -> Result<BTreeMap<u8, Vec<u8>>, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    let len = if b & 0xf0 == 0x80 {
-        (b & 0x0f) as usize
-    } else if b == 0xde {
-        if *pos + 2 > data.len() {
-            return Err("unexpected end");
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
-        *pos += 2;
-        n
-    } else {
-        return Err("expected map");
-    };
+    let len = msgpack::read_map_len(data, pos).map_err(|e| e.as_str())?;
     let mut map = BTreeMap::new();
     for _ in 0..len {
-        let key = read_uint(data, pos)? as u8;
-        let val = read_bin(data, pos)?;
+        let key = msgpack::read_uint(data, pos).map_err(|e| e.as_str())? as u8;
+        let val = msgpack::read_bin_or_str(data, pos).map_err(|e| e.as_str())?.to_vec();
         map.insert(key, val);
     }
     Ok(map)

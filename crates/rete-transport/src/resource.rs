@@ -16,6 +16,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use rand_core::{CryptoRng, RngCore};
+use rete_core::msgpack;
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
@@ -80,492 +81,6 @@ pub fn hashmap_max_len(link_mdu: usize) -> usize {
     } else {
         1 // minimum: at least one hash per segment
     }
-}
-
-// ---------------------------------------------------------------------------
-// Minimal msgpack helpers (no std dependency)
-// ---------------------------------------------------------------------------
-
-/// Write a msgpack fixmap header for `n` entries (n < 16).
-fn write_msgpack_fixmap(buf: &mut Vec<u8>, n: u8) {
-    debug_assert!(n < 16);
-    buf.push(0x80 | n);
-}
-
-/// Write a msgpack fixstr of length 1 (single ASCII character key).
-fn write_msgpack_fixstr1(buf: &mut Vec<u8>, ch: u8) {
-    buf.push(0xa1); // fixstr of length 1
-    buf.push(ch);
-}
-
-/// Write a msgpack nil value.
-fn write_msgpack_nil(buf: &mut Vec<u8>) {
-    buf.push(0xc0);
-}
-
-/// Write a msgpack fixarray header for `n` elements (n < 16).
-fn write_msgpack_fixarray(buf: &mut Vec<u8>, n: u8) {
-    debug_assert!(n < 16);
-    buf.push(0x90 | n);
-}
-
-/// Write a msgpack bin value.
-fn write_msgpack_bin(buf: &mut Vec<u8>, data: &[u8]) {
-    let len = data.len();
-    if len < 256 {
-        buf.push(0xc4); // bin8
-        buf.push(len as u8);
-    } else if len < 65536 {
-        buf.push(0xc5); // bin16
-        buf.extend_from_slice(&(len as u16).to_be_bytes());
-    } else {
-        buf.push(0xc6); // bin32
-        buf.extend_from_slice(&(len as u32).to_be_bytes());
-    }
-    buf.extend_from_slice(data);
-}
-
-/// Write a msgpack unsigned integer.
-fn write_msgpack_uint(buf: &mut Vec<u8>, val: u64) {
-    if val < 128 {
-        buf.push(val as u8); // positive fixint
-    } else if val < 256 {
-        buf.push(0xcc);
-        buf.push(val as u8);
-    } else if val < 65536 {
-        buf.push(0xcd);
-        buf.extend_from_slice(&(val as u16).to_be_bytes());
-    } else if val < 0x1_0000_0000 {
-        buf.push(0xce);
-        buf.extend_from_slice(&(val as u32).to_be_bytes());
-    } else {
-        buf.push(0xcf);
-        buf.extend_from_slice(&val.to_be_bytes());
-    }
-}
-
-/// Read a msgpack map length. Advances `pos`.
-fn read_msgpack_map_len(data: &[u8], pos: &mut usize) -> Result<usize, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    if b & 0xF0 == 0x80 {
-        // fixmap
-        Ok((b & 0x0F) as usize)
-    } else if b == 0xde {
-        // map16
-        if *pos + 2 > data.len() {
-            return Err("truncated map16 length");
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
-        *pos += 2;
-        Ok(n as usize)
-    } else if b == 0xdf {
-        // map32
-        if *pos + 4 > data.len() {
-            return Err("truncated map32 length");
-        }
-        let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-        *pos += 4;
-        Ok(n as usize)
-    } else {
-        Err("expected msgpack map")
-    }
-}
-
-/// Read a msgpack string. Returns the raw bytes of the string. Advances `pos`.
-fn read_msgpack_str<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    let len = if b & 0xe0 == 0xa0 {
-        // fixstr: length = b & 0x1f
-        (b & 0x1f) as usize
-    } else if b == 0xd9 {
-        // str8
-        if *pos >= data.len() {
-            return Err("truncated str8 length");
-        }
-        let n = data[*pos] as usize;
-        *pos += 1;
-        n
-    } else if b == 0xda {
-        // str16
-        if *pos + 2 > data.len() {
-            return Err("truncated str16 length");
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
-        *pos += 2;
-        n
-    } else if b == 0xdb {
-        // str32
-        if *pos + 4 > data.len() {
-            return Err("truncated str32 length");
-        }
-        let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-            as usize;
-        *pos += 4;
-        n
-    } else {
-        return Err("expected msgpack str");
-    };
-    if *pos + len > data.len() {
-        return Err("truncated str data");
-    }
-    let result = &data[*pos..*pos + len];
-    *pos += len;
-    Ok(result)
-}
-
-/// Read a msgpack array length. Advances `pos`.
-fn read_msgpack_array_len(data: &[u8], pos: &mut usize) -> Result<usize, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    if b & 0xF0 == 0x90 {
-        // fixarray
-        Ok((b & 0x0F) as usize)
-    } else if b == 0xdc {
-        // array16
-        if *pos + 2 > data.len() {
-            return Err("truncated array16 length");
-        }
-        let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
-        *pos += 2;
-        Ok(n as usize)
-    } else if b == 0xdd {
-        // array32
-        if *pos + 4 > data.len() {
-            return Err("truncated array32 length");
-        }
-        let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-        *pos += 4;
-        Ok(n as usize)
-    } else {
-        Err("expected msgpack array")
-    }
-}
-
-/// Read a msgpack bin value. Returns a slice into `data`. Advances `pos`.
-fn read_msgpack_bin<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    let len = match b {
-        0xc4 => {
-            // bin8
-            if *pos >= data.len() {
-                return Err("truncated bin8 length");
-            }
-            let n = data[*pos] as usize;
-            *pos += 1;
-            n
-        }
-        0xc5 => {
-            // bin16
-            if *pos + 2 > data.len() {
-                return Err("truncated bin16 length");
-            }
-            let n = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
-            *pos += 2;
-            n
-        }
-        0xc6 => {
-            // bin32
-            if *pos + 4 > data.len() {
-                return Err("truncated bin32 length");
-            }
-            let n = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-                as usize;
-            *pos += 4;
-            n
-        }
-        _ => return Err("expected msgpack bin"),
-    };
-    if *pos + len > data.len() {
-        return Err("truncated bin data");
-    }
-    let result = &data[*pos..*pos + len];
-    *pos += len;
-    Ok(result)
-}
-
-/// Read a msgpack bin or str value (Python msgpack sometimes encodes bytes as
-/// either bin or str depending on version/settings). Advances `pos`.
-fn read_msgpack_bin_or_str<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    let b = data[*pos];
-    // Check if it's a str type first
-    if (b & 0xe0 == 0xa0) || b == 0xd9 || b == 0xda || b == 0xdb {
-        read_msgpack_str(data, pos)
-    } else {
-        read_msgpack_bin(data, pos)
-    }
-}
-
-/// Read a msgpack unsigned integer. Advances `pos`.
-///
-/// Also accepts booleans (false→0, true→1) and signed integers (as unsigned)
-/// for compatibility with Python msgpack encoding variants.
-fn read_msgpack_uint(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    let b = data[*pos];
-    *pos += 1;
-    match b {
-        // positive fixint
-        0x00..=0x7f => Ok(b as u64),
-        // false → 0
-        0xc2 => Ok(0),
-        // true → 1
-        0xc3 => Ok(1),
-        // uint8
-        0xcc => {
-            if *pos >= data.len() {
-                return Err("truncated uint8");
-            }
-            let v = data[*pos] as u64;
-            *pos += 1;
-            Ok(v)
-        }
-        // uint16
-        0xcd => {
-            if *pos + 2 > data.len() {
-                return Err("truncated uint16");
-            }
-            let v = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as u64;
-            *pos += 2;
-            Ok(v)
-        }
-        // uint32
-        0xce => {
-            if *pos + 4 > data.len() {
-                return Err("truncated uint32");
-            }
-            let v = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
-                as u64;
-            *pos += 4;
-            Ok(v)
-        }
-        // uint64
-        0xcf => {
-            if *pos + 8 > data.len() {
-                return Err("truncated uint64");
-            }
-            let v = u64::from_be_bytes([
-                data[*pos],
-                data[*pos + 1],
-                data[*pos + 2],
-                data[*pos + 3],
-                data[*pos + 4],
-                data[*pos + 5],
-                data[*pos + 6],
-                data[*pos + 7],
-            ]);
-            *pos += 8;
-            Ok(v)
-        }
-        // int8 (signed, treat as unsigned for non-negative values)
-        0xd0 => {
-            if *pos >= data.len() {
-                return Err("truncated int8");
-            }
-            let v = data[*pos] as i8;
-            *pos += 1;
-            Ok(v as u64)
-        }
-        // int16
-        0xd1 => {
-            if *pos + 2 > data.len() {
-                return Err("truncated int16");
-            }
-            let v = i16::from_be_bytes([data[*pos], data[*pos + 1]]);
-            *pos += 2;
-            Ok(v as u64)
-        }
-        // int32
-        0xd2 => {
-            if *pos + 4 > data.len() {
-                return Err("truncated int32");
-            }
-            let v =
-                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-            *pos += 4;
-            Ok(v as u64)
-        }
-        // int64
-        0xd3 => {
-            if *pos + 8 > data.len() {
-                return Err("truncated int64");
-            }
-            let v = i64::from_be_bytes([
-                data[*pos],
-                data[*pos + 1],
-                data[*pos + 2],
-                data[*pos + 3],
-                data[*pos + 4],
-                data[*pos + 5],
-                data[*pos + 6],
-                data[*pos + 7],
-            ]);
-            *pos += 8;
-            Ok(v as u64)
-        }
-        // negative fixint (-32 to -1)
-        0xe0..=0xff => Ok(b as i8 as u64),
-        _ => Err("expected msgpack uint"),
-    }
-}
-
-/// Read a msgpack unsigned integer or nil. Returns `None` for nil, `Some(v)` for uint.
-fn read_msgpack_uint_or_nil(data: &[u8], pos: &mut usize) -> Result<Option<u64>, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    if data[*pos] == 0xc0 {
-        *pos += 1;
-        Ok(None)
-    } else {
-        read_msgpack_uint(data, pos).map(Some)
-    }
-}
-
-/// Read a msgpack bin/str or nil. Returns `None` for nil, `Some(bytes)` otherwise.
-fn read_msgpack_bin_or_nil<'a>(
-    data: &'a [u8],
-    pos: &mut usize,
-) -> Result<Option<&'a [u8]>, &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    if data[*pos] == 0xc0 {
-        *pos += 1;
-        Ok(None)
-    } else {
-        read_msgpack_bin_or_str(data, pos).map(Some)
-    }
-}
-
-/// Skip a single msgpack value at `pos`. Advances `pos` past it.
-fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Result<(), &'static str> {
-    if *pos >= data.len() {
-        return Err("unexpected end of msgpack data");
-    }
-    let b = data[*pos];
-    match b {
-        // nil, false, true
-        0xc0 | 0xc2 | 0xc3 => {
-            *pos += 1;
-        }
-        // positive fixint
-        0x00..=0x7f => {
-            *pos += 1;
-        }
-        // negative fixint
-        0xe0..=0xff => {
-            *pos += 1;
-        }
-        // fixstr
-        b if b & 0xe0 == 0xa0 => {
-            let _ = read_msgpack_str(data, pos)?;
-        }
-        // fixmap
-        b if b & 0xf0 == 0x80 => {
-            let n = (b & 0x0f) as usize;
-            *pos += 1;
-            for _ in 0..n {
-                skip_msgpack_value(data, pos)?;
-                skip_msgpack_value(data, pos)?;
-            }
-        }
-        // fixarray
-        b if b & 0xf0 == 0x90 => {
-            let n = (b & 0x0f) as usize;
-            *pos += 1;
-            for _ in 0..n {
-                skip_msgpack_value(data, pos)?;
-            }
-        }
-        // bin8
-        0xc4 => {
-            let _ = read_msgpack_bin(data, pos)?;
-        }
-        // bin16
-        0xc5 => {
-            let _ = read_msgpack_bin(data, pos)?;
-        }
-        // bin32
-        0xc6 => {
-            let _ = read_msgpack_bin(data, pos)?;
-        }
-        // uint8
-        0xcc => {
-            *pos += 2;
-        }
-        // uint16
-        0xcd => {
-            *pos += 3;
-        }
-        // uint32
-        0xce => {
-            *pos += 5;
-        }
-        // uint64
-        0xcf => {
-            *pos += 9;
-        }
-        // int8
-        0xd0 => {
-            *pos += 2;
-        }
-        // int16
-        0xd1 => {
-            *pos += 3;
-        }
-        // int32
-        0xd2 => {
-            *pos += 5;
-        }
-        // int64
-        0xd3 => {
-            *pos += 9;
-        }
-        // str8
-        0xd9 => {
-            let _ = read_msgpack_str(data, pos)?;
-        }
-        // str16
-        0xda => {
-            let _ = read_msgpack_str(data, pos)?;
-        }
-        // str32
-        0xdb => {
-            let _ = read_msgpack_str(data, pos)?;
-        }
-        // array16
-        0xdc => {
-            let n = read_msgpack_array_len(data, pos)?;
-            // pos already advanced past header by read_msgpack_array_len
-            // Actually we already consumed the byte; re-read properly
-            // read_msgpack_array_len already advances pos past the header
-            for _ in 0..n {
-                skip_msgpack_value(data, pos)?;
-            }
-        }
-        _ => return Err("unsupported msgpack type in skip"),
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -867,51 +382,51 @@ impl Resource {
         }
 
         let mut buf = Vec::new();
-        write_msgpack_fixmap(&mut buf, 11); // 11 key-value pairs
+        msgpack::write_fixmap(&mut buf, 11); // 11 key-value pairs
 
         // "t" = transfer_size (same as data size for uncompressed)
-        write_msgpack_fixstr1(&mut buf, b't');
-        write_msgpack_uint(&mut buf, self.total_size as u64);
+        msgpack::write_fixstr1(&mut buf, b't');
+        msgpack::write_uint(&mut buf, self.total_size as u64);
 
         // "d" = data_size (original plaintext size, before prepend/compress/encrypt)
-        write_msgpack_fixstr1(&mut buf, b'd');
-        write_msgpack_uint(&mut buf, self.original_size as u64);
+        msgpack::write_fixstr1(&mut buf, b'd');
+        msgpack::write_uint(&mut buf, self.original_size as u64);
 
         // "n" = num_parts
-        write_msgpack_fixstr1(&mut buf, b'n');
-        write_msgpack_uint(&mut buf, self.total_segments as u64);
+        msgpack::write_fixstr1(&mut buf, b'n');
+        msgpack::write_uint(&mut buf, self.total_segments as u64);
 
         // "h" = resource_hash (32 bytes)
-        write_msgpack_fixstr1(&mut buf, b'h');
-        write_msgpack_bin(&mut buf, &self.resource_hash);
+        msgpack::write_fixstr1(&mut buf, b'h');
+        msgpack::write_bin(&mut buf, &self.resource_hash);
 
         // "r" = random_hash (4 bytes)
-        write_msgpack_fixstr1(&mut buf, b'r');
-        write_msgpack_bin(&mut buf, &self.random_hash);
+        msgpack::write_fixstr1(&mut buf, b'r');
+        msgpack::write_bin(&mut buf, &self.random_hash);
 
         // "o" = original_hash (group key for split resources, or resource_hash for non-split)
-        write_msgpack_fixstr1(&mut buf, b'o');
-        write_msgpack_bin(&mut buf, &self.original_hash);
+        msgpack::write_fixstr1(&mut buf, b'o');
+        msgpack::write_bin(&mut buf, &self.original_hash);
 
         // "i" = split segment index (1-based, matching Python RNS convention)
-        write_msgpack_fixstr1(&mut buf, b'i');
-        write_msgpack_uint(&mut buf, self.split_index as u64);
+        msgpack::write_fixstr1(&mut buf, b'i');
+        msgpack::write_uint(&mut buf, self.split_index as u64);
 
         // "l" = total split segments (1 for non-split, matching Python RNS convention)
-        write_msgpack_fixstr1(&mut buf, b'l');
-        write_msgpack_uint(&mut buf, self.split_total as u64);
+        msgpack::write_fixstr1(&mut buf, b'l');
+        msgpack::write_uint(&mut buf, self.split_total as u64);
 
         // "q" = request_id (None for normal resources)
-        write_msgpack_fixstr1(&mut buf, b'q');
-        write_msgpack_nil(&mut buf);
+        msgpack::write_fixstr1(&mut buf, b'q');
+        msgpack::write_nil(&mut buf);
 
         // "f" = flags byte
-        write_msgpack_fixstr1(&mut buf, b'f');
-        write_msgpack_uint(&mut buf, self.flags.to_byte() as u64);
+        msgpack::write_fixstr1(&mut buf, b'f');
+        msgpack::write_uint(&mut buf, self.flags.to_byte() as u64);
 
         // "m" = hashmap bytes
-        write_msgpack_fixstr1(&mut buf, b'm');
-        write_msgpack_bin(&mut buf, &hashmap_bytes);
+        msgpack::write_fixstr1(&mut buf, b'm');
+        msgpack::write_bin(&mut buf, &hashmap_bytes);
 
         buf
     }
@@ -1096,9 +611,9 @@ impl Resource {
         // Build msgpack: [segment_number, hashmap_chunk_bytes]
         // Python expects segment_number (0, 1, 2...) NOT the raw cursor
         let mut msgpack_part = Vec::new();
-        write_msgpack_fixarray(&mut msgpack_part, 2);
-        write_msgpack_uint(&mut msgpack_part, segment_number as u64);
-        write_msgpack_bin(&mut msgpack_part, &chunk_bytes);
+        msgpack::write_fixarray(&mut msgpack_part, 2);
+        msgpack::write_uint(&mut msgpack_part, segment_number as u64);
+        msgpack::write_bin(&mut msgpack_part, &chunk_bytes);
 
         // Full payload: resource_hash[32] || msgpack
         let mut payload = Vec::with_capacity(32 + msgpack_part.len());
@@ -1121,7 +636,7 @@ impl Resource {
     pub fn from_advertisement(adv_payload: &[u8], link_id: [u8; 16]) -> Result<Self, &'static str> {
         let mut pos = 0;
 
-        let map_len = read_msgpack_map_len(adv_payload, &mut pos)?;
+        let map_len = msgpack::read_map_len(adv_payload, &mut pos).map_err(|e| e.as_str())?;
 
         // Parse key-value pairs from the map
         let mut transfer_size: Option<usize> = None;
@@ -1138,26 +653,26 @@ impl Resource {
 
         for _ in 0..map_len {
             // Read key (should be a 1-char string; accept bin for compat)
-            let key_bytes = read_msgpack_bin_or_str(adv_payload, &mut pos)?;
+            let key_bytes = msgpack::read_bin_or_str(adv_payload, &mut pos).map_err(|e| e.as_str())?;
             if key_bytes.len() != 1 {
                 // Skip unknown key
-                skip_msgpack_value(adv_payload, &mut pos)?;
+                msgpack::skip_value(adv_payload, &mut pos).map_err(|e| e.as_str())?;
                 continue;
             }
             let key = key_bytes[0];
 
             match key {
                 b't' => {
-                    transfer_size = Some(read_msgpack_uint(adv_payload, &mut pos)? as usize);
+                    transfer_size = Some(msgpack::read_uint(adv_payload, &mut pos).map_err(|e| e.as_str())? as usize);
                 }
                 b'd' => {
-                    _data_size = Some(read_msgpack_uint(adv_payload, &mut pos)? as usize);
+                    _data_size = Some(msgpack::read_uint(adv_payload, &mut pos).map_err(|e| e.as_str())? as usize);
                 }
                 b'n' => {
-                    num_parts = Some(read_msgpack_uint(adv_payload, &mut pos)? as usize);
+                    num_parts = Some(msgpack::read_uint(adv_payload, &mut pos).map_err(|e| e.as_str())? as usize);
                 }
                 b'h' => {
-                    let rh = read_msgpack_bin_or_str(adv_payload, &mut pos)?;
+                    let rh = msgpack::read_bin_or_str(adv_payload, &mut pos).map_err(|e| e.as_str())?;
                     if rh.len() != 32 {
                         return Err("resource_hash must be 32 bytes");
                     }
@@ -1166,7 +681,7 @@ impl Resource {
                     resource_hash_bytes = Some(arr);
                 }
                 b'r' => {
-                    let rh = read_msgpack_bin_or_str(adv_payload, &mut pos)?;
+                    let rh = msgpack::read_bin_or_str(adv_payload, &mut pos).map_err(|e| e.as_str())?;
                     if rh.len() != RANDOM_HASH_SIZE {
                         return Err("random_hash must be 4 bytes");
                     }
@@ -1175,7 +690,7 @@ impl Resource {
                     random_hash_bytes = Some(arr);
                 }
                 b'o' => {
-                    match read_msgpack_bin_or_nil(adv_payload, &mut pos)? {
+                    match msgpack::read_bin_or_nil(adv_payload, &mut pos).map_err(|e| e.as_str())? {
                         Some(oh) if oh.len() == 32 => {
                             let mut arr = [0u8; 32];
                             arr.copy_from_slice(oh);
@@ -1186,28 +701,28 @@ impl Resource {
                 }
                 b'i' => {
                     split_index =
-                        read_msgpack_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(1) as usize;
+                        msgpack::read_uint_or_nil(adv_payload, &mut pos).map_err(|e| e.as_str())?.unwrap_or(1) as usize;
                 }
                 b'l' => {
                     split_total =
-                        read_msgpack_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(1) as usize;
+                        msgpack::read_uint_or_nil(adv_payload, &mut pos).map_err(|e| e.as_str())?.unwrap_or(1) as usize;
                 }
                 b'q' => {
                     // request_id: can be nil, bin, or str
-                    match read_msgpack_bin_or_nil(adv_payload, &mut pos)? {
+                    match msgpack::read_bin_or_nil(adv_payload, &mut pos).map_err(|e| e.as_str())? {
                         Some(q) => _request_id = Some(q.to_vec()),
                         None => _request_id = None,
                     }
                 }
                 b'f' => {
-                    flags_byte = read_msgpack_uint(adv_payload, &mut pos)? as u8;
+                    flags_byte = msgpack::read_uint(adv_payload, &mut pos).map_err(|e| e.as_str())? as u8;
                 }
                 b'm' => {
-                    hashmap_raw = Some(read_msgpack_bin_or_str(adv_payload, &mut pos)?);
+                    hashmap_raw = Some(msgpack::read_bin_or_str(adv_payload, &mut pos).map_err(|e| e.as_str())?);
                 }
                 _ => {
                     // Unknown key, skip value
-                    skip_msgpack_value(adv_payload, &mut pos)?;
+                    msgpack::skip_value(adv_payload, &mut pos).map_err(|e| e.as_str())?;
                 }
             }
         }
@@ -1442,13 +957,13 @@ impl Resource {
         let msgpack_data = &hmu_payload[32..];
         let mut pos = 0;
 
-        let array_len = read_msgpack_array_len(msgpack_data, &mut pos)?;
+        let array_len = msgpack::read_array_len(msgpack_data, &mut pos).map_err(|e| e.as_str())?;
         if array_len != 2 {
             return Err("expected 2-element msgpack array in hashmap update");
         }
 
-        let segment_index = read_msgpack_uint(msgpack_data, &mut pos)? as usize;
-        let new_hashes = read_msgpack_bin(msgpack_data, &mut pos)?;
+        let segment_index = msgpack::read_uint(msgpack_data, &mut pos).map_err(|e| e.as_str())? as usize;
+        let new_hashes = msgpack::read_bin(msgpack_data, &mut pos).map_err(|e| e.as_str())?;
 
         // Place hashes at the correct segment-aligned position
         let placement_start = segment_index * self.hashmap_max_len;

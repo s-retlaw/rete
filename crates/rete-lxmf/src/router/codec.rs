@@ -1,20 +1,12 @@
 //! Shared msgpack helpers, bz2 compression, announce parsing.
 
+use rete_core::msgpack;
+
 /// Encode a u32 as a msgpack unsigned integer.
 pub(super) fn encode_msgpack_uint(val: u32) -> Vec<u8> {
-    if val < 128 {
-        vec![val as u8]
-    } else if val < 256 {
-        vec![0xcc, val as u8]
-    } else if val < 65536 {
-        let mut buf = vec![0xcd];
-        buf.extend_from_slice(&(val as u16).to_be_bytes());
-        buf
-    } else {
-        let mut buf = vec![0xce];
-        buf.extend_from_slice(&val.to_be_bytes());
-        buf
-    }
+    let mut buf = Vec::new();
+    msgpack::write_uint(&mut buf, val as u64);
+    buf
 }
 
 /// Compress data with bz2 (matching Python LXMF Resource convention).
@@ -42,11 +34,11 @@ pub(super) fn try_parse_lxmf_announce_data(data: &[u8]) -> Option<Vec<u8>> {
 /// Parse full LXMF announce app_data including propagation flag.
 pub(super) fn parse_lxmf_announce_data(data: &[u8]) -> Option<LxmfAnnounceData> {
     let mut pos = 0;
-    let arr_len = crate::message::read_array_len(data, &mut pos).ok()?;
+    let arr_len = msgpack::read_array_len(data, &mut pos).ok()?;
     if arr_len < 2 {
         return None;
     }
-    let display_name = crate::message::read_bin(data, &mut pos).ok()?;
+    let display_name = msgpack::read_bin_or_str(data, &mut pos).ok()?.to_vec();
     // Second element: 0xc3 = true (propagation), integer = stamp_cost (delivery)
     let is_propagation = data.get(pos) == Some(&0xc3);
     Some(LxmfAnnounceData {
@@ -55,25 +47,12 @@ pub(super) fn parse_lxmf_announce_data(data: &[u8]) -> Option<LxmfAnnounceData> 
     })
 }
 
-/// Write a msgpack array header for the given length.
-fn write_array_header(buf: &mut Vec<u8>, len: usize) {
-    if len <= 15 {
-        buf.push(0x90 | len as u8);
-    } else if len <= 0xFFFF {
-        buf.push(0xdc);
-        buf.extend_from_slice(&(len as u16).to_be_bytes());
-    } else {
-        buf.push(0xdd);
-        buf.extend_from_slice(&(len as u32).to_be_bytes());
-    }
-}
-
 /// Encode a list of message hashes as a msgpack array of bin32 elements.
 pub(super) fn encode_offer_hashes(hashes: &[[u8; 32]]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(5 + hashes.len() * 35);
-    write_array_header(&mut buf, hashes.len());
+    msgpack::write_array_header(&mut buf, hashes.len());
     for h in hashes {
-        crate::message::write_bin(&mut buf, h);
+        msgpack::write_bin(&mut buf, h);
     }
     buf
 }
@@ -81,15 +60,15 @@ pub(super) fn encode_offer_hashes(hashes: &[[u8; 32]]) -> Vec<u8> {
 /// Decode a msgpack array of bin elements into message hashes.
 pub(super) fn decode_offer_hashes(data: &[u8]) -> Option<Vec<[u8; 32]>> {
     let mut pos = 0;
-    let arr_len = crate::message::read_array_len(data, &mut pos).ok()?;
+    let arr_len = msgpack::read_array_len(data, &mut pos).ok()?;
     let mut hashes = Vec::with_capacity(arr_len);
     for _ in 0..arr_len {
-        let bin = crate::message::read_bin(data, &mut pos).ok()?;
+        let bin = msgpack::read_bin_or_str(data, &mut pos).ok()?;
         if bin.len() != 32 {
             return None;
         }
         let mut h = [0u8; 32];
-        h.copy_from_slice(&bin);
+        h.copy_from_slice(bin);
         hashes.push(h);
     }
     Some(hashes)
@@ -117,12 +96,11 @@ pub(super) fn pack_sync_messages(now: u64, messages: &[Vec<u8>]) -> Vec<u8> {
     buf.push(0x92); // fixarray(2)
 
     // timestamp as float64
-    buf.push(0xcb);
-    buf.extend_from_slice(&(now as f64).to_be_bytes());
+    msgpack::write_float64(&mut buf, now as f64);
 
-    write_array_header(&mut buf, messages.len());
+    msgpack::write_array_header(&mut buf, messages.len());
     for msg in messages {
-        crate::message::write_bin(&mut buf, msg);
+        msgpack::write_bin(&mut buf, msg);
     }
     buf
 }
@@ -131,7 +109,7 @@ pub(super) fn pack_sync_messages(now: u64, messages: &[Vec<u8>]) -> Vec<u8> {
 pub(super) fn unpack_sync_messages(data: &[u8]) -> Vec<Vec<u8>> {
     let mut pos = 0;
     // Outer array [timestamp, messages]
-    let arr_len = match crate::message::read_array_len(data, &mut pos) {
+    let arr_len = match msgpack::read_array_len(data, &mut pos) {
         Ok(n) => n,
         Err(_) => return Vec::new(),
     };
@@ -143,18 +121,17 @@ pub(super) fn unpack_sync_messages(data: &[u8]) -> Vec<Vec<u8>> {
         pos += 9;
     } else {
         // Try skipping other numeric types
-        let _ = pos; // consumed
         return Vec::new();
     }
     // Messages array
-    let msg_count = match crate::message::read_array_len(data, &mut pos) {
+    let msg_count = match msgpack::read_array_len(data, &mut pos) {
         Ok(n) => n,
         Err(_) => return Vec::new(),
     };
     let mut messages = Vec::with_capacity(msg_count);
     for _ in 0..msg_count {
-        match crate::message::read_bin(data, &mut pos) {
-            Ok(bin) => messages.push(bin),
+        match msgpack::read_bin_or_str(data, &mut pos) {
+            Ok(bin) => messages.push(bin.to_vec()),
             Err(_) => break,
         }
     }

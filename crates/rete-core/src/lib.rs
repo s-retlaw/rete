@@ -28,6 +28,7 @@ pub mod error;
 pub mod hdlc;
 pub mod identity;
 pub mod ifac;
+pub mod msgpack;
 pub mod packet;
 pub mod token;
 

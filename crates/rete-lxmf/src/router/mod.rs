@@ -292,7 +292,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         let name = self.display_name.as_deref().unwrap_or(b"");
         let mut buf = Vec::with_capacity(name.len() + 4);
         buf.push(0x92); // fixarray of 2
-        crate::message::write_bin(&mut buf, name);
+        rete_core::msgpack::write_bin(&mut buf, name);
         buf.push(tag_byte);
         buf
     }
@@ -1618,7 +1618,7 @@ mod tests {
         let app_data = {
             let mut buf = Vec::new();
             buf.push(0x92); // fixarray of 2
-            crate::message::write_bin(&mut buf, b"TestPeer");
+            rete_core::msgpack::write_bin(&mut buf, b"TestPeer");
             buf.push(0xc3); // msgpack true = propagation
             buf
         };
@@ -1648,7 +1648,7 @@ mod tests {
         let app_data = {
             let mut buf = Vec::new();
             buf.push(0x92);
-            crate::message::write_bin(&mut buf, b"FarPeer");
+            rete_core::msgpack::write_bin(&mut buf, b"FarPeer");
             buf.push(0xc3);
             buf
         };
@@ -1677,7 +1677,7 @@ mod tests {
         let app_data = {
             let mut buf = Vec::new();
             buf.push(0x92);
-            crate::message::write_bin(&mut buf, b"RegularNode");
+            rete_core::msgpack::write_bin(&mut buf, b"RegularNode");
             buf.push(0x00); // stamp_cost = 0, not propagation
             buf
         };
@@ -1704,7 +1704,7 @@ mod tests {
         let app_data = {
             let mut buf = Vec::new();
             buf.push(0x92);
-            crate::message::write_bin(&mut buf, b"TestPeer");
+            rete_core::msgpack::write_bin(&mut buf, b"TestPeer");
             buf.push(0xc3);
             buf
         };
