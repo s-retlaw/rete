@@ -5,16 +5,18 @@
 //! async event loops and timer management, delegating all packet processing
 //! to NodeCore.
 
+mod announce;
+mod destination;
+mod ingest;
+mod link;
+
 extern crate alloc;
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{DestType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN};
-use rete_transport::{
-    IngestResult, PendingAnnounce, SendError, Transport, PATH_REQUEST_DEST, RECEIPT_TIMEOUT,
-};
+use rete_transport::{SendError, Transport, RECEIPT_TIMEOUT};
 
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::{NodeEvent, ProofStrategy};
@@ -108,7 +110,7 @@ pub struct IngestOutcome {
 
 impl IngestOutcome {
     /// Empty outcome — nothing to do.
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         IngestOutcome {
             event: None,
             packets: Vec::new(),
@@ -145,42 +147,42 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     /// Transport state (path table, announce queue, dedup).
     pub transport: Transport<P, A, D, L>,
     /// Primary destination (addressing metadata, proof strategy, app data).
-    primary_dest: Destination,
+    pub(super) primary_dest: Destination,
     /// Additional registered destinations (e.g. LXMF delivery).
-    additional_dests: Vec<Destination>,
+    pub(super) additional_dests: Vec<Destination>,
     /// Optional auto-reply message sent after receiving an announce.
-    auto_reply: Option<Vec<u8>>,
+    pub(super) auto_reply: Option<Vec<u8>>,
     /// Optional decompressor for bz2-compressed resource data.
     /// Called when a received resource has the compressed flag set.
     /// Desktop: provide bz2 decompressor. MCUs without enough RAM: leave as None.
-    decompress_fn: Option<TransformFn>,
+    pub(super) decompress_fn: Option<TransformFn>,
     /// Optional compressor for outbound resource data.
     /// When set, `start_resource` will try to compress data before sending.
     /// Only uses the compressed version if it is actually smaller.
-    compress_fn: Option<TransformFn>,
+    pub(super) compress_fn: Option<TransformFn>,
     /// Optional packet logging callback for diagnostics.
     /// Called with (raw_bytes, direction, iface_idx) on every inbound packet.
     /// direction is "IN".
-    packet_log_fn: Option<fn(&[u8], &str, u8)>,
+    pub(super) packet_log_fn: Option<fn(&[u8], &str, u8)>,
     /// Optional ProveApp callback for per-packet proof decisions.
-    prove_app_fn: Option<ProveAppFn>,
+    pub(super) prove_app_fn: Option<ProveAppFn>,
     /// Buffer for partially-received split resources.
     /// Each entry holds decrypted+decompressed data from completed non-final segments,
     /// keyed by (link_id, original_hash). When the final segment arrives, all buffered
     /// segment data is concatenated and delivered as ResourceComplete.
-    split_recv_buf: Vec<SplitRecvEntry>,
+    pub(super) split_recv_buf: Vec<SplitRecvEntry>,
 }
 
 /// Buffer entry for a partially-received split resource.
-struct SplitRecvEntry {
-    link_id: [u8; TRUNCATED_HASH_LEN],
-    original_hash: [u8; 32],
+pub(super) struct SplitRecvEntry {
+    pub(super) link_id: [u8; TRUNCATED_HASH_LEN],
+    pub(super) original_hash: [u8; 32],
     /// Accumulated plaintext data from completed segments, in order.
-    data: Vec<u8>,
+    pub(super) data: Vec<u8>,
 }
 
 /// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
-fn compute_dest_hashes(
+pub(super) fn compute_dest_hashes(
     identity: &Identity,
     app_name: &str,
     aspects: &[&str],
@@ -303,24 +305,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         }
     }
 
-    /// Look up a request handler across all destinations.
-    fn find_request_handler(
-        &self,
-        path_hash: &[u8; TRUNCATED_HASH_LEN],
-    ) -> Option<(alloc::string::String, RequestHandlerFn, RequestPolicy)> {
-        // Search primary destination
-        if let Some(h) = self.primary_dest.lookup_request_handler(path_hash) {
-            return Some((h.path.clone(), h.handler, h.policy));
-        }
-        // Search additional destinations
-        for dest in &self.additional_dests {
-            if let Some(h) = dest.lookup_request_handler(path_hash) {
-                return Some((h.path.clone(), h.handler, h.policy));
-            }
-        }
-        None
-    }
-
     /// Set a packet logging callback for diagnostics.
     /// Called with `(raw_bytes, "IN", iface_idx)` on every inbound packet.
     pub fn set_packet_log_fn(&mut self, f: Option<fn(&[u8], &str, u8)>) {
@@ -370,110 +354,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         self.primary_dest.set_default_app_data(data);
     }
 
-    /// Register an additional destination on this node.
-    ///
-    /// Computes the destination hash from the node's identity + given app_name/aspects,
-    /// registers it with transport as a local destination, and stores the Destination
-    /// metadata for decryption and proof generation.
-    ///
-    /// Returns the 16-byte destination hash.
-    pub fn register_destination(
-        &mut self,
-        app_name: &str,
-        aspects: &[&str],
-    ) -> [u8; TRUNCATED_HASH_LEN] {
-        let (dest_hash, name_hash) = compute_dest_hashes(&self.identity, app_name, aspects);
-
-        let dest = Destination::from_hashes(
-            DestinationType::Single,
-            Direction::In,
-            app_name,
-            aspects,
-            dest_hash,
-            name_hash,
-        );
-
-        self.transport.add_local_destination(dest_hash);
-        self.additional_dests.push(dest);
-
-        dest_hash
-    }
-
-    /// Register an additional destination with specified type and direction.
-    ///
-    /// Supports GROUP, PLAIN, and OUT destinations in addition to the default
-    /// Single/In. For PLAIN destinations, identity is not used in hashing.
-    /// For OUT destinations, transport does NOT register them as local
-    /// (they are for sending, not receiving).
-    pub fn register_destination_typed(
-        &mut self,
-        app_name: &str,
-        aspects: &[&str],
-        dest_type: DestinationType,
-        direction: Direction,
-    ) -> [u8; TRUNCATED_HASH_LEN] {
-        let id_hash = if dest_type == DestinationType::Plain {
-            None
-        } else {
-            Some(self.identity.hash())
-        };
-
-        let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-            .expect("app_name + aspects too long");
-        let dest_hash = rete_core::destination_hash(expanded, id_hash.as_ref());
-
-        let name_hash_full = <sha2::Sha256 as sha2::Digest>::digest(expanded.as_bytes());
-        let mut name_hash = [0u8; rete_core::NAME_HASH_LEN];
-        name_hash.copy_from_slice(&name_hash_full[..rete_core::NAME_HASH_LEN]);
-
-        let dest = Destination::from_hashes(
-            dest_type, direction, app_name, aspects, dest_hash, name_hash,
-        );
-
-        // Only register as local if direction is In (we receive packets for it)
-        if direction == Direction::In {
-            self.transport.add_local_destination(dest_hash);
-        }
-        self.additional_dests.push(dest);
-
-        dest_hash
-    }
-
-    /// Look up a destination by hash (checks primary first, then additional).
-    pub fn get_destination(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&Destination> {
-        if *self.primary_dest.hash() == *dest_hash {
-            return Some(&self.primary_dest);
-        }
-        self.additional_dests
-            .iter()
-            .find(|d| d.dest_hash == *dest_hash)
-    }
-
-    /// Look up a destination mutably by hash.
-    pub fn get_destination_mut(
-        &mut self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
-    ) -> Option<&mut Destination> {
-        if *self.primary_dest.hash() == *dest_hash {
-            return Some(&mut self.primary_dest);
-        }
-        self.additional_dests
-            .iter_mut()
-            .find(|d| d.dest_hash == *dest_hash)
-    }
-
-    /// Pre-register a peer's identity for sending DATA without waiting for an announce.
-    pub fn register_peer(&mut self, peer: &Identity, app_name: &str, aspects: &[&str], now: u64) {
-        let mut name_buf = [0u8; 128];
-        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)
-            .expect("app_name + aspects must fit in 128 bytes");
-        let peer_id_hash = peer.hash();
-        let peer_dest_hash = rete_core::destination_hash(expanded, Some(&peer_id_hash));
-        self.transport
-            .register_identity(peer_dest_hash, peer.public_key(), now);
-    }
-
     /// Build an encrypted DATA packet addressed to a known destination.
     ///
     /// Also registers a receipt for proof tracking. The `now` timestamp is
@@ -517,245 +397,39 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         Ok(pkt_buf[..pkt_len].to_vec())
     }
 
-    /// Build and return a raw announce packet for this node.
-    pub fn build_announce<R: RngCore + CryptoRng>(
-        &self,
-        app_data: Option<&[u8]>,
-        rng: &mut R,
-        now: u64,
-    ) -> Vec<u8> {
-        let aspects_refs: Vec<&str> = self
-            .primary_dest
-            .aspects
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
-        let mut buf = [0u8; MTU];
-        let n = Transport::<P, A, D, L>::create_announce(
-            &self.identity,
-            &self.primary_dest.app_name,
-            &aspects_refs,
-            app_data,
-            rng,
-            now,
-            &mut buf,
-        )
-        .expect("announce creation should not fail");
-        buf[..n].to_vec()
+    /// Build a path request packet for a destination.
+    pub fn request_path(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> OutboundPacket {
+        let raw = Transport::<P, A, D, L>::build_path_request(dest_hash);
+        OutboundPacket::broadcast(raw)
     }
 
-    /// Queue a local announce into the transport's announce queue.
+    /// Build a proof OutboundPacket for a received packet hash, if possible.
     ///
-    /// The announce will be sent immediately on the next `flush_announces()` or
-    /// `handle_tick()` call, then retransmitted once after ~10s (matching
-    /// Python RNS's `PATHFINDER_R=1` behavior).
-    pub fn queue_announce<R: RngCore + CryptoRng>(
-        &mut self,
-        app_data: Option<&[u8]>,
-        rng: &mut R,
-        now: u64,
-    ) -> bool {
-        let dest_hash = *self.primary_dest.hash();
-        self.queue_announce_for(&dest_hash, app_data, rng, now)
-    }
-
-    /// Queue an announce for a specific registered destination.
-    ///
-    /// Looks up the destination by hash, builds an announce using the node's
-    /// identity with that destination's app_name/aspects, and queues it.
-    pub fn queue_announce_for<R: RngCore + CryptoRng>(
-        &mut self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
-        app_data: Option<&[u8]>,
-        rng: &mut R,
-        now: u64,
-    ) -> bool {
-        // Find the destination's app_name and aspects
-        let (app_name, aspects) = if *self.primary_dest.hash() == *dest_hash {
-            (
-                self.primary_dest.app_name.clone(),
-                self.primary_dest.aspects.clone(),
-            )
-        } else if let Some(dest) = self
-            .additional_dests
-            .iter()
-            .find(|d| d.dest_hash == *dest_hash)
-        {
-            (dest.app_name.clone(), dest.aspects.clone())
-        } else {
-            return false;
-        };
-
-        let aspects_refs: Vec<&str> = aspects.iter().map(|s| s.as_str()).collect();
-        let mut buf = [0u8; MTU];
-        let n = match Transport::<P, A, D, L>::create_announce(
-            &self.identity,
-            &app_name,
-            &aspects_refs,
-            app_data,
-            rng,
-            now,
-            &mut buf,
-        ) {
-            Ok(n) => n,
-            Err(_) => return false,
-        };
-        self.transport.queue_announce(PendingAnnounce {
-            dest_hash: *dest_hash,
-            raw: buf[..n].to_vec(),
-            tx_count: 0,
-            retransmit_timeout: 0,
-            local: true,
-            local_rebroadcasts: 0,
-            block_rebroadcasts: false,
-            received_hops: 0,
+    /// Uses `dest_type=Single` — for non-link (DATA) proofs only.
+    pub(super) fn proof_outbound(&self, packet_hash: &[u8; 32]) -> Option<OutboundPacket> {
+        Transport::<P, A, D, L>::build_proof_packet(&self.identity, packet_hash).map(|data| {
+            OutboundPacket {
+                data,
+                routing: PacketRouting::SourceInterface,
+            }
         })
     }
 
-    /// Drain pending announces from the transport queue, returning them as outbound packets.
+    /// Build a link-destination proof OutboundPacket for a link-related packet.
     ///
-    /// Call after `queue_announce()` to flush the announce immediately, or rely
-    /// on `handle_tick()` which calls this internally.
-    pub fn flush_announces<R: RngCore>(&mut self, now: u64, rng: &mut R) -> Vec<OutboundPacket> {
-        self.transport
-            .pending_outbound(now, rng)
-            .into_iter()
-            .map(OutboundPacket::broadcast)
-            .collect()
-    }
-
-    /// Return cached announce packets from the path table as outbound broadcasts.
-    ///
-    /// Used to flush known announces to a newly connected interface so it
-    /// immediately learns about destinations the node has already seen.
-    pub fn cached_announces(&self) -> Vec<OutboundPacket> {
-        self.transport
-            .cached_announces()
-            .into_iter()
-            .map(OutboundPacket::broadcast)
-            .collect()
-    }
-
-    /// Queue the initial local announce and return all packets to dispatch on startup.
-    ///
-    /// Returns `(announce_packets, cached_announce_packets)` where:
-    /// - `announce_packets` — the freshly built announce (sent immediately + retransmit queued)
-    /// - `cached_announce_packets` — announces for paths already in the path table, useful for
-    ///   flushing to a newly-connected interface so it immediately learns known destinations
-    ///
-    /// Replaces the repeated queue_announce + flush_announces + cached_announces pattern
-    /// at the start of every runtime's event loop.
-    pub fn initial_announce<R: RngCore + CryptoRng>(
-        &mut self,
-        rng: &mut R,
-        now: u64,
-    ) -> (Vec<OutboundPacket>, Vec<OutboundPacket>) {
-        self.queue_announce(None, rng, now);
-        let announces = self.flush_announces(now, rng);
-        let cached = self.cached_announces();
-        (announces, cached)
-    }
-
-    /// Initiate a link to a destination.
-    ///
-    /// Returns the outbound LINKREQUEST packet and the link_id on success.
-    pub fn initiate_link<R: RngCore + CryptoRng>(
-        &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        now: u64,
-        rng: &mut R,
-    ) -> Result<(OutboundPacket, [u8; TRUNCATED_HASH_LEN]), SendError> {
-        let (raw, link_id) = self
-            .transport
-            .initiate_link(dest_hash, &self.identity, rng, now)?;
-        Ok((OutboundPacket::broadcast(raw), link_id))
-    }
-
-    /// Send a channel message on a link.
-    ///
-    /// Returns the outbound packet if the message was queued, or `Err` if
-    /// the link is not active or the channel window is full.
-    pub fn send_channel_message<R: RngCore + CryptoRng>(
-        &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
-        message_type: u16,
-        payload: &[u8],
-        now: u64,
-        rng: &mut R,
-    ) -> Result<OutboundPacket, SendError> {
-        let raw = self
-            .transport
-            .send_channel_message(link_id, message_type, payload, now, rng)?;
-        Ok(OutboundPacket::broadcast(raw))
-    }
-
-    /// Send stream data on a link via channel.
-    ///
-    /// Packs a `StreamDataMessage` and sends it as a channel message with
-    /// `MSG_TYPE_STREAM`. Uses stack buffer to avoid intermediate heap allocations.
-    pub fn send_stream_data<R: RngCore + CryptoRng>(
-        &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
-        stream_id: u16,
-        data: &[u8],
-        eof: bool,
-        now: u64,
-        rng: &mut R,
-    ) -> Result<OutboundPacket, SendError> {
-        let mut buf = [0u8; MTU];
-        let n = rete_transport::StreamDataMessage::pack_into(stream_id, eof, false, data, &mut buf);
-        self.send_channel_message(
-            link_id,
-            rete_transport::MSG_TYPE_STREAM,
-            &buf[..n],
-            now,
-            rng,
-        )
-    }
-
-    /// Close a link, sending a LINKCLOSE packet and removing it from the map.
-    ///
-    /// Returns the outbound LINKCLOSE packet and a [`NodeEvent::LinkClosed`]
-    /// event so the caller can emit it locally (the event would otherwise only
-    /// fire on *receiving* a LINKCLOSE from the remote side).
-    pub fn close_link<R: RngCore + CryptoRng>(
-        &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
-        rng: &mut R,
-    ) -> (Option<OutboundPacket>, Option<NodeEvent>) {
-        let pkt = self.transport.build_linkclose_packet(link_id, rng).ok();
-        let event = if pkt.is_some() {
-            Some(NodeEvent::LinkClosed { link_id: *link_id })
-        } else {
-            None
-        };
-        (pkt.map(OutboundPacket::broadcast), event)
-    }
-
-    /// Send a LINKIDENTIFY packet on an established link.
-    ///
-    /// This reveals the initiator's identity to the responder by sending the
-    /// identity public key signed with Ed25519, encrypted via the link session.
-    /// Matches Python `Link.identify()`.
-    pub fn link_identify<R: RngCore + CryptoRng>(
+    /// Uses `dest_type=Link` and `destination_hash=link_id` so transport relays
+    /// (rnsd) can route the proof back through their link table.
+    pub(super) fn link_proof_outbound(
         &self,
+        packet_hash: &[u8; 32],
         link_id: &[u8; TRUNCATED_HASH_LEN],
-        rng: &mut R,
-    ) -> Result<OutboundPacket, SendError> {
-        // Build identify payload: pub_key[64] || Ed25519_sig[64]
-        let pub_key = self.identity.public_key();
-        let sig = self.identity.sign(&pub_key).map_err(SendError::Crypto)?;
-        let mut payload = [0u8; 128];
-        payload[..64].copy_from_slice(&pub_key);
-        payload[64..128].copy_from_slice(&sig);
-
-        let pkt = self.transport.build_link_data_packet(
-            link_id,
-            &payload,
-            rete_core::CONTEXT_LINKIDENTIFY,
-            rng,
-        )?;
-        Ok(OutboundPacket::broadcast(pkt))
+    ) -> Option<OutboundPacket> {
+        Transport::<P, A, D, L>::build_link_proof_packet(&self.identity, packet_hash, link_id).map(
+            |data| OutboundPacket {
+                data,
+                routing: PacketRouting::SourceInterface,
+            },
+        )
     }
 
     /// Send plain data over an established link.
@@ -860,667 +534,6 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .start_resource(link_id, &send_data, data, is_compressed, rng)
             .ok_or(SendError::ResourceLimit)?;
         Ok(OutboundPacket::broadcast(pkt))
-    }
-
-    /// Build a path request packet for a destination.
-    pub fn request_path(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> OutboundPacket {
-        let raw = Transport::<P, A, D, L>::build_path_request(dest_hash);
-        OutboundPacket::broadcast(raw)
-    }
-
-    /// Build a proof OutboundPacket for a received packet hash, if possible.
-    ///
-    /// Uses `dest_type=Single` — for non-link (DATA) proofs only.
-    fn proof_outbound(&self, packet_hash: &[u8; 32]) -> Option<OutboundPacket> {
-        Transport::<P, A, D, L>::build_proof_packet(&self.identity, packet_hash).map(|data| {
-            OutboundPacket {
-                data,
-                routing: PacketRouting::SourceInterface,
-            }
-        })
-    }
-
-    /// Build a link-destination proof OutboundPacket for a link-related packet.
-    ///
-    /// Uses `dest_type=Link` and `destination_hash=link_id` so transport relays
-    /// (rnsd) can route the proof back through their link table.
-    fn link_proof_outbound(
-        &self,
-        packet_hash: &[u8; 32],
-        link_id: &[u8; TRUNCATED_HASH_LEN],
-    ) -> Option<OutboundPacket> {
-        Transport::<P, A, D, L>::build_link_proof_packet(&self.identity, packet_hash, link_id).map(
-            |data| OutboundPacket {
-                data,
-                routing: PacketRouting::SourceInterface,
-            },
-        )
-    }
-
-    /// Process an inbound raw packet and return the outcome.
-    ///
-    /// The runtime loop dispatches packets based on `IngestOutcome.packets`
-    /// routing and emits `IngestOutcome.event` to the application callback.
-    pub fn handle_ingest<R: RngCore + CryptoRng>(
-        &mut self,
-        raw: &[u8],
-        now: u64,
-        iface: u8,
-        rng: &mut R,
-    ) -> IngestOutcome {
-        let len = raw.len();
-
-        // TCP links can carry packets up to ~8192 bytes (link MTU negotiated
-        // during handshake). Allow up to TCP_MAX_PKT for TCP-capable nodes.
-        const TCP_MAX_PKT: usize = 8292;
-        if len > TCP_MAX_PKT {
-            return IngestOutcome::empty();
-        }
-
-        // Packet log: inbound
-        if let Some(log_fn) = self.packet_log_fn {
-            log_fn(raw, "IN", iface);
-        }
-
-        // Use stack buffer for small packets (common case), heap for large TCP packets.
-        if len <= MTU {
-            let mut pkt_buf = [0u8; MTU];
-            pkt_buf[..len].copy_from_slice(raw);
-            self.dispatch_ingest(&mut pkt_buf[..len], now, iface, rng)
-        } else {
-            let mut pkt_buf = vec![0u8; len];
-            pkt_buf[..len].copy_from_slice(raw);
-            self.dispatch_ingest(&mut pkt_buf[..len], now, iface, rng)
-        }
-    }
-
-    /// Dispatch a parsed packet buffer to the transport layer.
-    fn dispatch_ingest<R: RngCore + CryptoRng>(
-        &mut self,
-        pkt_buf: &mut [u8],
-        now: u64,
-        iface: u8,
-        rng: &mut R,
-    ) -> IngestOutcome {
-        match self
-            .transport
-            .ingest_on(pkt_buf, now, iface, rng, &self.identity)
-        {
-            IngestResult::AnnounceReceived {
-                dest_hash,
-                identity_hash,
-                hops,
-                app_data,
-            } => {
-                let mut packets = Vec::new();
-
-                // Auto-reply to announcing peer
-                if let Some(msg) = self.auto_reply.take() {
-                    let result = self.build_data_packet(&dest_hash, &msg, rng, now);
-                    self.auto_reply = Some(msg);
-                    if let Ok(pkt) = result {
-                        packets.push(OutboundPacket {
-                            data: pkt,
-                            routing: PacketRouting::SourceInterface,
-                        });
-                    }
-                }
-
-                // Flush pending announces so received announces are forwarded
-                // immediately (retransmit_timeout=now fires on first flush).
-                let flushed = self.flush_announces(now, rng);
-                packets.extend(flushed);
-
-                IngestOutcome {
-                    event: Some(NodeEvent::AnnounceReceived {
-                        dest_hash,
-                        identity_hash,
-                        hops,
-                        app_data: app_data.map(|d| d.to_vec()),
-                    }),
-                    packets,
-                }
-            }
-            IngestResult::LocalData {
-                dest_hash,
-                payload,
-                packet_hash,
-            } => {
-                // Transport already verified this is one of our local destinations.
-                // Single lookup to get the proof strategy.
-                let proof_strategy = self
-                    .get_destination(&dest_hash)
-                    .map(|d| d.proof_strategy)
-                    .unwrap_or(ProofStrategy::ProveNone);
-
-                let mut dec_buf = [0u8; MTU];
-                let decrypted = match self.identity.decrypt(payload, &mut dec_buf) {
-                    Ok(n) => dec_buf[..n].to_vec(),
-                    Err(_) => payload.to_vec(),
-                };
-
-                let mut packets = Vec::new();
-
-                let should_prove = match proof_strategy {
-                    ProofStrategy::ProveAll => true,
-                    ProofStrategy::ProveApp => {
-                        if let Some(f) = self.prove_app_fn {
-                            f(&dest_hash, &packet_hash, &decrypted)
-                        } else {
-                            false
-                        }
-                    }
-                    ProofStrategy::ProveNone => false,
-                };
-                if should_prove {
-                    packets.extend(self.proof_outbound(&packet_hash));
-                }
-
-                IngestOutcome {
-                    event: Some(NodeEvent::DataReceived {
-                        dest_hash,
-                        payload: decrypted,
-                    }),
-                    packets,
-                }
-            }
-            IngestResult::Forward { raw, .. } => IngestOutcome {
-                event: None,
-                packets: vec![OutboundPacket {
-                    data: raw.to_vec(),
-                    routing: PacketRouting::AllExceptSource,
-                }],
-            },
-            IngestResult::LinkRequestReceived { link_id, proof_raw } => IngestOutcome {
-                event: Some(NodeEvent::LinkEstablished { link_id }),
-                packets: vec![OutboundPacket {
-                    data: proof_raw,
-                    routing: PacketRouting::SourceInterface,
-                }],
-            },
-            IngestResult::LinkEstablished { link_id } => {
-                let mut packets = Vec::new();
-                // Auto-send LRRTT if we are the initiator (activates responder).
-                // Uses the low 32 bits of epoch seconds as a timing marker for RTT calculation.
-                if self
-                    .transport
-                    .get_link(&link_id)
-                    .map(|l| l.role == rete_transport::LinkRole::Initiator)
-                    .unwrap_or(false)
-                {
-                    let rtt_bytes = &now.to_be_bytes()[4..8];
-                    if let Ok(pkt) = self.transport.build_lrrtt_packet(&link_id, rtt_bytes, rng) {
-                        packets.push(OutboundPacket::broadcast(pkt));
-                    }
-                }
-                IngestOutcome {
-                    event: Some(NodeEvent::LinkEstablished { link_id }),
-                    packets,
-                }
-            }
-            IngestResult::LinkData {
-                link_id,
-                data,
-                context,
-            } => {
-                let mut packets = Vec::new();
-                // If this is a keepalive request, send the response back
-                if context == rete_core::CONTEXT_KEEPALIVE {
-                    if let Ok(pkt) = self.transport.build_keepalive_packet(&link_id, false, rng) {
-                        packets.push(OutboundPacket::broadcast(pkt));
-                    }
-                }
-                // Handle LINKIDENTIFY: validate and emit LinkIdentified event
-                if context == rete_core::CONTEXT_LINKIDENTIFY && data.len() >= 128 {
-                    let mut pub_key = [0u8; 64];
-                    pub_key.copy_from_slice(&data[..64]);
-                    let sig = &data[64..128];
-                    if let Ok(peer_id) = Identity::from_public_key(&pub_key) {
-                        if peer_id.verify(&pub_key, sig).is_ok() {
-                            let id_hash = peer_id.hash();
-                            return IngestOutcome {
-                                event: Some(NodeEvent::LinkIdentified {
-                                    link_id,
-                                    identity_hash: id_hash,
-                                    public_key: pub_key,
-                                }),
-                                packets,
-                            };
-                        }
-                    }
-                }
-                IngestOutcome {
-                    event: Some(NodeEvent::LinkData {
-                        link_id,
-                        data,
-                        context,
-                    }),
-                    packets,
-                }
-            }
-            IngestResult::ChannelMessages {
-                link_id,
-                messages,
-                packet_hash,
-            } => IngestOutcome {
-                event: Some(NodeEvent::ChannelMessages {
-                    link_id,
-                    messages: messages
-                        .into_iter()
-                        .map(|e| (e.message_type, e.payload))
-                        .collect(),
-                }),
-                // Auto-prove received channel packets (link-destination proof for relay routing)
-                packets: self
-                    .link_proof_outbound(&packet_hash, &link_id)
-                    .into_iter()
-                    .collect(),
-            },
-            IngestResult::RequestReceived {
-                link_id,
-                request_id,
-                path_hash,
-                data,
-            } => {
-                // Try auto-dispatch to a registered request handler
-                let mut response_packets = Vec::new();
-                let handler_result = self.find_request_handler(&path_hash);
-                if let Some((path_str, handler_fn, policy)) = handler_result {
-                    if policy != RequestPolicy::AllowNone {
-                        if let Some(response_data) =
-                            handler_fn(&path_str, &data, &request_id, &link_id)
-                        {
-                            if let Ok(pkt) =
-                                self.send_response(&link_id, &request_id, &response_data, rng)
-                            {
-                                response_packets.push(pkt);
-                            }
-                        }
-                    }
-                }
-                IngestOutcome {
-                    event: Some(NodeEvent::RequestReceived {
-                        link_id,
-                        request_id,
-                        path_hash,
-                        data,
-                    }),
-                    packets: response_packets,
-                }
-            }
-            IngestResult::ResponseReceived {
-                link_id,
-                request_id,
-                data,
-            } => IngestOutcome {
-                event: Some(NodeEvent::ResponseReceived {
-                    link_id,
-                    request_id,
-                    data,
-                }),
-                packets: Vec::new(),
-            },
-            IngestResult::LinkClosed { link_id } => IngestOutcome {
-                event: Some(NodeEvent::LinkClosed { link_id }),
-                packets: Vec::new(),
-            },
-            IngestResult::ProofReceived { packet_hash } => IngestOutcome {
-                event: Some(NodeEvent::ProofReceived { packet_hash }),
-                packets: Vec::new(),
-            },
-            IngestResult::Buffered {
-                packet_hash,
-                link_id,
-            } => IngestOutcome {
-                event: None,
-                // Auto-prove buffered channel packets too (link-destination proof for relay routing)
-                packets: self
-                    .link_proof_outbound(&packet_hash, &link_id)
-                    .into_iter()
-                    .collect(),
-            },
-            IngestResult::ResourceOffered {
-                link_id,
-                resource_hash,
-                total_size,
-            } => {
-                // Auto-accept: send first request
-                let mut packets = Vec::new();
-                if let Some(pkt) = self
-                    .transport
-                    .accept_resource(&link_id, &resource_hash, rng)
-                {
-                    packets.push(OutboundPacket::broadcast(pkt));
-                }
-                // Drain any resource outbound packets queued during ingest
-                for pkt in self.transport.drain_resource_outbound() {
-                    packets.push(OutboundPacket::broadcast(pkt));
-                }
-                IngestOutcome {
-                    event: Some(NodeEvent::ResourceOffered {
-                        link_id,
-                        resource_hash,
-                        total_size,
-                    }),
-                    packets,
-                }
-            }
-            IngestResult::ResourceProgress {
-                link_id,
-                resource_hash,
-                current,
-                total,
-            } => {
-                let mut packets = Vec::new();
-                // If all parts received, assemble and send proof
-                if current == total && total > 0 {
-                    // Step 1: Assemble encrypted parts, get flags and split metadata
-                    let (assembly_result, is_compressed, split_index, split_total, original_hash) = {
-                        if let Some(res) = self.transport.get_resource_mut(&link_id, &resource_hash)
-                        {
-                            let compressed = res.flags.compressed;
-                            let si = res.split_index;
-                            let st = res.split_total;
-                            let oh = res.original_hash;
-                            match res.assemble() {
-                                Ok(data) => (Some(Ok(data)), compressed, si, st, oh),
-                                Err(_) => (Some(Err(())), compressed, si, st, oh),
-                            }
-                        } else {
-                            (None, false, 1, 1, [0u8; 32])
-                        }
-                    };
-
-                    if let Some(Ok(encrypted_data)) = assembly_result {
-                        // Step 2: Decrypt via link Token, strip 4-byte random prepend
-                        let decrypted = if let Some(link) = self.transport.get_link(&link_id) {
-                            let mut dec_buf = vec![0u8; encrypted_data.len()];
-                            if let Ok(dec_len) = link.decrypt(&encrypted_data, &mut dec_buf) {
-                                dec_buf.truncate(dec_len);
-                                if dec_buf.len() >= 4 {
-                                    dec_buf.drain(..4);
-                                }
-                                dec_buf
-                            } else {
-                                encrypted_data
-                            }
-                        } else {
-                            encrypted_data
-                        };
-
-                        // Step 3: Decompress if compressed flag is set
-                        let plaintext = if is_compressed {
-                            if let Some(decompress) = self.decompress_fn {
-                                decompress(&decrypted).unwrap_or(decrypted)
-                            } else {
-                                decrypted
-                            }
-                        } else {
-                            decrypted
-                        };
-
-                        // Step 4: Move plaintext into resource, build proof, take it back
-                        // Proof = SHA-256(plaintext || resource_hash) — must match Python
-                        let (proof, plaintext) = if let Some(res) =
-                            self.transport.get_resource_mut(&link_id, &resource_hash)
-                        {
-                            res.data = plaintext;
-                            let proof = res.build_proof();
-                            (proof, core::mem::take(&mut res.data))
-                        } else {
-                            (Vec::new(), plaintext)
-                        };
-
-                        // Step 5: Build and send proof packet
-                        if !proof.is_empty() {
-                            let mut pkt_buf = [0u8; MTU];
-                            if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
-                                .packet_type(PacketType::Proof)
-                                .dest_type(DestType::Link)
-                                .destination_hash(&link_id)
-                                .context(rete_core::CONTEXT_RESOURCE_PRF)
-                                .payload(&proof)
-                                .build()
-                            {
-                                packets
-                                    .push(OutboundPacket::broadcast(pkt_buf[..pkt_len].to_vec()));
-                            }
-                        }
-
-                        // Drain any resource outbound packets
-                        for pkt in self.transport.drain_resource_outbound() {
-                            packets.push(OutboundPacket::broadcast(pkt));
-                        }
-                        // Clean up completed receiver resource
-                        self.transport.cleanup_resources();
-
-                        // Step 6: Handle split resources
-                        // Truncate original_hash to 16 bytes for NodeEvent resource_hash field
-                        let mut oh_trunc = [0u8; TRUNCATED_HASH_LEN];
-                        oh_trunc.copy_from_slice(&original_hash[..TRUNCATED_HASH_LEN]);
-
-                        if split_total > 1 && split_index < split_total {
-                            // Non-final split segment: buffer data, wait for next
-                            if let Some(entry) = self
-                                .split_recv_buf
-                                .iter_mut()
-                                .find(|e| e.link_id == link_id && e.original_hash == original_hash)
-                            {
-                                entry.data.extend_from_slice(&plaintext);
-                            } else {
-                                self.split_recv_buf.push(SplitRecvEntry {
-                                    link_id,
-                                    original_hash,
-                                    data: plaintext,
-                                });
-                            }
-                            return IngestOutcome {
-                                event: Some(NodeEvent::ResourceProgress {
-                                    link_id,
-                                    resource_hash: oh_trunc,
-                                    current: split_index,
-                                    total: split_total,
-                                }),
-                                packets,
-                            };
-                        } else if split_total > 1 && split_index == split_total {
-                            // Final split segment: concatenate all buffered data
-                            let mut full_data = Vec::new();
-                            if let Some(idx) = self.split_recv_buf.iter().position(|e| {
-                                e.link_id == link_id && e.original_hash == original_hash
-                            }) {
-                                let entry = self.split_recv_buf.swap_remove(idx);
-                                full_data = entry.data;
-                            }
-                            full_data.extend_from_slice(&plaintext);
-                            return IngestOutcome {
-                                event: Some(NodeEvent::ResourceComplete {
-                                    link_id,
-                                    resource_hash: oh_trunc,
-                                    data: full_data,
-                                }),
-                                packets,
-                            };
-                        }
-
-                        // Non-split resource: deliver directly
-                        return IngestOutcome {
-                            event: Some(NodeEvent::ResourceComplete {
-                                link_id,
-                                resource_hash,
-                                data: plaintext,
-                            }),
-                            packets,
-                        };
-                    } else if let Some(Err(())) = assembly_result {
-                        for pkt in self.transport.drain_resource_outbound() {
-                            packets.push(OutboundPacket::broadcast(pkt));
-                        }
-                        self.transport.cleanup_resources();
-
-                        // Clean up split buffer on failure
-                        if split_total > 1 {
-                            if let Some(idx) = self.split_recv_buf.iter().position(|e| {
-                                e.link_id == link_id && e.original_hash == original_hash
-                            }) {
-                                self.split_recv_buf.swap_remove(idx);
-                            }
-                        }
-
-                        return IngestOutcome {
-                            event: Some(NodeEvent::ResourceFailed {
-                                link_id,
-                                resource_hash,
-                            }),
-                            packets,
-                        };
-                    }
-                }
-                // Not all parts received yet — drain resource outbound
-                for pkt in self.transport.drain_resource_outbound() {
-                    packets.push(OutboundPacket::broadcast(pkt));
-                }
-                // Only send follow-up REQ when the entire window batch has
-                // arrived (outstanding_parts == 0). Python does the same:
-                // Resource.py line 886 checks `outstanding_parts == 0`.
-                if current < total {
-                    let window_complete = self
-                        .transport
-                        .get_resource(&link_id, &resource_hash)
-                        .is_some_and(|r| r.is_window_complete());
-                    if window_complete {
-                        if let Some(res) = self.transport.get_resource_mut(&link_id, &resource_hash)
-                        {
-                            res.grow_window(true); // assume fast link (localhost/TCP)
-                        }
-                        if let Some(req_pkt) =
-                            self.transport
-                                .build_followup_request(&link_id, &resource_hash, rng)
-                        {
-                            packets.push(OutboundPacket::broadcast(req_pkt));
-                        }
-                    }
-                }
-                IngestOutcome {
-                    event: Some(NodeEvent::ResourceProgress {
-                        link_id,
-                        resource_hash,
-                        current,
-                        total,
-                    }),
-                    packets,
-                }
-            }
-            IngestResult::ResourceComplete {
-                link_id,
-                resource_hash,
-                data,
-            } => {
-                // Sender received proof — transfer complete on our end
-                self.transport.cleanup_resources();
-                let mut packets = Vec::new();
-                for pkt in self.transport.drain_resource_outbound() {
-                    packets.push(OutboundPacket::broadcast(pkt));
-                }
-                IngestOutcome {
-                    event: Some(NodeEvent::ResourceComplete {
-                        link_id,
-                        resource_hash,
-                        data,
-                    }),
-                    packets,
-                }
-            }
-            IngestResult::ResourceFailed {
-                link_id,
-                resource_hash,
-            } => {
-                self.transport.cleanup_resources();
-                let mut packets = Vec::new();
-                for pkt in self.transport.drain_resource_outbound() {
-                    packets.push(OutboundPacket::broadcast(pkt));
-                }
-                IngestOutcome {
-                    event: Some(NodeEvent::ResourceFailed {
-                        link_id,
-                        resource_hash,
-                    }),
-                    packets,
-                }
-            }
-            IngestResult::PathRequestForward { payload } => {
-                // Forward path request to all interfaces as a broadcast
-                // Build a path request packet from the payload
-                let mut buf = [0u8; MTU];
-                let result = PacketBuilder::new(&mut buf)
-                    .packet_type(PacketType::Data)
-                    .dest_type(DestType::Plain)
-                    .destination_hash(&PATH_REQUEST_DEST)
-                    .context(rete_core::CONTEXT_NONE)
-                    .payload(&payload)
-                    .build();
-                match result {
-                    Ok(n) => IngestOutcome {
-                        event: None,
-                        packets: vec![OutboundPacket::broadcast(buf[..n].to_vec())],
-                    },
-                    Err(_) => IngestOutcome::empty(),
-                }
-            }
-            IngestResult::Duplicate | IngestResult::Invalid => {
-                // Drain any resource outbound packets that may have been queued
-                let resource_pkts = self.transport.drain_resource_outbound();
-                if resource_pkts.is_empty() {
-                    IngestOutcome::empty()
-                } else {
-                    IngestOutcome {
-                        event: None,
-                        packets: resource_pkts
-                            .into_iter()
-                            .map(OutboundPacket::broadcast)
-                            .collect(),
-                    }
-                }
-            }
-        }
-    }
-
-    /// Periodic maintenance: expire paths, collect pending announces, send keepalives.
-    pub fn handle_tick<R: RngCore + CryptoRng>(&mut self, now: u64, rng: &mut R) -> IngestOutcome {
-        let mut packets = self.flush_announces(now, rng);
-
-        // Resource maintenance: send HMU for sender resources with unsent hashes
-        self.transport.tick_resources(now, rng);
-
-        // Drain any resource outbound packets queued during ingest or tick_resources
-        for pkt in self.transport.drain_resource_outbound() {
-            packets.push(OutboundPacket::broadcast(pkt));
-        }
-
-        // Send keepalives BEFORE tick — tick may mark links Stale, which would
-        // prevent build_keepalive_packet from working (it requires Active state).
-        // With dynamic keepalive on fast links, keepalive_interval can be as low
-        // as 5s, which equals TICK_INTERVAL. Sending keepalives first ensures
-        // they go out before the stale check.
-        for ka in self.transport.build_pending_keepalives(now, rng) {
-            packets.push(OutboundPacket::broadcast(ka));
-        }
-
-        // Channel retransmissions
-        for retx in self.transport.pending_channel_retransmits(now, rng) {
-            packets.push(OutboundPacket::broadcast(retx));
-        }
-
-        // Now run tick: expire paths, check stale links, etc.
-        let result = self.transport.tick(now);
-
-        IngestOutcome {
-            event: Some(NodeEvent::Tick {
-                expired_paths: result.expired_paths,
-                closed_links: result.closed_links,
-            }),
-            packets,
-        }
     }
 }
 
