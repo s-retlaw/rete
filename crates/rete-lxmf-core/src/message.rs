@@ -1,9 +1,12 @@
 //! LXMF message — pack, unpack, sign, verify.
 
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use rete_core::msgpack;
 use rete_core::Identity;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 
 // Field type constants
 /// Embedded LXMF messages field.
@@ -36,6 +39,9 @@ pub enum DeliveryMethod {
 
 /// URI schema for paper messages.
 pub const URI_SCHEMA: &str = "lxm";
+
+/// URI prefix for paper messages.
+const URI_PREFIX: &str = "lxm://";
 
 /// Maximum bytes in a QR code (Version 40, Error Correction Level L).
 pub const QR_MAX_STORAGE: usize = 2953;
@@ -224,7 +230,10 @@ impl LXMessage {
         }
 
         let encoded = base64url_encode(&paper_packed);
-        Some(format!("{}://{}", URI_SCHEMA, encoded))
+        let mut uri = String::with_capacity(URI_PREFIX.len() + encoded.len());
+        uri.push_str(URI_PREFIX);
+        uri.push_str(&encoded);
+        Some(uri)
     }
 
     /// Decode an `lxm://` URI back into message components.
@@ -233,8 +242,7 @@ impl LXMessage {
     /// decrypt the payload using their identity's private key and then
     /// call `LXMessage::unpack` on the decrypted data.
     pub fn from_uri(uri: &str) -> Option<([u8; 16], Vec<u8>)> {
-        let prefix = format!("{}://", URI_SCHEMA);
-        let encoded = uri.strip_prefix(&prefix)?;
+        let encoded = uri.strip_prefix(URI_PREFIX)?;
         let data = base64url_decode(encoded)?;
 
         if data.len() < 16 {
@@ -432,6 +440,8 @@ fn b64url_val(c: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::collections::BTreeMap;
+    use alloc::vec;
     use rete_core::Identity;
 
     fn make_test_message() -> (LXMessage, Identity) {

@@ -927,13 +927,24 @@ version = "0.1.0"
 dependencies = [
  "bzip2",
  "hex",
+ "rand",
+ "rand_core",
+ "rete-core",
+ "rete-lxmf-core",
+ "rete-stack",
+ "rete-transport",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "rete-lxmf-core"
+version = "0.1.0"
+dependencies = [
  "hkdf",
  "rand",
  "rand_core",
  "rete-core",
- "rete-stack",
- "rete-transport",
- "serde_json",
  "sha2",
 ]
 

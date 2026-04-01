@@ -384,7 +384,7 @@ pub trait RatchetStore {
 | 3D | Replace unwrap/expect | **Done** |
 | 4A | RequestContext + handler signature | **Done** |
 | 4B | ALLOW_LIST policy | **Done** |
-| 5A | rete-lxmf-core crate | Not started |
+| 5A | rete-lxmf-core crate | **Done** |
 | 5B | Remove std from router | Not started |
 | 6 | ResponseCompressionPolicy | Not started |
 | 7 | RatchetStore abstraction | Not started |

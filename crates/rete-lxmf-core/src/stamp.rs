@@ -5,11 +5,9 @@
 //! then brute-forces a 2-byte stamp whose hash against the workblock has
 //! enough leading zero bits.
 
-extern crate alloc;
-
-use alloc::vec;
 use alloc::vec::Vec;
 use hkdf::Hkdf;
+use rete_core::msgpack;
 use sha2::{Digest, Sha256};
 
 /// Stamp size in bytes (Python: HASHLENGTH // 8 = 2).
@@ -51,8 +49,8 @@ pub fn stamp_workblock(material: &[u8], expand_rounds: usize) -> Vec<u8> {
         // msgpack encoding of small integers: 0x00..0x7f for 0..127, 0xcc+u8 for 128..255, etc.
         let mut salt_hasher = Sha256::new();
         salt_hasher.update(material);
-        // Simple msgpack encoding of usize as integer
-        let n_packed = msgpack_uint(n);
+        let mut n_packed = Vec::new();
+        msgpack::write_uint(&mut n_packed, n as u64);
         salt_hasher.update(&n_packed);
         let salt: [u8; 32] = salt_hasher.finalize().into();
 
@@ -155,24 +153,6 @@ fn leading_zero_bits(data: &[u8]) -> u16 {
     count
 }
 
-/// Simple msgpack encoding for unsigned integers.
-fn msgpack_uint(n: usize) -> Vec<u8> {
-    if n <= 127 {
-        vec![n as u8]
-    } else if n <= 255 {
-        vec![0xcc, n as u8]
-    } else if n <= 65535 {
-        let b = (n as u16).to_be_bytes();
-        vec![0xcd, b[0], b[1]]
-    } else if n <= 0xFFFF_FFFF {
-        let b = (n as u32).to_be_bytes();
-        vec![0xce, b[0], b[1], b[2], b[3]]
-    } else {
-        let b = (n as u64).to_be_bytes();
-        vec![0xcf, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,14 +164,6 @@ mod tests {
         assert_eq!(leading_zero_bits(&[0x80]), 0);
         assert_eq!(leading_zero_bits(&[0x40]), 1);
         assert_eq!(leading_zero_bits(&[0x00]), 8);
-    }
-
-    #[test]
-    fn test_msgpack_uint() {
-        assert_eq!(msgpack_uint(0), vec![0x00]);
-        assert_eq!(msgpack_uint(127), vec![0x7f]);
-        assert_eq!(msgpack_uint(128), vec![0xcc, 0x80]);
-        assert_eq!(msgpack_uint(256), vec![0xcd, 0x01, 0x00]);
     }
 
     #[test]

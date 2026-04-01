@@ -6,8 +6,14 @@
 //! With the `router` feature (default), also provides [`LxmfRouter`] for
 //! wiring LXMF delivery through [`rete_stack::NodeCore`].
 
-pub mod message;
-pub mod stamp;
+// Core types re-exported from rete-lxmf-core (no_std compatible).
+pub use rete_lxmf_core::message;
+pub use rete_lxmf_core::stamp;
+
+pub use rete_lxmf_core::message::{
+    DeliveryMethod, LXMessage, LXMessageState, FIELD_AUDIO, FIELD_COMMANDS, FIELD_EMBEDDED_LXMS,
+    FIELD_FILE_ATTACHMENTS, FIELD_IMAGE, FIELD_TELEMETRY, FIELD_THREAD,
+};
 
 #[cfg(feature = "router")]
 pub mod peer;
@@ -17,11 +23,6 @@ pub mod propagation;
 
 #[cfg(feature = "router")]
 pub mod router;
-
-pub use message::{
-    DeliveryMethod, LXMessage, LXMessageState, FIELD_AUDIO, FIELD_COMMANDS, FIELD_EMBEDDED_LXMS,
-    FIELD_FILE_ATTACHMENTS, FIELD_IMAGE, FIELD_TELEMETRY, FIELD_THREAD,
-};
 
 #[cfg(feature = "router")]
 pub use propagation::{InMemoryMessageStore, MessageStore, PropagationNode};
