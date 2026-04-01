@@ -386,9 +386,9 @@ test-all:
         rc=$?
         echo "$output"
         local p t f s
-        p=$(echo "$output" | grep -oP '\d+(?=/\d+ passed)' || echo "0")
-        t=$(echo "$output" | grep -oP '(?<=Results: )\d+/\d+' | head -1 | cut -d/ -f2)
-        s=$(echo "$output" | grep -oP '\d+(?= skipped)' || echo "0")
+        p=$(echo "$output" | grep -oP '\d+(?=/\d+ passed)' | tail -1 || echo "0")
+        t=$(echo "$output" | grep -oP '\d+(?= passed)' | tail -1)
+        s=$(echo "$output" | grep -oP '\d+(?= skipped)' | tail -1 || echo "0")
         t=${t:-0}; f=$((t - p)); s=${s:-0}
         eval "${label}_PASS=$p"; eval "${label}_FAIL=$f"; eval "${label}_SKIP=$s"
         [ "$rc" -ne 0 ] && E2E_ANY_FAIL=1

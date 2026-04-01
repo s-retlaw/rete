@@ -39,8 +39,11 @@ def main():
         t.start_rnsd(port=port2)
 
         # Start Rust transport node connecting to both rnsd instances
+        data_dir = os.path.join(t.tmpdir, "rete_data")
+        os.makedirs(data_dir, exist_ok=True)
         cmd = [
             t.rust_binary,
+            "--data-dir", data_dir,
             "--connect", f"127.0.0.1:{port1}",
             "--connect", f"127.0.0.1:{port2}",
             "--transport",
