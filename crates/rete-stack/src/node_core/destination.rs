@@ -3,7 +3,7 @@
 use rete_core::{Identity, TRUNCATED_HASH_LEN};
 
 use crate::destination::{Destination, DestinationType, Direction};
-use crate::node_core::{compute_dest_hashes, RequestHandlerFn, RequestPolicy};
+use crate::node_core::compute_dest_hashes;
 
 use super::NodeCore;
 
@@ -112,21 +112,13 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .register_identity(peer_dest_hash, peer.public_key(), now);
     }
 
-    /// Look up a request handler across all destinations.
+    /// Look up a request handler scoped to a specific destination.
     pub(super) fn find_request_handler(
         &self,
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
         path_hash: &[u8; TRUNCATED_HASH_LEN],
-    ) -> Option<(alloc::string::String, RequestHandlerFn, RequestPolicy)> {
-        // Search primary destination
-        if let Some(h) = self.primary_dest.lookup_request_handler(path_hash) {
-            return Some((h.path.clone(), h.handler, h.policy));
-        }
-        // Search additional destinations
-        for dest in &self.additional_dests {
-            if let Some(h) = dest.lookup_request_handler(path_hash) {
-                return Some((h.path.clone(), h.handler, h.policy));
-            }
-        }
-        None
+    ) -> Option<&super::RequestHandler> {
+        let dest = self.get_destination(dest_hash)?;
+        dest.lookup_request_handler(path_hash)
     }
 }

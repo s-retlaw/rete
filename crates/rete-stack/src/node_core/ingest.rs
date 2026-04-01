@@ -207,6 +207,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                     if let Ok(peer_id) = Identity::from_public_key(&pub_key) {
                         if peer_id.verify(&pub_key, sig).is_ok() {
                             let id_hash = peer_id.hash();
+                            if let Some(link) = self.transport.get_link_mut(&link_id) {
+                                link.set_identified(pub_key);
+                            }
                             return IngestOutcome {
                                 event: Some(NodeEvent::LinkIdentified {
                                     link_id,
@@ -251,13 +254,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 path_hash,
                 data,
             } => {
-                // Try auto-dispatch to a registered request handler
+                // Scope handler lookup to the link's bound destination.
                 let mut response_packets = Vec::new();
-                let handler_result = self.find_request_handler(&path_hash);
-                if let Some((path_str, handler_fn, policy)) = handler_result {
-                    if policy != RequestPolicy::AllowNone {
+                if let Some(handler) = self
+                    .transport
+                    .get_link(&link_id)
+                    .map(|link| link.destination_hash)
+                    .and_then(|dh| self.find_request_handler(&dh, &path_hash))
+                {
+                    if handler.policy != RequestPolicy::AllowNone {
                         if let Some(response_data) =
-                            handler_fn(&path_str, &data, &request_id, &link_id)
+                            (handler.handler)(&handler.path, &data, &request_id, &link_id)
                         {
                             if let Ok(pkt) =
                                 self.send_response(&link_id, &request_id, &response_data, rng)

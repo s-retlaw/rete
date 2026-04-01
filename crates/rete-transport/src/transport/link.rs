@@ -17,6 +17,11 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         self.links.get(link_id)
     }
 
+    /// Look up an active link mutably by link_id.
+    pub fn get_link_mut(&mut self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> Option<&mut Link> {
+        self.links.get_mut(link_id)
+    }
+
     /// Number of active links.
     pub fn link_count(&self) -> usize {
         self.links.len()

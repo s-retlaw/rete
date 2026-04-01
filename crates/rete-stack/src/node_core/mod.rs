@@ -2048,4 +2048,172 @@ mod tests {
             "Group decrypt failure must drop packet, not deliver garbage"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 3C: Link identity persistence
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn link_identity_none_before_identify() {
+        let (init, resp, link_id) = two_core_handshake();
+
+        let init_link = init.transport.get_link(&link_id).unwrap();
+        assert!(init_link.identified_identity_hash().is_none());
+
+        let resp_link = resp.transport.get_link(&link_id).unwrap();
+        assert!(resp_link.identified_identity_hash().is_none());
+    }
+
+    #[test]
+    fn link_identity_persisted_after_identify() {
+        let (init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Initiator sends LINKIDENTIFY
+        let identify_pkt = init
+            .link_identify(&link_id, &mut rng)
+            .expect("should produce LINKIDENTIFY packet");
+
+        // Responder ingests LINKIDENTIFY
+        let outcome = resp.handle_ingest(&identify_pkt.data, 200, 0, &mut rng);
+        assert!(
+            matches!(outcome.event, Some(NodeEvent::LinkIdentified { .. })),
+            "responder should emit LinkIdentified"
+        );
+
+        // Verify identity is persisted on the link
+        let resp_link = resp.transport.get_link(&link_id).unwrap();
+        let expected_hash = init.identity.hash();
+        assert_eq!(
+            resp_link.identified_identity_hash(),
+            Some(&expected_hash),
+            "link should have initiator's identity hash"
+        );
+        assert_eq!(
+            resp_link.identified_public_key(),
+            Some(&init.identity.public_key()),
+            "link should have initiator's public key"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3B: Request handler dispatch scoped to link destination
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn request_handler_dispatched_to_link_destination() {
+        let (init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Register echo handler on responder's primary dest
+        let dh = *resp.dest_hash();
+        resp.register_request_handler(
+            &dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |_path, data, _req_id, _link_id| Some(data.to_vec()),
+                policy: RequestPolicy::AllowAll,
+            },
+        );
+
+        // Initiator sends request
+        let (req_pkt, _req_id) = init
+            .send_request(&link_id, "/test/echo", b"ping", 200, &mut rng)
+            .expect("should send request");
+
+        // Responder ingests → should auto-dispatch and produce response
+        let outcome = resp.handle_ingest(&req_pkt.data, 201, 0, &mut rng);
+        assert!(
+            matches!(outcome.event, Some(NodeEvent::RequestReceived { .. })),
+            "responder should emit RequestReceived"
+        );
+        assert!(
+            !outcome.packets.is_empty(),
+            "responder should produce auto-response packet"
+        );
+    }
+
+    #[test]
+    fn request_handler_scoped_to_link_destination() {
+        let (mut init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Register handler on primary dest (the link's target)
+        let primary_dh = *resp.dest_hash();
+        resp.register_request_handler(
+            &primary_dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |_path, _data, _req_id, _link_id| Some(b"primary".to_vec()),
+                policy: RequestPolicy::AllowAll,
+            },
+        );
+
+        // Register handler with SAME path on a secondary dest
+        let extra_dh = resp.register_destination("extra", &["svc"]);
+        resp.register_request_handler(
+            &extra_dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |_path, _data, _req_id, _link_id| Some(b"extra".to_vec()),
+                policy: RequestPolicy::AllowAll,
+            },
+        );
+
+        // Initiator sends request on the link (bound to primary dest)
+        let (req_pkt, _req_id) = init
+            .send_request(&link_id, "/test/echo", b"ping", 200, &mut rng)
+            .expect("should send request");
+
+        // Responder ingests → auto-response should come from primary handler
+        let outcome = resp.handle_ingest(&req_pkt.data, 201, 0, &mut rng);
+        assert!(
+            !outcome.packets.is_empty(),
+            "responder should produce auto-response"
+        );
+
+        // Verify response contains "primary", not "extra"
+        // Parse the response packet: initiator ingests it to get the data
+        let resp_pkt = &outcome.packets[0];
+        let init_outcome = init.handle_ingest(&resp_pkt.data, 202, 0, &mut rng);
+        match init_outcome.event {
+            Some(NodeEvent::ResponseReceived { data, .. }) => {
+                assert_eq!(data, b"primary", "should dispatch to primary dest's handler, not extra");
+            }
+            other => panic!("expected ResponseReceived, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn request_handler_not_found_on_wrong_destination() {
+        let (init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Register handler ONLY on a secondary destination (not the link's target)
+        let extra_dh = resp.register_destination("extra", &["svc"]);
+        resp.register_request_handler(
+            &extra_dh,
+            RequestHandler {
+                path: "/test/echo".into(),
+                handler: |_path, data, _req_id, _link_id| Some(data.to_vec()),
+                policy: RequestPolicy::AllowAll,
+            },
+        );
+
+        // Initiator sends request on the link (bound to primary dest, not extra)
+        let (req_pkt, _req_id) = init
+            .send_request(&link_id, "/test/echo", b"ping", 200, &mut rng)
+            .expect("should send request");
+
+        // Responder ingests → no auto-response (handler is on wrong dest)
+        let outcome = resp.handle_ingest(&req_pkt.data, 201, 0, &mut rng);
+        assert!(
+            matches!(outcome.event, Some(NodeEvent::RequestReceived { .. })),
+            "event should still be emitted"
+        );
+        assert!(
+            outcome.packets.is_empty(),
+            "no auto-response — handler is on a different destination"
+        );
+    }
 }

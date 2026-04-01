@@ -128,6 +128,14 @@ pub struct Link {
     pub signalling: [u8; LINK_MTU_SIZE],
     /// Reliable ordered channel (lazy-initialized on first channel message).
     pub(crate) channel: Option<Channel>,
+    /// Peer's identified identity, set after LINKIDENTIFY verification.
+    identified: Option<IdentifiedPeer>,
+}
+
+/// Identity revealed by a remote peer via LINKIDENTIFY.
+pub struct IdentifiedPeer {
+    pub_key: [u8; 64],
+    hash: [u8; TRUNCATED_HASH_LEN],
 }
 
 impl Link {
@@ -204,6 +212,7 @@ impl Link {
             destination_hash: [0u8; TRUNCATED_HASH_LEN],
             signalling: peer_signalling,
             channel: None,
+            identified: None,
         })
     }
 
@@ -285,6 +294,7 @@ impl Link {
             destination_hash: dest_hash,
             signalling: sig_bytes,
             channel: None,
+            identified: None,
         };
 
         (link, payload)
@@ -415,6 +425,25 @@ impl Link {
     /// Access the channel (if initialized).
     pub fn channel(&self) -> Option<&Channel> {
         self.channel.as_ref()
+    }
+
+    /// Record the peer's identified identity after LINKIDENTIFY verification.
+    /// Derives the identity hash internally from the public key.
+    pub fn set_identified(&mut self, pub_key: [u8; 64]) {
+        let digest = Sha256::digest(&pub_key);
+        let mut hash = [0u8; TRUNCATED_HASH_LEN];
+        hash.copy_from_slice(&digest[..TRUNCATED_HASH_LEN]);
+        self.identified = Some(IdentifiedPeer { pub_key, hash });
+    }
+
+    /// Identity hash of the peer, if they have sent LINKIDENTIFY.
+    pub fn identified_identity_hash(&self) -> Option<&[u8; TRUNCATED_HASH_LEN]> {
+        self.identified.as_ref().map(|p| &p.hash)
+    }
+
+    /// Full public key of the peer, if they have sent LINKIDENTIFY.
+    pub fn identified_public_key(&self) -> Option<&[u8; 64]> {
+        self.identified.as_ref().map(|p| &p.pub_key)
     }
 
     /// Update last inbound timestamp.
