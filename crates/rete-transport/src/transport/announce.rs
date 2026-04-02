@@ -308,11 +308,8 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
 
         let identity_hash = identity.hash();
-        let dest_hash = rete_core::destination_hash(expanded, Some(&identity_hash));
-
-        let name_digest = Sha256::digest(expanded.as_bytes());
-        let mut name_hash = [0u8; NAME_HASH_LEN];
-        name_hash.copy_from_slice(&name_digest[..NAME_HASH_LEN]);
+        let (dest_hash, name_hash) =
+            rete_core::destination_hashes(expanded, Some(&identity_hash));
 
         let mut random_hash = [0u8; 10];
         rng.fill_bytes(&mut random_hash[..5]);

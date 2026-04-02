@@ -10,7 +10,7 @@ Created: 2026-04-02
 | 1 | Resource hash verification skip | P0 | ✅ DONE | Fixed — enforce hash check after decrypt |
 | 2 | Resource auto-accept, no policy | P0 | ✅ DONE | ResourceStrategy enum, AcceptNone/AcceptAll/AcceptApp, RESOURCE_RCL |
 | 3 | Storage arch (heapless for hosted) | P1 | ✅ DONE | TransportStorage trait; HeaplessStorage + StdStorage backends |
-| 4 | Destination/NodeCore modeling | P1 | TODO | Dest hash computed 3 places; leaky abstraction |
+| 4 | Destination/NodeCore modeling | P1 | ✅ DONE | `destination_hashes()` canonical; `decrypt_with_identity()` on Destination |
 | 5 | Request/Resource lifecycle parity | P1 | TODO | No RequestReceipt, no resource callbacks |
 | 6 | LxmfRouter narrower than upstream | P1 | TODO | No outbound queue, retry, or receipt tracking |
 | 7 | Portable LXMF boundary half-finished | P1 | TODO | Lower priority — RNode doesn't need rete-lxmf |
@@ -128,36 +128,26 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 ## 4. Destination / NodeCore Modeling
 
 **Priority:** P1
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-02)
 
-### Problem
+### Solution
 
-Destination hash computation is duplicated in three places:
-1. `Destination::new()` — `crates/rete-stack/src/destination.rs:101-127`
-2. `compute_dest_hashes()` — `crates/rete-stack/src/node_core/mod.rs:266-284`
-3. `register_destination_typed()` — `crates/rete-stack/src/node_core/destination.rs:53-69`
-
-Additionally, inbound `Single` destinations bypass the `Destination` abstraction — decryption goes through `self.identity` directly instead of the destination (`ingest.rs:121-156`).
+1. **`rete_core::destination_hashes()`** is the single canonical implementation returning `(dest_hash, name_hash)`. The existing `destination_hash()` is now a thin wrapper returning `.0`.
+2. **Deleted `compute_dest_hashes()`** from `node_core/mod.rs`. All callers (`Destination::new()`, `register_destination()`, `register_destination_typed()`) use `destination_hashes()` directly.
+3. **Added `Destination::decrypt_with_identity()`** — accepts external `&Identity` + ratchet keys. Centralizes decrypt dispatch on Destination without requiring identity ownership (Identity has `ZeroizeOnDrop`, not `Clone`).
+4. **Simplified `ingest.rs`** — 30-line match block replaced with single `decrypt_with_identity()` call.
 
 ### Key Files
 
-- `crates/rete-stack/src/destination.rs:44-66, 82-127, 217-286`
-- `crates/rete-stack/src/node_core/mod.rs:266-320`
-- `crates/rete-stack/src/node_core/destination.rs:18-78`
-- `crates/rete-stack/src/node_core/ingest.rs:121-156`
+- `crates/rete-core/src/identity.rs` — `destination_hashes()` canonical implementation
+- `crates/rete-stack/src/destination.rs` — `decrypt_with_identity()` method + 6 tests
+- `crates/rete-stack/src/node_core/destination.rs` — uses `destination_hashes()` directly
+- `crates/rete-stack/src/node_core/ingest.rs` — simplified decrypt dispatch
 
-### What to Do
+### Verified
 
-1. **Centralize dest hash computation** — one function, one location (ideally `rete-core` or `Destination::new()`).
-2. **Remove `compute_dest_hashes()` and inline hash re-computation in `register_destination_typed()`.**
-3. **Make inbound Single destinations decrypt through the Destination abstraction**, not through a NodeCore special case.
-4. Consider splitting `Destination` into `LocalDestination` (has identity, can decrypt) and `DestinationAddress` (address-only, for routing/outbound).
-
-### Done When
-
-- Dest hash is computed in exactly one place
-- Inbound decryption for Single destinations goes through the destination, not NodeCore bypass
-- All interop tests pass
+- All workspace unit tests pass (91 in rete-stack, 123 in rete-transport, etc.)
+- All 53 E2E interop tests pass
 
 ---
 
@@ -429,3 +419,5 @@ Can't capture state. Forces globals or side channels for anything stateful.
 | 2026-04-02 | `TransportStorage` trait with explicit associated types (not GATs) | Embedded impl needs different capacities per role (MAX_PATHS vs MAX_LINKS). Explicit types avoid GAT complexity. |
 | 2026-04-02 | `hashbrown` for hosted HashMap/HashSet | `no_std + alloc` compatible, already a transitive dependency. Avoids requiring `std` in rete-transport. |
 | 2026-04-02 | `hosted` feature flag on rete-transport/rete-stack | Gates `StdStorage` and `HostedNodeCore` behind opt-in feature. Embedded crates never pull in hashbrown. |
+| 2026-04-02 | `decrypt_with_identity()` over type split | Identity has `ZeroizeOnDrop` (not `Clone`). Instead of splitting Destination into LocalDestination/DestinationAddress, added method accepting external `&Identity` + ratchet keys. |
+| 2026-04-02 | `destination_hash()` as thin wrapper | ~30 call sites only need dest_hash. Kept as convenience delegating to `destination_hashes().0` rather than updating all callers. |

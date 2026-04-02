@@ -119,40 +119,26 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 let proof_strategy = dest.proof_strategy;
 
                 let mut dec_buf = [0u8; MTU];
-                let decrypted = match dest.dest_type {
-                    DestinationType::Plain => payload.to_vec(),
-                    DestinationType::Single => {
-                        let mut privkeys = Vec::new();
-                        if let Some(store) = &self.ratchet_store {
-                            if let Some(k) = store.local_ratchet_private() {
-                                privkeys.push(k);
-                            }
-                            privkeys.extend_from_slice(store.previous_ratchet_privates());
+
+                // Gather ratchet private keys for Single destinations
+                let mut privkeys = Vec::new();
+                if dest.dest_type == DestinationType::Single {
+                    if let Some(store) = &self.ratchet_store {
+                        if let Some(k) = store.local_ratchet_private() {
+                            privkeys.push(k);
                         }
-                        if !privkeys.is_empty() {
-                            match self.identity.decrypt_with_ratchets(
-                                payload,
-                                &privkeys,
-                                false,
-                                &mut dec_buf,
-                            ) {
-                                Ok((n, _)) => dec_buf[..n].to_vec(),
-                                Err(_) => return IngestOutcome::empty(),
-                            }
-                        } else {
-                            match self.identity.decrypt(payload, &mut dec_buf) {
-                                Ok(n) => dec_buf[..n].to_vec(),
-                                Err(_) => return IngestOutcome::empty(),
-                            }
-                        }
+                        privkeys.extend_from_slice(store.previous_ratchet_privates());
                     }
-                    DestinationType::Group => {
-                        match dest.decrypt(payload, &mut dec_buf) {
-                            Ok(n) => dec_buf[..n].to_vec(),
-                            Err(_) => return IngestOutcome::empty(),
-                        }
-                    }
-                    DestinationType::Link => return IngestOutcome::empty(),
+                }
+
+                let decrypted = match dest.decrypt_with_identity(
+                    payload,
+                    Some(&self.identity),
+                    &privkeys,
+                    &mut dec_buf,
+                ) {
+                    Ok(n) => dec_buf[..n].to_vec(),
+                    Err(_) => return IngestOutcome::empty(),
                 };
 
                 let mut packets = Vec::new();

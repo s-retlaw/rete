@@ -265,26 +265,6 @@ pub(super) fn identity_hash_from_pubkey(pub_key: &[u8; 64]) -> [u8; 16] {
     out
 }
 
-/// Compute (dest_hash, name_hash) for a given identity + app_name + aspects.
-pub(super) fn compute_dest_hashes(
-    identity: &Identity,
-    app_name: &str,
-    aspects: &[&str],
-) -> Result<([u8; TRUNCATED_HASH_LEN], [u8; rete_core::NAME_HASH_LEN]), rete_core::Error> {
-    use sha2::{Digest, Sha256};
-
-    let mut name_buf = [0u8; 128];
-    let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
-    let id_hash = identity.hash();
-    let dest_hash = rete_core::destination_hash(expanded, Some(&id_hash));
-
-    let name_hash_full = Sha256::digest(expanded.as_bytes());
-    let mut name_hash = [0u8; rete_core::NAME_HASH_LEN];
-    name_hash.copy_from_slice(&name_hash_full[..rete_core::NAME_HASH_LEN]);
-
-    Ok((dest_hash, name_hash))
-}
-
 impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Create a new NodeCore with the given identity and destination.
     pub fn new(
@@ -292,7 +272,10 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         app_name: &str,
         aspects: &[&str],
     ) -> Result<Self, rete_core::Error> {
-        let (dest_hash, name_hash) = compute_dest_hashes(&identity, app_name, aspects)?;
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
+        let id_hash = identity.hash();
+        let (dest_hash, name_hash) = rete_core::destination_hashes(expanded, Some(&id_hash));
 
         let primary_dest = Destination::from_hashes(
             DestinationType::Single,

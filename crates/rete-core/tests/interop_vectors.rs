@@ -1,7 +1,7 @@
 //! Validate all rete-core identity/crypto functions against the Python-generated
 //! test vectors in tests/interop/vectors.json.
 
-use rete_core::{destination_hash, expand_name, Identity};
+use rete_core::{destination_hash, destination_hashes, expand_name, Identity};
 use serde_json::Value;
 
 /// Load the test vectors JSON.
@@ -114,6 +114,19 @@ fn destination_hash_vectors() {
             hex::encode(dh),
             dest_hash_hex,
             "dest_hash mismatch for {expanded_exp}"
+        );
+
+        // Verify destination_hashes() returns both correctly
+        let (dh2, nh2) = destination_hashes(expanded, id_hash.as_ref());
+        assert_eq!(
+            hex::encode(dh2),
+            dest_hash_hex,
+            "destination_hashes dest_hash mismatch for {expanded_exp}"
+        );
+        assert_eq!(
+            hex::encode(nh2),
+            name_hash_hex,
+            "destination_hashes name_hash mismatch for {expanded_exp}"
         );
     }
 }

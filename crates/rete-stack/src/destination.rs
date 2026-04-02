@@ -10,7 +10,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rete_core::{Identity, Token, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
-use sha2::{Digest, Sha256};
 
 use crate::node_core::RequestHandler;
 use crate::ProofStrategy;
@@ -102,14 +101,8 @@ impl Destination {
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
 
-        // name_hash = SHA-256(expanded)[0:10]
-        let name_hash_full = Sha256::digest(expanded.as_bytes());
-        let mut name_hash = [0u8; NAME_HASH_LEN];
-        name_hash.copy_from_slice(&name_hash_full[..NAME_HASH_LEN]);
-
-        // dest_hash uses rete_core::destination_hash
         let id_hash = identity.as_ref().map(|id| id.hash());
-        let dest_hash = rete_core::destination_hash(expanded, id_hash.as_ref());
+        let (dest_hash, name_hash) = rete_core::destination_hashes(expanded, id_hash.as_ref());
 
         Ok(Destination {
             dest_type,
@@ -259,30 +252,7 @@ impl Destination {
     /// For PLAIN: copies ciphertext unchanged.
     /// For LINK: returns an error.
     pub fn decrypt(&self, ciphertext: &[u8], out: &mut [u8]) -> Result<usize, rete_core::Error> {
-        match self.dest_type {
-            DestinationType::Single => {
-                let id = self
-                    .identity
-                    .as_ref()
-                    .ok_or(rete_core::Error::CryptoError)?;
-                id.decrypt(ciphertext, out)
-            }
-            DestinationType::Group => {
-                let token = self
-                    .group_token
-                    .as_ref()
-                    .ok_or(rete_core::Error::CryptoError)?;
-                token.decrypt(ciphertext, out)
-            }
-            DestinationType::Plain => {
-                if out.len() < ciphertext.len() {
-                    return Err(rete_core::Error::BufferTooSmall);
-                }
-                out[..ciphertext.len()].copy_from_slice(ciphertext);
-                Ok(ciphertext.len())
-            }
-            DestinationType::Link => Err(rete_core::Error::CryptoError),
-        }
+        self.decrypt_with_identity(ciphertext, None, &[], out)
     }
 
     /// Create group keys for a GROUP destination.
@@ -302,6 +272,54 @@ impl Destination {
         rng.fill_bytes(&mut key_bytes);
         self.group_token = Some(Token::new(&key_bytes)?);
         Ok(())
+    }
+
+    /// Decrypt ciphertext using this destination's type dispatch,
+    /// with external cryptographic material for Single destinations.
+    ///
+    /// For Single: uses the destination's own identity if present, otherwise
+    /// the provided `identity`. Tries ratchet keys first when non-empty.
+    /// For Group: uses internal group token (ignores identity/ratchets).
+    /// For Plain: passthrough copy.
+    /// For Link: returns error.
+    pub fn decrypt_with_identity(
+        &self,
+        ciphertext: &[u8],
+        identity: Option<&Identity>,
+        ratchet_privkeys: &[[u8; 32]],
+        out: &mut [u8],
+    ) -> Result<usize, rete_core::Error> {
+        match self.dest_type {
+            DestinationType::Single => {
+                let id = self
+                    .identity
+                    .as_ref()
+                    .or(identity)
+                    .ok_or(rete_core::Error::CryptoError)?;
+                if !ratchet_privkeys.is_empty() {
+                    let (n, _) =
+                        id.decrypt_with_ratchets(ciphertext, ratchet_privkeys, false, out)?;
+                    Ok(n)
+                } else {
+                    id.decrypt(ciphertext, out)
+                }
+            }
+            DestinationType::Group => {
+                let token = self
+                    .group_token
+                    .as_ref()
+                    .ok_or(rete_core::Error::CryptoError)?;
+                token.decrypt(ciphertext, out)
+            }
+            DestinationType::Plain => {
+                if out.len() < ciphertext.len() {
+                    return Err(rete_core::Error::BufferTooSmall);
+                }
+                out[..ciphertext.len()].copy_from_slice(ciphertext);
+                Ok(ciphertext.len())
+            }
+            DestinationType::Link => Err(rete_core::Error::CryptoError),
+        }
     }
 
     /// Load a group key from raw bytes (64 bytes).
@@ -326,6 +344,7 @@ impl Destination {
 mod tests {
     use super::*;
     use rete_core::Identity;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn test_destination_hash_matches_core() {
@@ -583,5 +602,163 @@ mod tests {
             &[],
         );
         assert!(matches!(result, Err(rete_core::Error::BufferTooSmall)));
+    }
+
+    // -----------------------------------------------------------------------
+    // decrypt_with_identity tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_decrypt_with_identity_single() {
+        // Single dest created via from_hashes (identity=None) should decrypt
+        // when provided an external identity.
+        let identity = Identity::from_seed(b"dwi-single").unwrap();
+        let id_hash = identity.hash();
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
+        let (dest_hash, name_hash) = rete_core::destination_hashes(expanded, Some(&id_hash));
+
+        let dest = Destination::from_hashes(
+            DestinationType::Single,
+            Direction::In,
+            "testapp",
+            &["aspect1"],
+            dest_hash,
+            name_hash,
+        );
+        assert!(dest.identity().is_none());
+
+        // Encrypt with the identity's public key
+        let mut rng = rand::thread_rng();
+        let plaintext = b"hello single";
+        let mut ct = [0u8; 256];
+        let ct_len = identity.encrypt(plaintext, &mut rng, &mut ct).unwrap();
+
+        // Decrypt via decrypt_with_identity
+        let mut pt = [0u8; 256];
+        let pt_len = dest
+            .decrypt_with_identity(&ct[..ct_len], Some(&identity), &[], &mut pt)
+            .unwrap();
+        assert_eq!(&pt[..pt_len], plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_with_identity_single_ratchet() {
+        // Single dest should decrypt ratcheted ciphertext via provided ratchet keys.
+        let identity = Identity::from_seed(b"dwi-ratchet").unwrap();
+        let id_hash = identity.hash();
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
+        let (dest_hash, name_hash) = rete_core::destination_hashes(expanded, Some(&id_hash));
+
+        let dest = Destination::from_hashes(
+            DestinationType::Single,
+            Direction::In,
+            "testapp",
+            &["aspect1"],
+            dest_hash,
+            name_hash,
+        );
+
+        // Generate ratchet keypair and encrypt with ratchet
+        let mut rng = rand::thread_rng();
+        let (ratchet_prv, ratchet_pub) = rete_core::generate_ratchet(&mut rng);
+        let plaintext = b"ratcheted message";
+        let mut ct = [0u8; 256];
+        let ct_len = identity
+            .encrypt_with_ratchet(plaintext, &ratchet_pub, &mut rng, &mut ct)
+            .unwrap();
+
+        // Decrypt with ratchet private key
+        let mut pt = [0u8; 256];
+        let pt_len = dest
+            .decrypt_with_identity(&ct[..ct_len], Some(&identity), &[ratchet_prv], &mut pt)
+            .unwrap();
+        assert_eq!(&pt[..pt_len], plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_with_identity_single_no_identity_errors() {
+        // Single dest with no owned or provided identity should fail.
+        let dest = Destination::from_hashes(
+            DestinationType::Single,
+            Direction::In,
+            "testapp",
+            &["aspect1"],
+            [0u8; 16],
+            [0u8; 10],
+        );
+
+        let mut out = [0u8; 256];
+        let result = dest.decrypt_with_identity(b"some ciphertext", None, &[], &mut out);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_with_identity_group() {
+        // Group dest should use internal token, ignoring identity param.
+        let mut dest = Destination::new(
+            None,
+            Direction::In,
+            DestinationType::Group,
+            "testapp",
+            &["group1"],
+        )
+        .unwrap();
+        let mut rng = rand::thread_rng();
+        dest.create_group_keys(&mut rng).unwrap();
+
+        let plaintext = b"group via ext";
+        let mut ct = [0u8; 256];
+        let ct_len = dest.encrypt(plaintext, &mut rng, &mut ct).unwrap();
+
+        let mut pt = [0u8; 256];
+        let pt_len = dest
+            .decrypt_with_identity(&ct[..ct_len], None, &[], &mut pt)
+            .unwrap();
+        assert_eq!(&pt[..pt_len], plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_with_identity_plain() {
+        // Plain dest should pass through unchanged.
+        let dest = Destination::new(
+            None,
+            Direction::In,
+            DestinationType::Plain,
+            "broadcast",
+            &[],
+        )
+        .unwrap();
+
+        let data = b"plain data";
+        let mut out = [0u8; 256];
+        let len = dest
+            .decrypt_with_identity(data, None, &[], &mut out)
+            .unwrap();
+        assert_eq!(&out[..len], data);
+    }
+
+    #[test]
+    fn test_decrypt_with_identity_link_errors() {
+        // Link dest should return error.
+        let identity = Identity::from_seed(b"dwi-link").unwrap();
+        let id_hash = identity.hash();
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name("testapp", &["link1"], &mut name_buf).unwrap();
+        let (dest_hash, name_hash) = rete_core::destination_hashes(expanded, Some(&id_hash));
+
+        let dest = Destination::from_hashes(
+            DestinationType::Link,
+            Direction::In,
+            "testapp",
+            &["link1"],
+            dest_hash,
+            name_hash,
+        );
+
+        let mut out = [0u8; 256];
+        let result = dest.decrypt_with_identity(b"data", Some(&identity), &[], &mut out);
+        assert!(result.is_err());
     }
 }

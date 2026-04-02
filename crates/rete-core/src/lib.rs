@@ -33,7 +33,9 @@ pub mod packet;
 pub mod token;
 
 pub use error::Error;
-pub use identity::{destination_hash, expand_name, generate_ratchet, ratchet_id, Identity};
+pub use identity::{
+    destination_hash, destination_hashes, expand_name, generate_ratchet, ratchet_id, Identity,
+};
 pub use ifac::{IfacKey, DEFAULT_IFAC_SIZE, IFAC_FLAG, IFAC_SALT};
 pub use packet::{
     DestType, HeaderType, Packet, PacketBuilder, PacketType, CONTEXT_CACHE_REQUEST,

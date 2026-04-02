@@ -3,7 +3,6 @@
 use rete_core::{Identity, TRUNCATED_HASH_LEN};
 
 use crate::destination::{Destination, DestinationType, Direction};
-use crate::node_core::compute_dest_hashes;
 
 use super::NodeCore;
 
@@ -20,7 +19,10 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         app_name: &str,
         aspects: &[&str],
     ) -> Result<[u8; TRUNCATED_HASH_LEN], rete_core::Error> {
-        let (dest_hash, name_hash) = compute_dest_hashes(&self.identity, app_name, aspects)?;
+        let mut name_buf = [0u8; 128];
+        let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
+        let id_hash = self.identity.hash();
+        let (dest_hash, name_hash) = rete_core::destination_hashes(expanded, Some(&id_hash));
 
         let dest = Destination::from_hashes(
             DestinationType::Single,
@@ -58,11 +60,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
 
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
-        let dest_hash = rete_core::destination_hash(expanded, id_hash.as_ref());
-
-        let name_hash_full = <sha2::Sha256 as sha2::Digest>::digest(expanded.as_bytes());
-        let mut name_hash = [0u8; rete_core::NAME_HASH_LEN];
-        name_hash.copy_from_slice(&name_hash_full[..rete_core::NAME_HASH_LEN]);
+        let (dest_hash, name_hash) = rete_core::destination_hashes(expanded, id_hash.as_ref());
 
         let dest = Destination::from_hashes(
             dest_type, direction, app_name, aspects, dest_hash, name_hash,

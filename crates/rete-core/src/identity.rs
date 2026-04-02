@@ -454,19 +454,32 @@ pub fn ratchet_id(ratchet_pub: &[u8; 32]) -> [u8; NAME_HASH_LEN] {
 /// addr_material = name_hash [+ identity_hash if not PLAIN]
 /// dest_hash     = SHA-256(addr_material)[0:16]
 /// ```
+pub fn destination_hashes(
+    expanded_name: &str,
+    identity_hash: Option<&[u8; TRUNCATED_HASH_LEN]>,
+) -> ([u8; TRUNCATED_HASH_LEN], [u8; NAME_HASH_LEN]) {
+    let name_digest = Sha256::digest(expanded_name.as_bytes());
+    let mut name_hash = [0u8; NAME_HASH_LEN];
+    name_hash.copy_from_slice(&name_digest[..NAME_HASH_LEN]);
+
+    let mut hasher = Sha256::new();
+    hasher.update(&name_hash);
+    if let Some(id) = identity_hash {
+        hasher.update(id.as_slice());
+    }
+    let dest_hash: [u8; TRUNCATED_HASH_LEN] =
+        hasher.finalize()[..TRUNCATED_HASH_LEN].try_into().unwrap();
+    (dest_hash, name_hash)
+}
+
+/// Convenience wrapper — returns only the 16-byte destination hash.
+///
+/// Delegates to [`destination_hashes`].
 pub fn destination_hash(
     expanded_name: &str,
     identity_hash: Option<&[u8; TRUNCATED_HASH_LEN]>,
 ) -> [u8; TRUNCATED_HASH_LEN] {
-    let name_digest = Sha256::digest(expanded_name.as_bytes());
-    let name_hash = &name_digest[..NAME_HASH_LEN];
-
-    let mut hasher = Sha256::new();
-    hasher.update(name_hash);
-    if let Some(id) = identity_hash {
-        hasher.update(id.as_slice());
-    }
-    hasher.finalize()[..TRUNCATED_HASH_LEN].try_into().unwrap()
+    destination_hashes(expanded_name, identity_hash).0
 }
 
 /// Expand `app_name` and `aspects` into a dot-joined string.
@@ -570,6 +583,42 @@ mod tests {
         let h2 = destination_hash(expanded, Some(&fake_id_hash));
         assert_eq!(h1, h2, "destination hash must be deterministic");
         assert_eq!(h1.len(), 16);
+    }
+
+    #[test]
+    fn destination_hashes_with_identity() {
+        // destination_hash_vectors[0]: alice, testapp.aspect1
+        let id_hash = [
+            0xfdu8, 0x9f, 0x12, 0x1e, 0x29, 0x3b, 0xf4, 0xa4, 0x15, 0xdd, 0x74, 0x36, 0x6f,
+            0xf7, 0x5f, 0x69,
+        ];
+        let mut name_buf = [0u8; 32];
+        let expanded = expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
+        let (dest_hash, name_hash) = destination_hashes(expanded, Some(&id_hash));
+
+        // Expected from vectors.json
+        assert_eq!(
+            hex::encode(dest_hash),
+            "2b7fa6842783252974dc5fcaff22b808",
+            "dest_hash mismatch"
+        );
+        assert_eq!(
+            hex::encode(name_hash),
+            "fca709a4818d4e0c78a0",
+            "name_hash mismatch"
+        );
+    }
+
+    #[test]
+    fn destination_hashes_plain() {
+        // PLAIN destination — no identity hash
+        let (dest_hash, name_hash) = destination_hashes("broadcast", None);
+        assert_eq!(dest_hash.len(), 16);
+        assert_eq!(name_hash.len(), 10);
+
+        // Must match destination_hash() for the same input
+        let dh = destination_hash("broadcast", None);
+        assert_eq!(dest_hash, dh, "destination_hashes dest must match destination_hash");
     }
 
     #[test]
