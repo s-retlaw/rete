@@ -403,169 +403,185 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 total,
             } => {
                 let mut packets = Vec::new();
-                // If all parts received, assemble and send proof
+                // If all parts received, concat → decrypt → decompress → verify → proof
                 if current == total && total > 0 {
-                    // Step 1: Assemble encrypted parts, get flags and split metadata
-                    let (assembly_result, is_compressed, split_index, split_total, original_hash) = {
+                    // Step 1: Concatenate encrypted parts, get flags and split metadata
+                    let (concat_result, is_compressed, split_index, split_total, original_hash) = {
                         if let Some(res) = self.transport.get_resource_mut(&link_id, &resource_hash)
                         {
                             let compressed = res.flags.compressed;
                             let si = res.split_index;
                             let st = res.split_total;
                             let oh = res.original_hash;
-                            match res.assemble() {
-                                Ok(data) => (Some(Ok(data)), compressed, si, st, oh),
-                                Err(_) => (Some(Err(())), compressed, si, st, oh),
+                            match res.concat_parts() {
+                                Ok(data) => (Some(data), compressed, si, st, oh),
+                                Err(_) => (None, compressed, si, st, oh),
                             }
                         } else {
                             (None, false, 1, 1, [0u8; 32])
                         }
                     };
 
-                    if let Some(Ok(encrypted_data)) = assembly_result {
-                        // Step 2: Decrypt via link Token, strip 4-byte random prepend
-                        let decrypted = if let Some(link) = self.transport.get_link(&link_id) {
-                            let mut dec_buf = vec![0u8; encrypted_data.len()];
-                            if let Ok(dec_len) = link.decrypt(&encrypted_data, &mut dec_buf) {
+                    // Failure helper: drain outbound, cleanup, clean split buf
+                    macro_rules! resource_failed {
+                        ($packets:expr) => {{
+                            for pkt in self.transport.drain_resource_outbound() {
+                                $packets.push(OutboundPacket::broadcast(pkt));
+                            }
+                            self.transport.cleanup_resources();
+                            if split_total > 1 {
+                                if let Some(idx) = self.split_recv_buf.iter().position(|e| {
+                                    e.link_id == link_id && e.original_hash == original_hash
+                                }) {
+                                    self.split_recv_buf.swap_remove(idx);
+                                }
+                            }
+                            return IngestOutcome {
+                                event: Some(NodeEvent::ResourceFailed {
+                                    link_id,
+                                    resource_hash,
+                                }),
+                                packets: core::mem::take(&mut $packets),
+                            };
+                        }};
+                    }
+
+                    let encrypted_data = match concat_result {
+                        Some(data) => data,
+                        None => resource_failed!(packets),
+                    };
+
+                    // Step 2: Decrypt via link Token, strip 4-byte random prepend — hard fail
+                    let decrypted = if let Some(link) = self.transport.get_link(&link_id) {
+                        let mut dec_buf = vec![0u8; encrypted_data.len()];
+                        match link.decrypt(&encrypted_data, &mut dec_buf) {
+                            Ok(dec_len) => {
                                 dec_buf.truncate(dec_len);
                                 if dec_buf.len() >= 4 {
                                     dec_buf.drain(..4);
                                 }
                                 dec_buf
-                            } else {
-                                encrypted_data
                             }
-                        } else {
-                            encrypted_data
-                        };
+                            Err(_) => resource_failed!(packets),
+                        }
+                    } else {
+                        resource_failed!(packets)
+                    };
 
-                        // Step 3: Decompress if compressed flag is set
-                        let plaintext = if is_compressed {
-                            if let Some(decompress) = self.decompress_fn {
-                                decompress(&decrypted).unwrap_or(decrypted)
-                            } else {
-                                decrypted
-                            }
-                        } else {
-                            decrypted
-                        };
+                    // Step 3: Decompress if compressed flag is set — hard fail
+                    let plaintext = if is_compressed {
+                        match self.decompress_fn {
+                            Some(decompress) => match decompress(&decrypted) {
+                                Some(d) => d,
+                                None => resource_failed!(packets),
+                            },
+                            None => resource_failed!(packets),
+                        }
+                    } else {
+                        decrypted
+                    };
 
-                        // Step 4: Move plaintext into resource, build proof, take it back
-                        // Proof = SHA-256(plaintext || resource_hash) — must match Python
-                        let (proof, plaintext) = if let Some(res) =
-                            self.transport.get_resource_mut(&link_id, &resource_hash)
+                    // Step 4: Verify hash — stores plaintext in resource on success
+                    if let Some(res) =
+                        self.transport.get_resource_mut(&link_id, &resource_hash)
+                    {
+                        if res.verify_hash(plaintext).is_err() {
+                            resource_failed!(packets);
+                        }
+                    } else {
+                        resource_failed!(packets);
+                    }
+
+                    // Step 5: Build proof from verified data
+                    let (proof, plaintext) = if let Some(res) =
+                        self.transport.get_resource_mut(&link_id, &resource_hash)
+                    {
+                        let proof = res.build_proof();
+                        (proof, core::mem::take(&mut res.data))
+                    } else {
+                        resource_failed!(packets);
+                    };
+
+                    // Step 6: Send proof packet
+                    if !proof.is_empty() {
+                        let mut pkt_buf = [0u8; MTU];
+                        if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
+                            .packet_type(PacketType::Proof)
+                            .dest_type(DestType::Link)
+                            .destination_hash(&link_id)
+                            .context(rete_core::CONTEXT_RESOURCE_PRF)
+                            .payload(&proof)
+                            .build()
                         {
-                            res.data = plaintext;
-                            let proof = res.build_proof();
-                            (proof, core::mem::take(&mut res.data))
+                            packets
+                                .push(OutboundPacket::broadcast(pkt_buf[..pkt_len].to_vec()));
+                        }
+                    }
+
+                    // Drain any resource outbound packets
+                    for pkt in self.transport.drain_resource_outbound() {
+                        packets.push(OutboundPacket::broadcast(pkt));
+                    }
+                    // Clean up completed receiver resource
+                    self.transport.cleanup_resources();
+
+                    // Step 7: Handle split resources
+                    let mut oh_trunc = [0u8; TRUNCATED_HASH_LEN];
+                    oh_trunc.copy_from_slice(&original_hash[..TRUNCATED_HASH_LEN]);
+
+                    if split_total > 1 && split_index < split_total {
+                        // Non-final split segment: buffer data, wait for next
+                        if let Some(entry) = self
+                            .split_recv_buf
+                            .iter_mut()
+                            .find(|e| e.link_id == link_id && e.original_hash == original_hash)
+                        {
+                            entry.data.extend_from_slice(&plaintext);
                         } else {
-                            (Vec::new(), plaintext)
-                        };
-
-                        // Step 5: Build and send proof packet
-                        if !proof.is_empty() {
-                            let mut pkt_buf = [0u8; MTU];
-                            if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
-                                .packet_type(PacketType::Proof)
-                                .dest_type(DestType::Link)
-                                .destination_hash(&link_id)
-                                .context(rete_core::CONTEXT_RESOURCE_PRF)
-                                .payload(&proof)
-                                .build()
-                            {
-                                packets
-                                    .push(OutboundPacket::broadcast(pkt_buf[..pkt_len].to_vec()));
-                            }
-                        }
-
-                        // Drain any resource outbound packets
-                        for pkt in self.transport.drain_resource_outbound() {
-                            packets.push(OutboundPacket::broadcast(pkt));
-                        }
-                        // Clean up completed receiver resource
-                        self.transport.cleanup_resources();
-
-                        // Step 6: Handle split resources
-                        // Truncate original_hash to 16 bytes for NodeEvent resource_hash field
-                        let mut oh_trunc = [0u8; TRUNCATED_HASH_LEN];
-                        oh_trunc.copy_from_slice(&original_hash[..TRUNCATED_HASH_LEN]);
-
-                        if split_total > 1 && split_index < split_total {
-                            // Non-final split segment: buffer data, wait for next
-                            if let Some(entry) = self
-                                .split_recv_buf
-                                .iter_mut()
-                                .find(|e| e.link_id == link_id && e.original_hash == original_hash)
-                            {
-                                entry.data.extend_from_slice(&plaintext);
-                            } else {
-                                self.split_recv_buf.push(SplitRecvEntry {
-                                    link_id,
-                                    original_hash,
-                                    data: plaintext,
-                                });
-                            }
-                            return IngestOutcome {
-                                event: Some(NodeEvent::ResourceProgress {
-                                    link_id,
-                                    resource_hash: oh_trunc,
-                                    current: split_index,
-                                    total: split_total,
-                                }),
-                                packets,
-                            };
-                        } else if split_total > 1 && split_index == split_total {
-                            // Final split segment: concatenate all buffered data
-                            let mut full_data = Vec::new();
-                            if let Some(idx) = self.split_recv_buf.iter().position(|e| {
-                                e.link_id == link_id && e.original_hash == original_hash
-                            }) {
-                                let entry = self.split_recv_buf.swap_remove(idx);
-                                full_data = entry.data;
-                            }
-                            full_data.extend_from_slice(&plaintext);
-                            return IngestOutcome {
-                                event: Some(NodeEvent::ResourceComplete {
-                                    link_id,
-                                    resource_hash: oh_trunc,
-                                    data: full_data,
-                                }),
-                                packets,
-                            };
-                        }
-
-                        // Non-split resource: deliver directly
-                        return IngestOutcome {
-                            event: Some(NodeEvent::ResourceComplete {
+                            self.split_recv_buf.push(SplitRecvEntry {
                                 link_id,
-                                resource_hash,
+                                original_hash,
                                 data: plaintext,
+                            });
+                        }
+                        return IngestOutcome {
+                            event: Some(NodeEvent::ResourceProgress {
+                                link_id,
+                                resource_hash: oh_trunc,
+                                current: split_index,
+                                total: split_total,
                             }),
                             packets,
                         };
-                    } else if let Some(Err(())) = assembly_result {
-                        for pkt in self.transport.drain_resource_outbound() {
-                            packets.push(OutboundPacket::broadcast(pkt));
+                    } else if split_total > 1 && split_index == split_total {
+                        // Final split segment: concatenate all buffered data
+                        let mut full_data = Vec::new();
+                        if let Some(idx) = self.split_recv_buf.iter().position(|e| {
+                            e.link_id == link_id && e.original_hash == original_hash
+                        }) {
+                            let entry = self.split_recv_buf.swap_remove(idx);
+                            full_data = entry.data;
                         }
-                        self.transport.cleanup_resources();
-
-                        // Clean up split buffer on failure
-                        if split_total > 1 {
-                            if let Some(idx) = self.split_recv_buf.iter().position(|e| {
-                                e.link_id == link_id && e.original_hash == original_hash
-                            }) {
-                                self.split_recv_buf.swap_remove(idx);
-                            }
-                        }
-
+                        full_data.extend_from_slice(&plaintext);
                         return IngestOutcome {
-                            event: Some(NodeEvent::ResourceFailed {
+                            event: Some(NodeEvent::ResourceComplete {
                                 link_id,
-                                resource_hash,
+                                resource_hash: oh_trunc,
+                                data: full_data,
                             }),
                             packets,
                         };
                     }
+
+                    // Non-split resource: deliver directly
+                    return IngestOutcome {
+                        event: Some(NodeEvent::ResourceComplete {
+                            link_id,
+                            resource_hash,
+                            data: plaintext,
+                        }),
+                        packets,
+                    };
                 }
                 // Not all parts received yet — drain resource outbound
                 for pkt in self.transport.drain_resource_outbound() {

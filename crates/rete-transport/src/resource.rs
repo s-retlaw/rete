@@ -183,6 +183,21 @@ impl ResourceFlags {
     }
 }
 
+/// Errors from resource assembly and verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceError {
+    /// Assembled data hash does not match the advertised resource_hash.
+    HashMismatch,
+}
+
+impl core::fmt::Display for ResourceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::HashMismatch => write!(f, "resource hash mismatch"),
+        }
+    }
+}
+
 /// A segmented data transfer over a Link.
 pub struct Resource {
     /// Current state of the resource transfer.
@@ -986,38 +1001,40 @@ impl Resource {
         Ok(())
     }
 
-    /// Assemble the complete resource data and verify the hash.
+    /// Concatenate all received parts into a single byte vector.
     ///
-    /// Concatenates all parts in order, then verifies that
-    /// `SHA-256(assembled || random_hash) == resource_hash`.
-    pub fn assemble(&mut self) -> Result<Vec<u8>, &'static str> {
+    /// Sets state to `Assembling`. Does NOT verify the hash or finalize
+    /// the resource — call [`verify_hash`] after decryption/decompression.
+    pub fn concat_parts(&mut self) -> Result<Vec<u8>, ResourceError> {
         self.state = ResourceState::Assembling;
 
-        // Concatenate all parts in order
         let mut assembled = Vec::with_capacity(self.total_size);
         for part in &self.parts {
             assembled.extend_from_slice(part);
         }
 
-        // Verify: SHA-256(assembled || random_hash) == resource_hash
+        Ok(assembled)
+    }
+
+    /// Verify the resource hash and finalize the resource.
+    ///
+    /// Computes `SHA-256(data || random_hash)` and compares to the
+    /// advertised `resource_hash`. On success, stores `data` in
+    /// `self.data` and sets state to `Complete`. On mismatch, sets
+    /// state to `Corrupt`.
+    pub fn verify_hash(&mut self, data: Vec<u8>) -> Result<(), ResourceError> {
         let mut hasher = Sha256::new();
-        hasher.update(&assembled);
+        hasher.update(&data);
         hasher.update(self.random_hash);
         let computed: [u8; 32] = hasher.finalize().into();
 
         if computed == self.resource_hash {
-            self.data = assembled.clone();
+            self.data = data;
             self.state = ResourceState::Complete;
-            Ok(assembled)
+            Ok(())
         } else {
-            // Return debug info in the error: include computed hash, expected hash, data len
-            self.data = assembled.clone();
-            self.state = ResourceState::Complete;
-            // Skip verification for now — the assembled data IS correct,
-            // but the resource_hash from the advertisement may have been
-            // computed over different data (Python encrypts+compresses first).
-            // Full interop verification will happen via the proof exchange.
-            Ok(assembled)
+            self.state = ResourceState::Corrupt;
+            Err(ResourceError::HashMismatch)
         }
     }
 
@@ -1154,8 +1171,9 @@ mod tests {
         let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
         // Feed the single part
         receiver.receive_part(&data);
-        let assembled = receiver.assemble().unwrap();
+        let assembled = receiver.concat_parts().unwrap();
         assert_eq!(assembled, data);
+        receiver.verify_hash(assembled).unwrap();
         let proof = receiver.build_proof();
         // Proof = resource_hash[32] + proof_hash[32] = 64 bytes
         assert_eq!(proof.len(), 64);
@@ -1211,11 +1229,14 @@ mod tests {
             receiver.receive_part(part);
         }
 
-        // Step 6: Receiver assembles and verifies
-        let assembled = receiver.assemble().unwrap();
+        // Step 6: Receiver concatenates parts
+        let assembled = receiver.concat_parts().unwrap();
         assert_eq!(assembled, data);
 
-        // Step 7: Receiver builds proof
+        // Step 7: Verify hash and finalize
+        receiver.verify_hash(assembled).unwrap();
+
+        // Step 8: Receiver builds proof
         let proof = receiver.build_proof();
 
         // Step 8: Sender validates proof
@@ -1310,8 +1331,9 @@ mod tests {
             receiver.receive_part(part);
         }
 
-        let assembled = receiver.assemble().unwrap();
+        let assembled = receiver.concat_parts().unwrap();
         assert_eq!(assembled, data);
+        receiver.verify_hash(assembled).unwrap();
 
         let proof = receiver.build_proof();
         assert!(sender.handle_proof(&proof));
@@ -1385,8 +1407,9 @@ mod tests {
             "not all parts received"
         );
 
-        let assembled = receiver.assemble().unwrap();
+        let assembled = receiver.concat_parts().unwrap();
         assert_eq!(assembled, data);
+        receiver.verify_hash(assembled).unwrap();
 
         let proof = receiver.build_proof();
         assert!(sender.handle_proof(&proof));
@@ -1420,9 +1443,10 @@ mod tests {
             "receive_part should match the Python-computed hash"
         );
 
-        // Assemble and verify
-        let assembled = receiver.assemble().unwrap();
+        // Concatenate and verify
+        let assembled = receiver.concat_parts().unwrap();
         assert_eq!(assembled, segment);
+        receiver.verify_hash(assembled).unwrap();
     }
 
     #[test]
@@ -1453,9 +1477,10 @@ mod tests {
         let all = receiver.receive_part(&encrypted);
         assert!(all, "part hash should match");
 
-        // Assemble and verify
-        let assembled = receiver.assemble().unwrap();
+        // Concatenate and verify
+        let assembled = receiver.concat_parts().unwrap();
         assert_eq!(assembled, encrypted);
+        receiver.verify_hash(assembled).unwrap();
     }
 
     #[test]
@@ -1600,5 +1625,115 @@ mod tests {
 
         // Parts should be stored at correct indices
         assert!(receiver.received[0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Hash verification tests (Tracker Item 1)
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a sender+receiver pair with all parts delivered.
+    fn make_delivered_pair(data: &[u8]) -> (Resource, Resource) {
+        let mdu = 431;
+        let mut rng = rand::thread_rng();
+        let mut sender = Resource::new_outbound(data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let adv = sender.build_advertisement();
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+
+        let req = receiver.build_request();
+        let result = sender.handle_request(&req);
+        for (_, part) in &result.parts {
+            receiver.receive_part(part);
+        }
+        (sender, receiver)
+    }
+
+    #[test]
+    fn test_concat_parts_does_not_set_complete() {
+        let data = b"test data for concat_parts";
+        let (_sender, mut receiver) = make_delivered_pair(data);
+
+        let assembled = receiver.concat_parts().unwrap();
+        assert_eq!(assembled, data);
+        assert_eq!(receiver.state, ResourceState::Assembling);
+        // data should NOT be stored by concat_parts
+        assert!(receiver.data.is_empty());
+    }
+
+    #[test]
+    fn test_verify_hash_success_sets_complete_and_stores_data() {
+        let data = b"test data for verify_hash";
+        let (_sender, mut receiver) = make_delivered_pair(data);
+
+        let assembled = receiver.concat_parts().unwrap();
+        receiver.verify_hash(assembled).unwrap();
+
+        assert_eq!(receiver.state, ResourceState::Complete);
+        assert_eq!(receiver.data, data);
+    }
+
+    #[test]
+    fn test_corrupted_resource_hash_detected() {
+        let data = b"test data for corruption check";
+        let (_sender, mut receiver) = make_delivered_pair(data);
+
+        let assembled = receiver.concat_parts().unwrap();
+
+        // Tamper with the expected hash to simulate a malicious advertisement
+        receiver.resource_hash[0] ^= 0xFF;
+
+        let result = receiver.verify_hash(assembled);
+        assert_eq!(result, Err(ResourceError::HashMismatch));
+        assert_eq!(receiver.state, ResourceState::Corrupt);
+        // data should NOT be stored on hash mismatch
+        assert!(receiver.data.is_empty());
+    }
+
+    #[test]
+    fn test_encrypted_verify_needs_plaintext() {
+        // Simulate the sender-side flow: resource_hash is over plaintext,
+        // but the transferred segments are "encrypted" (different) bytes.
+        let plaintext = b"the real plaintext data";
+        let fake_encrypted = b"encrypted blob different bytes!";
+
+        let mdu = 431;
+        let mut rng = rand::thread_rng();
+
+        // Create resource from the "encrypted" data (what actually gets segmented)
+        let mut sender =
+            Resource::new_outbound(fake_encrypted, [0x11; 16], mdu, plaintext.len(), mdu, &mut rng);
+
+        // Override resource_hash to be over plaintext (like override_resource_hash does)
+        let mut hasher = Sha256::new();
+        hasher.update(plaintext);
+        hasher.update(sender.random_hash);
+        sender.resource_hash = hasher.finalize().into();
+
+        let adv = sender.build_advertisement();
+        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+
+        // Deliver the "encrypted" parts
+        let req = receiver.build_request();
+        let result = sender.handle_request(&req);
+        for (_, part) in &result.parts {
+            receiver.receive_part(part);
+        }
+
+        let assembled = receiver.concat_parts().unwrap();
+        assert_eq!(assembled, fake_encrypted);
+
+        // Verifying against encrypted data should FAIL
+        assert_eq!(
+            receiver.verify_hash(assembled),
+            Err(ResourceError::HashMismatch)
+        );
+        assert_eq!(receiver.state, ResourceState::Corrupt);
+
+        // Reset state to try again with plaintext
+        receiver.state = ResourceState::Assembling;
+
+        // Verifying against plaintext should SUCCEED
+        receiver.verify_hash(plaintext.to_vec()).unwrap();
+        assert_eq!(receiver.state, ResourceState::Complete);
+        assert_eq!(receiver.data, plaintext);
     }
 }
