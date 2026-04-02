@@ -106,6 +106,20 @@ pub enum ProofStrategy {
     ProveApp,
 }
 
+/// Resource acceptance strategy for inbound resource advertisements.
+///
+/// Mirrors Python's `Link.ACCEPT_NONE / ACCEPT_ALL / ACCEPT_APP`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResourceStrategy {
+    /// Reject all inbound resources (send RESOURCE_RCL).
+    AcceptNone,
+    /// Automatically accept all inbound resources.
+    #[default]
+    AcceptAll,
+    /// Defer to application — emit ResourceOffered, app calls accept/reject.
+    AcceptApp,
+}
+
 /// Event emitted by a node's run loop.
 ///
 /// Used by both `rete-tokio` and `rete-embassy` runtime harnesses.
@@ -221,6 +235,13 @@ pub enum NodeEvent {
     },
     /// Resource transfer failed.
     ResourceFailed {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// A resource we sent was rejected by the receiver.
+    ResourceRejected {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
         /// Resource hash (truncated to 16 bytes).

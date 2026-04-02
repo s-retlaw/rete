@@ -13,6 +13,7 @@ pub(crate) mod ratchet;
 
 extern crate alloc;
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
@@ -22,7 +23,7 @@ use rete_transport::{SendError, Transport, RECEIPT_TIMEOUT};
 use alloc::boxed::Box;
 
 use crate::destination::{Destination, DestinationType, Direction};
-use crate::{NodeEvent, ProofStrategy};
+use crate::{NodeEvent, ProofStrategy, ResourceStrategy};
 
 pub use ratchet::{InMemoryRatchetStore, RatchetStore};
 
@@ -244,6 +245,9 @@ pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usi
     /// When `Some`, outbound encrypts use peer ratchet keys and inbound
     /// decrypts try local ratchet keys first.
     pub(super) ratchet_store: Option<Box<dyn RatchetStore>>,
+    /// Resource acceptance strategy for inbound resource advertisements.
+    /// Defaults to `AcceptAll` for backward compatibility.
+    pub(super) resource_strategy: ResourceStrategy,
 }
 
 /// Buffer entry for a partially-received split resource.
@@ -316,12 +320,18 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             prove_app_fn: None,
             split_recv_buf: Vec::new(),
             ratchet_store: None,
+            resource_strategy: ResourceStrategy::AcceptAll,
         })
     }
 
     /// Set the ProveApp callback for per-packet proof decisions.
     pub fn set_prove_app_fn(&mut self, f: Option<ProveAppFn>) {
         self.prove_app_fn = f;
+    }
+
+    /// Set the resource acceptance strategy for inbound resource advertisements.
+    pub fn set_resource_strategy(&mut self, strategy: ResourceStrategy) {
+        self.resource_strategy = strategy;
     }
 
     /// Enable transport mode: forward HEADER_2 packets for other nodes.
@@ -651,6 +661,38 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .start_resource(link_id, &send_data, data, is_compressed, rng)
             .ok_or(SendError::ResourceLimit)?;
         Ok(OutboundPacket::broadcast(pkt))
+    }
+
+    /// Accept a deferred resource offer (for AcceptApp strategy).
+    ///
+    /// Returns outbound packets to send (RESOURCE_REQ), or empty vec if resource not found.
+    pub fn accept_resource<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        resource_hash: &[u8; TRUNCATED_HASH_LEN],
+        rng: &mut R,
+    ) -> Vec<OutboundPacket> {
+        match self.transport.accept_resource(link_id, resource_hash, rng) {
+            Some(pkt) => vec![OutboundPacket::broadcast(pkt)],
+            None => Vec::new(),
+        }
+    }
+
+    /// Reject a deferred resource offer (for AcceptApp strategy).
+    ///
+    /// Sends RESOURCE_RCL to the sender. Returns outbound packets.
+    pub fn reject_resource<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        resource_hash: &[u8; TRUNCATED_HASH_LEN],
+        rng: &mut R,
+    ) -> Vec<OutboundPacket> {
+        let packets = match self.transport.reject_resource(link_id, resource_hash, rng) {
+            Some(pkt) => vec![OutboundPacket::broadcast(pkt)],
+            None => Vec::new(),
+        };
+        self.transport.cleanup_resources();
+        packets
     }
 }
 
@@ -2596,5 +2638,162 @@ mod tests {
         assert!(policy.should_compress(100));
         assert!(policy.should_compress(4096)); // at limit
         assert!(!policy.should_compress(4097)); // over limit
+    }
+
+    // -----------------------------------------------------------------------
+    // ResourceStrategy tests (TDD — Phase 2)
+    // -----------------------------------------------------------------------
+
+    /// Helper: initiator sends a resource advertisement, returns the raw adv packet.
+    fn send_resource_adv(
+        init: &mut TestNodeCore,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Vec<u8> {
+        let mut rng = rand::thread_rng();
+        let adv = init
+            .start_resource(link_id, b"test-resource-data", &mut rng)
+            .expect("start_resource should succeed");
+        adv.data
+    }
+
+    #[test]
+    fn resource_strategy_accept_all_auto_accepts() {
+        let mut rng = rand::thread_rng();
+        let (mut init, mut resp, link_id) = two_core_handshake();
+
+        // Default strategy is AcceptAll
+        assert_eq!(resp.resource_strategy, ResourceStrategy::AcceptAll);
+
+        let adv_data = send_resource_adv(&mut init, &link_id);
+        let outcome = resp.handle_ingest(&adv_data, 200, 0, &mut rng);
+
+        // Should emit ResourceOffered event
+        assert!(
+            matches!(outcome.event, Some(NodeEvent::ResourceOffered { .. })),
+            "should emit ResourceOffered, got {:?}",
+            outcome.event
+        );
+        // Should have auto-accepted (sent RESOURCE_REQ packets)
+        assert!(
+            !outcome.packets.is_empty(),
+            "AcceptAll should auto-accept (produce RESOURCE_REQ packets)"
+        );
+    }
+
+    #[test]
+    fn resource_strategy_accept_none_rejects() {
+        let mut rng = rand::thread_rng();
+        let (mut init, mut resp, link_id) = two_core_handshake();
+
+        resp.set_resource_strategy(ResourceStrategy::AcceptNone);
+        let adv_data = send_resource_adv(&mut init, &link_id);
+        let outcome = resp.handle_ingest(&adv_data, 200, 0, &mut rng);
+
+        // Should still emit ResourceOffered so app knows about the offer
+        assert!(
+            matches!(outcome.event, Some(NodeEvent::ResourceOffered { .. })),
+            "AcceptNone should still emit ResourceOffered, got {:?}",
+            outcome.event
+        );
+        // Should have sent RESOURCE_RCL (rejection) packet
+        assert!(
+            !outcome.packets.is_empty(),
+            "AcceptNone should send RESOURCE_RCL packet"
+        );
+        // Verify the packet is an RCL, not a REQ
+        let pkt = Packet::parse(&outcome.packets[0].data).unwrap();
+        assert_eq!(
+            pkt.context,
+            rete_core::CONTEXT_RESOURCE_RCL,
+            "packet should be RESOURCE_RCL, got context {}",
+            pkt.context
+        );
+    }
+
+    #[test]
+    fn resource_strategy_accept_app_defers() {
+        let mut rng = rand::thread_rng();
+        let (mut init, mut resp, link_id) = two_core_handshake();
+
+        resp.set_resource_strategy(ResourceStrategy::AcceptApp);
+        let adv_data = send_resource_adv(&mut init, &link_id);
+        let outcome = resp.handle_ingest(&adv_data, 200, 0, &mut rng);
+
+        // Should emit ResourceOffered
+        let (_, resource_hash) = match outcome.event {
+            Some(NodeEvent::ResourceOffered {
+                link_id,
+                resource_hash,
+                ..
+            }) => (link_id, resource_hash),
+            other => panic!("expected ResourceOffered, got {:?}", other),
+        };
+        // Should NOT have auto-accepted or rejected — no packets
+        assert!(
+            outcome.packets.is_empty(),
+            "AcceptApp should not produce packets on ingest"
+        );
+
+        // Now the app explicitly accepts
+        let packets = resp.accept_resource(&link_id, &resource_hash, &mut rng);
+        assert!(
+            !packets.is_empty(),
+            "explicit accept_resource should produce RESOURCE_REQ packets"
+        );
+    }
+
+    #[test]
+    fn resource_strategy_accept_app_reject() {
+        let mut rng = rand::thread_rng();
+        let (mut init, mut resp, link_id) = two_core_handshake();
+
+        resp.set_resource_strategy(ResourceStrategy::AcceptApp);
+        let adv_data = send_resource_adv(&mut init, &link_id);
+        let outcome = resp.handle_ingest(&adv_data, 200, 0, &mut rng);
+
+        let resource_hash = match outcome.event {
+            Some(NodeEvent::ResourceOffered { resource_hash, .. }) => resource_hash,
+            other => panic!("expected ResourceOffered, got {:?}", other),
+        };
+
+        // App explicitly rejects
+        let packets = resp.reject_resource(&link_id, &resource_hash, &mut rng);
+        assert!(
+            !packets.is_empty(),
+            "explicit reject_resource should produce RESOURCE_RCL packet"
+        );
+        // Verify it's an RCL
+        let pkt = Packet::parse(&packets[0].data).unwrap();
+        assert_eq!(
+            pkt.context,
+            rete_core::CONTEXT_RESOURCE_RCL,
+            "packet should be RESOURCE_RCL"
+        );
+    }
+
+    #[test]
+    fn resource_rcl_sets_rejected_state_on_sender() {
+        let mut rng = rand::thread_rng();
+        let (mut init, mut resp, link_id) = two_core_handshake();
+
+        // Initiator sends resource, responder rejects
+        resp.set_resource_strategy(ResourceStrategy::AcceptNone);
+        let adv_data = send_resource_adv(&mut init, &link_id);
+        let resp_outcome = resp.handle_ingest(&adv_data, 200, 0, &mut rng);
+
+        // Get the RCL packet from responder
+        assert!(!resp_outcome.packets.is_empty(), "should have RCL packet");
+        let rcl_data = &resp_outcome.packets[0].data;
+
+        // Feed RCL back to initiator
+        let init_outcome = init.handle_ingest(rcl_data, 201, 0, &mut rng);
+        assert!(
+            matches!(
+                init_outcome.event,
+                Some(NodeEvent::ResourceRejected { .. })
+            ),
+            "initiator should get ResourceRejected event, got {:?}",
+            init_outcome.event
+        );
     }
 }

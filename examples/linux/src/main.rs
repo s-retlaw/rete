@@ -440,6 +440,22 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             let (link_id, data) = parse_link_and_text(line, "resource")?;
             Some(NodeCommand::SendResource { link_id, data })
         }
+        "accept" if parts.len() >= 3 => {
+            let link_id = parse_hex_16(parts[1])?;
+            let resource_hash = parse_hex_16(parts[2])?;
+            Some(NodeCommand::AcceptResource {
+                link_id,
+                resource_hash,
+            })
+        }
+        "reject" if parts.len() >= 3 => {
+            let link_id = parse_hex_16(parts[1])?;
+            let resource_hash = parse_hex_16(parts[2])?;
+            Some(NodeCommand::RejectResource {
+                link_id,
+                resource_hash,
+            })
+        }
         "close" if parts.len() >= 2 => Some(NodeCommand::CloseLink {
             link_id: parse_hex_16(parts[1])?,
         }),
@@ -613,6 +629,21 @@ async fn main() {
     let transport_mode =
         args.iter().any(|a| a == "--transport") || cfg.node.transport.unwrap_or(false);
 
+    // --resource-strategy none|all|app (default: all)
+    let resource_strategy = args
+        .windows(2)
+        .find(|w| w[0] == "--resource-strategy")
+        .map(|w| match w[1].as_str() {
+            "none" => rete_tokio::ResourceStrategy::AcceptNone,
+            "app" => rete_tokio::ResourceStrategy::AcceptApp,
+            "all" => rete_tokio::ResourceStrategy::AcceptAll,
+            other => {
+                eprintln!("[rete] unknown resource strategy '{other}', using AcceptAll");
+                rete_tokio::ResourceStrategy::AcceptAll
+            }
+        })
+        .unwrap_or(rete_tokio::ResourceStrategy::AcceptAll);
+
     // --local-server <instance_name>
     let local_server_name = args
         .windows(2)
@@ -730,6 +761,11 @@ async fn main() {
     if transport_mode {
         node.core.enable_transport();
         eprintln!("[rete] transport mode enabled");
+    }
+
+    node.set_resource_strategy(resource_strategy);
+    if resource_strategy != rete_tokio::ResourceStrategy::AcceptAll {
+        eprintln!("[rete] resource strategy: {:?}", resource_strategy);
     }
 
     // Auto-reply-ping: send ping on announce receipt
@@ -1910,6 +1946,21 @@ fn on_node_event(event: NodeEvent) {
                 "[rete] link {} identified: peer {}",
                 hex::encode(&link_id[..4]),
                 hex::encode(&identity_hash[..4])
+            );
+        }
+        NodeEvent::ResourceRejected {
+            link_id,
+            resource_hash,
+        } => {
+            eprintln!(
+                "[rete] RESOURCE rejected on link={} hash={}",
+                hex::encode(&link_id[..4]),
+                hex::encode(&resource_hash[..4])
+            );
+            println!(
+                "RESOURCE_REJECTED:{}:{}",
+                hex::encode(link_id),
+                hex::encode(resource_hash)
             );
         }
     }

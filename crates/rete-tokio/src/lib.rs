@@ -24,6 +24,7 @@ pub(crate) mod test_utils {
 use rete_core::{Identity, TRUNCATED_HASH_LEN};
 pub use rete_stack::NodeEvent;
 pub use rete_stack::ProofStrategy;
+pub use rete_stack::ResourceStrategy;
 use rete_stack::{dispatch_single, HostedNodeCore, OutboundPacket, PacketRouting, ReteInterface};
 use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
@@ -84,6 +85,16 @@ pub enum NodeCommand {
     SendResource {
         link_id: [u8; TRUNCATED_HASH_LEN],
         data: Vec<u8>,
+    },
+    /// Accept an offered resource (for AcceptApp strategy).
+    AcceptResource {
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// Reject an offered resource (for AcceptApp strategy).
+    RejectResource {
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
     /// Close an established link.
     CloseLink { link_id: [u8; TRUNCATED_HASH_LEN] },
@@ -180,6 +191,11 @@ impl TokioNode {
         self.core.build_announce(app_data, &mut rng, now)
     }
 
+    /// Set the resource acceptance strategy for inbound resource advertisements.
+    pub fn set_resource_strategy(&mut self, strategy: ResourceStrategy) {
+        self.core.set_resource_strategy(strategy);
+    }
+
     /// Dispatch a single command, returning outbound packets, whether to
     /// continue, and an optional [`NodeEvent`] that the caller should emit
     /// through the `on_event` callback.
@@ -273,6 +289,30 @@ impl TokioNode {
                         (vec![], true, None)
                     }
                 }
+            }
+            NodeCommand::AcceptResource {
+                link_id,
+                resource_hash,
+            } => {
+                let packets = self.core.accept_resource(&link_id, &resource_hash, rng);
+                eprintln!(
+                    "[rete] cmd: accepted resource {} on link {}",
+                    hex::encode(resource_hash),
+                    hex::encode(link_id)
+                );
+                (packets, true, None)
+            }
+            NodeCommand::RejectResource {
+                link_id,
+                resource_hash,
+            } => {
+                let packets = self.core.reject_resource(&link_id, &resource_hash, rng);
+                eprintln!(
+                    "[rete] cmd: rejected resource {} on link {}",
+                    hex::encode(resource_hash),
+                    hex::encode(link_id)
+                );
+                (packets, true, None)
             }
             NodeCommand::CloseLink { link_id } => {
                 let (pkt, event) = self.core.close_link(&link_id, rng);

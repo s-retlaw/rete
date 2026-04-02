@@ -10,7 +10,7 @@ use rete_core::{
 use rete_transport::{IngestResult, PATH_REQUEST_DEST};
 
 use crate::destination::DestinationType;
-use crate::{NodeEvent, ProofStrategy};
+use crate::{NodeEvent, ProofStrategy, ResourceStrategy};
 
 use super::{IngestOutcome, NodeCore, OutboundPacket, PacketRouting, SplitRecvEntry};
 
@@ -374,19 +374,41 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                 link_id,
                 resource_hash,
                 total_size,
+                is_request_or_response,
             } => {
-                // Auto-accept: send first request
                 let mut packets = Vec::new();
-                if let Some(pkt) = self
-                    .transport
-                    .accept_resource(&link_id, &resource_hash, rng)
-                {
-                    packets.push(OutboundPacket::broadcast(pkt));
+
+                // Request/Response resources bypass strategy (Python behavior)
+                let effective = if is_request_or_response {
+                    ResourceStrategy::AcceptAll
+                } else {
+                    self.resource_strategy
+                };
+
+                match effective {
+                    ResourceStrategy::AcceptAll => {
+                        if let Some(pkt) =
+                            self.transport.accept_resource(&link_id, &resource_hash, rng)
+                        {
+                            packets.push(OutboundPacket::broadcast(pkt));
+                        }
+                        for pkt in self.transport.drain_resource_outbound() {
+                            packets.push(OutboundPacket::broadcast(pkt));
+                        }
+                    }
+                    ResourceStrategy::AcceptNone => {
+                        if let Some(pkt) =
+                            self.transport.reject_resource(&link_id, &resource_hash, rng)
+                        {
+                            packets.push(OutboundPacket::broadcast(pkt));
+                        }
+                        self.transport.cleanup_resources();
+                    }
+                    ResourceStrategy::AcceptApp => {
+                        // No auto-action — application calls accept/reject
+                    }
                 }
-                // Drain any resource outbound packets queued during ingest
-                for pkt in self.transport.drain_resource_outbound() {
-                    packets.push(OutboundPacket::broadcast(pkt));
-                }
+
                 IngestOutcome {
                     event: Some(NodeEvent::ResourceOffered {
                         link_id,
@@ -653,6 +675,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
                         resource_hash,
                     }),
                     packets,
+                }
+            }
+            IngestResult::ResourceRejected {
+                link_id,
+                resource_hash,
+            } => {
+                self.transport.cleanup_resources();
+                IngestOutcome {
+                    event: Some(NodeEvent::ResourceRejected {
+                        link_id,
+                        resource_hash,
+                    }),
+                    packets: Vec::new(),
                 }
             }
             IngestResult::PathRequestForward { payload } => {

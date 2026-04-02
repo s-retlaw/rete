@@ -108,6 +108,8 @@ pub enum ResourceState {
     Failed,
     /// Assembled data did not match the resource hash.
     Corrupt,
+    /// Transfer was rejected by the receiver.
+    Rejected,
 }
 
 /// Result of `Resource::handle_request()`.

@@ -331,6 +331,39 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         self.build_resource_req_packet(link_id, &req, rng)
     }
 
+    /// Reject a resource offer and send RESOURCE_RCL to the sender.
+    ///
+    /// Marks the resource as `Rejected` and returns an encrypted RESOURCE_RCL packet
+    /// containing the full 32-byte resource hash (Python expects this).
+    pub fn reject_resource<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        resource_hash: &[u8; TRUNCATED_HASH_LEN],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let full_hash = {
+            let res = self.resources.iter_mut().find(|r| {
+                !r.is_sender
+                    && r.link_id == *link_id
+                    && r.resource_hash[..TRUNCATED_HASH_LEN] == *resource_hash
+            })?;
+            res.state = crate::resource::ResourceState::Rejected;
+            res.resource_hash
+        };
+        self.build_resource_rcl_packet(link_id, &full_hash, rng)
+    }
+
+    /// Build an encrypted RESOURCE_RCL packet containing the full 32-byte resource hash.
+    fn build_resource_rcl_packet<R: RngCore + CryptoRng>(
+        &self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        resource_hash: &[u8; 32],
+        rng: &mut R,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let link = self.links.get(link_id)?;
+        Self::build_link_packet(link, link_id, resource_hash, CONTEXT_RESOURCE_RCL, rng).ok()
+    }
+
     /// Build a follow-up RESOURCE_REQ for a receiver resource that still has
     /// unreceived parts.
     ///
@@ -430,12 +463,25 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                         }
                         let mut rh = [0u8; TRUNCATED_HASH_LEN];
                         rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
+                        // Deduplicate: if a resource with same link+hash already exists,
+                        // ignore the duplicate advertisement.
+                        let already_exists = self.resources.iter().any(|r| {
+                            !r.is_sender
+                                && r.link_id == *link_id
+                                && r.resource_hash[..TRUNCATED_HASH_LEN] == rh
+                        });
+                        if already_exists {
+                            return IngestResult::Duplicate;
+                        }
                         let total_size = res.total_size;
+                        let is_request_or_response =
+                            res.flags.is_request || res.flags.is_response;
                         self.resources.push(res);
                         IngestResult::ResourceOffered {
                             link_id: *link_id,
                             resource_hash: rh,
                             total_size,
+                            is_request_or_response,
                         }
                     }
                     Err(_) => IngestResult::Invalid,
@@ -560,13 +606,48 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                     IngestResult::Invalid
                 }
             }
-            CONTEXT_RESOURCE_ICL | CONTEXT_RESOURCE_RCL => {
-                // Cancel from either side
-                if let Some(res) = self.resources.iter_mut().find(|r| r.link_id == *link_id) {
+            CONTEXT_RESOURCE_ICL => {
+                // Cancel from initiator (sender-side cancel).
+                // Payload contains resource hash — match on it to handle
+                // concurrent resources on the same link correctly.
+                let hash_prefix = if decrypted.len() >= TRUNCATED_HASH_LEN {
+                    &decrypted[..TRUNCATED_HASH_LEN]
+                } else {
+                    &[]
+                };
+                if let Some(res) = self.resources.iter_mut().find(|r| {
+                    r.link_id == *link_id
+                        && (hash_prefix.is_empty()
+                            || r.resource_hash[..TRUNCATED_HASH_LEN] == *hash_prefix)
+                }) {
                     res.handle_cancel();
                     let mut rh = [0u8; TRUNCATED_HASH_LEN];
                     rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
                     IngestResult::ResourceFailed {
+                        link_id: *link_id,
+                        resource_hash: rh,
+                    }
+                } else {
+                    IngestResult::Duplicate
+                }
+            }
+            CONTEXT_RESOURCE_RCL => {
+                // Rejection from receiver — distinct from cancel.
+                // Payload contains resource hash for matching.
+                let hash_prefix = if decrypted.len() >= TRUNCATED_HASH_LEN {
+                    &decrypted[..TRUNCATED_HASH_LEN]
+                } else {
+                    &[]
+                };
+                if let Some(res) = self.resources.iter_mut().find(|r| {
+                    r.link_id == *link_id
+                        && (hash_prefix.is_empty()
+                            || r.resource_hash[..TRUNCATED_HASH_LEN] == *hash_prefix)
+                }) {
+                    res.state = crate::resource::ResourceState::Rejected;
+                    let mut rh = [0u8; TRUNCATED_HASH_LEN];
+                    rh.copy_from_slice(&res.resource_hash[..TRUNCATED_HASH_LEN]);
+                    IngestResult::ResourceRejected {
                         link_id: *link_id,
                         resource_hash: rh,
                     }
@@ -655,7 +736,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         })
     }
 
-    /// Remove completed or failed resources.
+    /// Remove completed, failed, corrupt, or rejected resources.
     pub fn cleanup_resources(&mut self) {
         self.resources.retain(|r| {
             !matches!(
@@ -663,6 +744,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 crate::resource::ResourceState::Complete
                     | crate::resource::ResourceState::Failed
                     | crate::resource::ResourceState::Corrupt
+                    | crate::resource::ResourceState::Rejected
             )
         });
     }

@@ -277,6 +277,8 @@ pub enum IngestResult<'a> {
         resource_hash: [u8; TRUNCATED_HASH_LEN],
         /// Total size of the resource data.
         total_size: usize,
+        /// True if this resource is a request or response payload (auto-accept regardless of strategy).
+        is_request_or_response: bool,
     },
     /// Resource transfer progress.
     ResourceProgress {
@@ -300,6 +302,13 @@ pub enum IngestResult<'a> {
     },
     /// Resource transfer failed.
     ResourceFailed {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// Resource hash (truncated to 16 bytes).
+        resource_hash: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// A resource we sent was rejected by the receiver (RESOURCE_RCL received).
+    ResourceRejected {
         /// The link_id.
         link_id: [u8; TRUNCATED_HASH_LEN],
         /// Resource hash (truncated to 16 bytes).
