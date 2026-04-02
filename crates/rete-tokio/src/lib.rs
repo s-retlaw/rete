@@ -479,7 +479,7 @@ impl TokioNode {
                             let now = current_time_secs();
                             let outcome = self.core.handle_ingest(data, now, 0, &mut rng);
                             dispatch_single(iface, &outcome.packets).await;
-                            if let Some(event) = outcome.event {
+                            for event in outcome.events {
                                 let extra = on_event(event, &mut self.core, &mut rng);
                                 dispatch_single(iface, &extra).await;
                             }
@@ -516,7 +516,7 @@ impl TokioNode {
                     let now = current_time_secs();
                     let outcome = self.core.handle_tick(now, &mut rng);
                     dispatch_single(iface, &outcome.packets).await;
-                    if let Some(event) = outcome.event {
+                    for event in outcome.events {
                         let extra = on_event(event, &mut self.core, &mut rng);
                         dispatch_single(iface, &extra).await;
                     }
@@ -616,7 +616,7 @@ impl TokioNode {
                     let now = current_time_secs();
                     let outcome = self.core.handle_ingest(&msg.data, now, msg.iface_idx, &mut rng);
                     dispatch(&slots, &outcome.packets, msg.iface_idx).await;
-                    if let Some(event) = outcome.event {
+                    for event in outcome.events {
                         let extra = on_event(event, &mut self.core, &mut rng);
                         dispatch(&slots, &extra, 0).await;
                     }
@@ -641,7 +641,7 @@ impl TokioNode {
                     let now = current_time_secs();
                     let outcome = self.core.handle_tick(now, &mut rng);
                     dispatch(&slots, &outcome.packets, 0).await;
-                    if let Some(event) = outcome.event {
+                    for event in outcome.events {
                         let extra = on_event(event, &mut self.core, &mut rng);
                         dispatch(&slots, &extra, 0).await;
                     }

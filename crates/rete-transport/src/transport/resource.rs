@@ -60,6 +60,36 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         self.start_single_resource(link_id, data, original_data, compressed, rng)
     }
 
+    /// Start a resource transfer with `is_request` / `is_response` flags set.
+    ///
+    /// Used for request/response payloads that exceed the link MDU and must
+    /// be promoted to resource transfers. The flags are encoded in the
+    /// advertisement so the receiver auto-accepts them.
+    ///
+    /// Note: does not handle split resources (payloads > MAX_EFFICIENT_SIZE).
+    /// Request/response payloads are expected to be well under that limit.
+    pub fn start_resource_flagged<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+        original_data: &[u8],
+        compressed: bool,
+        is_request: bool,
+        is_response: bool,
+        rng: &mut R,
+    ) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
+        self.prepare_and_advertise_segment_ex(
+            link_id,
+            data,
+            original_data,
+            compressed,
+            is_request,
+            is_response,
+            None,
+            rng,
+        )
+    }
+
     /// Start a single (non-split) resource transfer.
     fn start_single_resource<R: RngCore + CryptoRng>(
         &mut self,
@@ -200,6 +230,29 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         split: Option<SplitMeta>,
         rng: &mut R,
     ) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
+        self.prepare_and_advertise_segment_ex(
+            link_id,
+            send_data,
+            original_data,
+            compressed,
+            false,
+            false,
+            split,
+            rng,
+        )
+    }
+
+    fn prepare_and_advertise_segment_ex<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        send_data: &[u8],
+        original_data: &[u8],
+        compressed: bool,
+        is_request: bool,
+        is_response: bool,
+        split: Option<SplitMeta>,
+        rng: &mut R,
+    ) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
         if self.resources.len() >= MAX_CONCURRENT_RESOURCES {
             return None;
         }
@@ -213,6 +266,8 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
             Resource::new_outbound(&encrypted, *link_id, sdu, original_size, link_mdu, rng);
         resource.flags.encrypted = true;
         resource.flags.compressed = compressed;
+        resource.flags.is_request = is_request;
+        resource.flags.is_response = is_response;
 
         Self::override_resource_hash(&mut resource, original_data);
         resource.data = original_data.to_vec();
@@ -485,12 +540,14 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                         let total_size = res.total_size;
                         let is_request_or_response =
                             res.flags.is_request || res.flags.is_response;
+                        let is_response = res.flags.is_response;
                         self.resources.push(res);
                         IngestResult::ResourceOffered {
                             link_id: *link_id,
                             resource_hash: rh,
                             total_size,
                             is_request_or_response,
+                            is_response,
                         }
                     }
                     Err(_) => IngestResult::Invalid,

@@ -1963,6 +1963,32 @@ fn on_node_event(event: NodeEvent) {
                 hex::encode(resource_hash)
             );
         }
+        NodeEvent::RequestFailed {
+            link_id,
+            request_id,
+            reason,
+        } => {
+            eprintln!(
+                "[rete] REQUEST failed link={} req={} reason={:?}",
+                hex::encode(&link_id[..4]),
+                hex::encode(&request_id[..4]),
+                reason
+            );
+        }
+        NodeEvent::RequestProgress {
+            link_id,
+            request_id,
+            current,
+            total,
+        } => {
+            eprintln!(
+                "[rete] REQUEST progress link={} req={} {}/{}",
+                hex::encode(&link_id[..4]),
+                hex::encode(&request_id[..4]),
+                current,
+                total
+            );
+        }
     }
     // Flush stdout so piped readers (test harnesses) see output immediately.
     use std::io::Write;

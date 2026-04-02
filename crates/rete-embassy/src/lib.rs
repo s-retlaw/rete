@@ -321,7 +321,7 @@ impl EmbassyNode {
                         let now = now_inst.as_secs();
                         let outcome = self.core.handle_ingest(data, now, 0, rng);
                         dispatch_single(iface, &outcome.packets).await;
-                        if let Some(event) = outcome.event {
+                        for event in outcome.events {
                             let extra = on_event(event, &mut self.core, rng);
                             dispatch_single(iface, &extra).await;
                         }
@@ -345,7 +345,7 @@ impl EmbassyNode {
                     let now = Instant::now().as_secs();
                     let outcome = self.core.handle_tick(now, rng);
                     dispatch_single(iface, &outcome.packets).await;
-                    if let Some(event) = outcome.event {
+                    for event in outcome.events {
                         let extra = on_event(event, &mut self.core, rng);
                         dispatch_single(iface, &extra).await;
                     }

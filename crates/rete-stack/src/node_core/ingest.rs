@@ -10,7 +10,7 @@ use rete_core::{
 use rete_transport::{IngestResult, PATH_REQUEST_DEST};
 
 use crate::destination::DestinationType;
-use crate::{NodeEvent, ProofStrategy, ResourceStrategy};
+use crate::{NodeEvent, ProofStrategy, RequestFailReason, ResourceStrategy};
 
 use super::{IngestOutcome, NodeCore, OutboundPacket, PacketRouting, SplitRecvEntry};
 
@@ -18,7 +18,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Process an inbound raw packet and return the outcome.
     ///
     /// The runtime loop dispatches packets based on `IngestOutcome.packets`
-    /// routing and emits `IngestOutcome.event` to the application callback.
+    /// routing and emits `IngestOutcome.events` to the application callback.
     pub fn handle_ingest<R: RngCore + CryptoRng>(
         &mut self,
         raw: &[u8],
@@ -98,12 +98,12 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 packets.extend(flushed);
 
                 IngestOutcome {
-                    event: Some(NodeEvent::AnnounceReceived {
+                    events: vec![NodeEvent::AnnounceReceived {
                         dest_hash,
                         identity_hash,
                         hops,
                         app_data: app_data.map(|d| d.to_vec()),
-                    }),
+                    }],
                     packets,
                 }
             }
@@ -159,22 +159,22 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 }
 
                 IngestOutcome {
-                    event: Some(NodeEvent::DataReceived {
+                    events: vec![NodeEvent::DataReceived {
                         dest_hash,
                         payload: decrypted,
-                    }),
+                    }],
                     packets,
                 }
             }
             IngestResult::Forward { raw, .. } => IngestOutcome {
-                event: None,
+                events: vec![],
                 packets: vec![OutboundPacket {
                     data: raw.to_vec(),
                     routing: PacketRouting::AllExceptSource,
                 }],
             },
             IngestResult::LinkRequestReceived { link_id, proof_raw } => IngestOutcome {
-                event: Some(NodeEvent::LinkEstablished { link_id }),
+                events: vec![NodeEvent::LinkEstablished { link_id }],
                 packets: vec![OutboundPacket {
                     data: proof_raw,
                     routing: PacketRouting::SourceInterface,
@@ -196,7 +196,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                     }
                 }
                 IngestOutcome {
-                    event: Some(NodeEvent::LinkEstablished { link_id }),
+                    events: vec![NodeEvent::LinkEstablished { link_id }],
                     packets,
                 }
             }
@@ -224,22 +224,22 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                                 link.set_identified(pub_key);
                             }
                             return IngestOutcome {
-                                event: Some(NodeEvent::LinkIdentified {
+                                events: vec![NodeEvent::LinkIdentified {
                                     link_id,
                                     identity_hash: id_hash,
                                     public_key: pub_key,
-                                }),
+                                }],
                                 packets,
                             };
                         }
                     }
                 }
                 IngestOutcome {
-                    event: Some(NodeEvent::LinkData {
+                    events: vec![NodeEvent::LinkData {
                         link_id,
                         data,
                         context,
-                    }),
+                    }],
                     packets,
                 }
             }
@@ -248,13 +248,13 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 messages,
                 packet_hash,
             } => IngestOutcome {
-                event: Some(NodeEvent::ChannelMessages {
+                events: vec![NodeEvent::ChannelMessages {
                     link_id,
                     messages: messages
                         .into_iter()
                         .map(|e| (e.message_type, e.payload))
                         .collect(),
-                }),
+                }],
                 // Auto-prove received channel packets (link-destination proof for relay routing)
                 packets: self
                     .link_proof_outbound(&packet_hash, &link_id)
@@ -268,60 +268,16 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 data,
                 requested_at,
             } => {
-                // Extract link metadata (dest_hash + identified identity) before
-                // borrowing self for handler lookup.
-                let mut response_packets = Vec::new();
-                let link_meta = self.transport.get_link(&link_id).map(|link| {
-                    (
-                        link.destination_hash,
-                        link.identified_identity_hash().copied(),
-                    )
-                });
-                if let Some((dest_hash, remote_identity)) = link_meta {
-                    if let Some(handler) =
-                        self.find_request_handler(&dest_hash, &path_hash)
-                    {
-                        if handler.policy.allows(remote_identity.as_ref()) {
-                            let ctx = super::RequestContext {
-                                destination_hash: dest_hash,
-                                path: &handler.path,
-                                path_hash,
-                                link_id,
-                                request_id,
-                                requested_at,
-                                remote_identity,
-                            };
-                            if let Some(response_data) = (handler.handler)(&ctx, &data) {
-                                let final_data = if handler
-                                    .compression_policy
-                                    .should_compress(response_data.len())
-                                {
-                                    self.compress_fn
-                                        .and_then(|f| f(&response_data))
-                                        .filter(|c| c.len() < response_data.len())
-                                        .unwrap_or(response_data)
-                                } else {
-                                    response_data
-                                };
-                                if let Ok(pkt) = self.send_response(
-                                    &link_id,
-                                    &request_id,
-                                    &final_data,
-                                    rng,
-                                ) {
-                                    response_packets.push(pkt);
-                                }
-                            }
-                        }
-                    }
-                }
+                let response_packets = self.dispatch_request_handler(
+                    &link_id, &request_id, &path_hash, &data, requested_at, rng,
+                );
                 IngestOutcome {
-                    event: Some(NodeEvent::RequestReceived {
+                    events: vec![NodeEvent::RequestReceived {
                         link_id,
                         request_id,
                         path_hash,
                         data,
-                    }),
+                    }],
                     packets: response_packets,
                 }
             }
@@ -329,27 +285,49 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 link_id,
                 request_id,
                 data,
-            } => IngestOutcome {
-                event: Some(NodeEvent::ResponseReceived {
-                    link_id,
-                    request_id,
-                    data,
-                }),
-                packets: Vec::new(),
-            },
-            IngestResult::LinkClosed { link_id } => IngestOutcome {
-                event: Some(NodeEvent::LinkClosed { link_id }),
-                packets: Vec::new(),
-            },
+            } => {
+                // Clear matching pending request
+                self.pending_requests
+                    .retain(|r| r.request_id != request_id);
+                IngestOutcome {
+                    events: vec![NodeEvent::ResponseReceived {
+                        link_id,
+                        request_id,
+                        data,
+                    }],
+                    packets: Vec::new(),
+                }
+            }
+            IngestResult::LinkClosed { link_id } => {
+                // Fail any pending requests on this link (single pass)
+                let mut events: Vec<NodeEvent> = Vec::new();
+                self.pending_requests.retain(|r| {
+                    if r.link_id == link_id {
+                        events.push(NodeEvent::RequestFailed {
+                            link_id,
+                            request_id: r.request_id,
+                            reason: RequestFailReason::LinkClosed,
+                        });
+                        false
+                    } else {
+                        true
+                    }
+                });
+                events.push(NodeEvent::LinkClosed { link_id });
+                IngestOutcome {
+                    events,
+                    packets: Vec::new(),
+                }
+            }
             IngestResult::ProofReceived { packet_hash } => IngestOutcome {
-                event: Some(NodeEvent::ProofReceived { packet_hash }),
+                events: vec![NodeEvent::ProofReceived { packet_hash }],
                 packets: Vec::new(),
             },
             IngestResult::Buffered {
                 packet_hash,
                 link_id,
             } => IngestOutcome {
-                event: None,
+                events: vec![],
                 // Auto-prove buffered channel packets too (link-destination proof for relay routing)
                 packets: self
                     .link_proof_outbound(&packet_hash, &link_id)
@@ -361,8 +339,21 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 resource_hash,
                 total_size,
                 is_request_or_response,
+                is_response,
             } => {
                 let mut packets = Vec::new();
+
+                // Associate response-resource with pending request
+                if is_response {
+                    if let Some(req) = self
+                        .pending_requests
+                        .iter_mut()
+                        .find(|r| r.link_id == link_id && r.response_resource_hash.is_none()
+                            && matches!(r.status, super::request_receipt::RequestStatus::Sent))
+                    {
+                        req.response_resource_hash = Some(resource_hash);
+                    }
+                }
 
                 // Request/Response resources bypass strategy (Python behavior)
                 let effective = if is_request_or_response {
@@ -396,11 +387,11 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 }
 
                 IngestOutcome {
-                    event: Some(NodeEvent::ResourceOffered {
+                    events: vec![NodeEvent::ResourceOffered {
                         link_id,
                         resource_hash,
                         total_size,
-                    }),
+                    }],
                     packets,
                 }
             }
@@ -414,19 +405,21 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 // If all parts received, concat → decrypt → decompress → verify → proof
                 if current == total && total > 0 {
                     // Step 1: Concatenate encrypted parts, get flags and split metadata
-                    let (concat_result, is_compressed, split_index, split_total, original_hash) = {
+                    let (concat_result, is_compressed, is_response, is_request, split_index, split_total, original_hash) = {
                         if let Some(res) = self.transport.get_resource_mut(&link_id, &resource_hash)
                         {
                             let compressed = res.flags.compressed;
+                            let resp = res.flags.is_response;
+                            let req = res.flags.is_request;
                             let si = res.split_index;
                             let st = res.split_total;
                             let oh = res.original_hash;
                             match res.concat_parts() {
-                                Ok(data) => (Some(data), compressed, si, st, oh),
-                                Err(_) => (None, compressed, si, st, oh),
+                                Ok(data) => (Some(data), compressed, resp, req, si, st, oh),
+                                Err(_) => (None, compressed, resp, req, si, st, oh),
                             }
                         } else {
-                            (None, false, 1, 1, [0u8; 32])
+                            (None, false, false, false, 1, 1, [0u8; 32])
                         }
                     };
 
@@ -445,10 +438,10 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                                 }
                             }
                             return IngestOutcome {
-                                event: Some(NodeEvent::ResourceFailed {
+                                events: vec![NodeEvent::ResourceFailed {
                                     link_id,
                                     resource_hash,
-                                }),
+                                }],
                                 packets: core::mem::take(&mut $packets),
                             };
                         }};
@@ -553,12 +546,12 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                             });
                         }
                         return IngestOutcome {
-                            event: Some(NodeEvent::ResourceProgress {
+                            events: vec![NodeEvent::ResourceProgress {
                                 link_id,
                                 resource_hash: oh_trunc,
                                 current: split_index,
                                 total: split_total,
-                            }),
+                            }],
                             packets,
                         };
                     } else if split_total > 1 && split_index == split_total {
@@ -572,22 +565,56 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                         }
                         full_data.extend_from_slice(&plaintext);
                         return IngestOutcome {
-                            event: Some(NodeEvent::ResourceComplete {
+                            events: vec![NodeEvent::ResourceComplete {
                                 link_id,
                                 resource_hash: oh_trunc,
                                 data: full_data,
-                            }),
+                            }],
                             packets,
                         };
                     }
 
                     // Non-split resource: deliver directly
+                    // If this is a response-as-resource, parse and emit ResponseReceived
+                    if is_response {
+                        if let Ok((req_id, resp_data)) = rete_transport::parse_response(&plaintext) {
+                            self.pending_requests.retain(|r| r.request_id != req_id);
+                            return IngestOutcome {
+                                events: vec![NodeEvent::ResponseReceived {
+                                    link_id,
+                                    request_id: req_id,
+                                    data: resp_data,
+                                }],
+                                packets,
+                            };
+                        }
+                    }
+                    // If this is a request-as-resource, parse and dispatch
+                    if is_request {
+                        if let Ok((requested_at, path_hash, req_data)) =
+                            rete_transport::parse_request(&plaintext)
+                        {
+                            let request_id = rete_transport::request_id(&plaintext);
+                            let mut handler_packets =
+                                self.dispatch_request_handler(&link_id, &request_id, &path_hash, &req_data, requested_at, rng);
+                            packets.append(&mut handler_packets);
+                            return IngestOutcome {
+                                events: vec![NodeEvent::RequestReceived {
+                                    link_id,
+                                    request_id,
+                                    path_hash,
+                                    data: req_data,
+                                }],
+                                packets,
+                            };
+                        }
+                    }
                     return IngestOutcome {
-                        event: Some(NodeEvent::ResourceComplete {
+                        events: vec![NodeEvent::ResourceComplete {
                             link_id,
                             resource_hash,
                             data: plaintext,
-                        }),
+                        }],
                         packets,
                     };
                 }
@@ -616,15 +643,25 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                         }
                     }
                 }
-                IngestOutcome {
-                    event: Some(NodeEvent::ResourceProgress {
+                let mut events = vec![NodeEvent::ResourceProgress {
+                    link_id,
+                    resource_hash,
+                    current,
+                    total,
+                }];
+                // Map response-resource progress to RequestProgress
+                if let Some(req) = self.pending_requests.iter_mut().find(|r| {
+                    r.link_id == link_id && r.response_resource_hash == Some(resource_hash)
+                }) {
+                    req.status = super::request_receipt::RequestStatus::Receiving;
+                    events.push(NodeEvent::RequestProgress {
                         link_id,
-                        resource_hash,
+                        request_id: req.request_id,
                         current,
                         total,
-                    }),
-                    packets,
+                    });
                 }
+                IngestOutcome { events, packets }
             }
             IngestResult::ResourceComplete {
                 link_id,
@@ -638,11 +675,11 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                     packets.push(OutboundPacket::broadcast(pkt));
                 }
                 IngestOutcome {
-                    event: Some(NodeEvent::ResourceComplete {
+                    events: vec![NodeEvent::ResourceComplete {
                         link_id,
                         resource_hash,
                         data,
-                    }),
+                    }],
                     packets,
                 }
             }
@@ -655,13 +692,27 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 for pkt in self.transport.drain_resource_outbound() {
                     packets.push(OutboundPacket::broadcast(pkt));
                 }
-                IngestOutcome {
-                    event: Some(NodeEvent::ResourceFailed {
-                        link_id,
-                        resource_hash,
-                    }),
-                    packets,
-                }
+                let mut events = vec![NodeEvent::ResourceFailed {
+                    link_id,
+                    resource_hash,
+                }];
+                // Map resource failure to RequestFailed (single pass for both response and request resources)
+                self.pending_requests.retain(|r| {
+                    if r.link_id == link_id
+                        && (r.response_resource_hash == Some(resource_hash)
+                            || r.request_resource_hash == Some(resource_hash))
+                    {
+                        events.push(NodeEvent::RequestFailed {
+                            link_id,
+                            request_id: r.request_id,
+                            reason: RequestFailReason::ResourceFailed,
+                        });
+                        false
+                    } else {
+                        true
+                    }
+                });
+                IngestOutcome { events, packets }
             }
             IngestResult::ResourceRejected {
                 link_id,
@@ -669,10 +720,10 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
             } => {
                 self.transport.cleanup_resources();
                 IngestOutcome {
-                    event: Some(NodeEvent::ResourceRejected {
+                    events: vec![NodeEvent::ResourceRejected {
                         link_id,
                         resource_hash,
-                    }),
+                    }],
                     packets: Vec::new(),
                 }
             }
@@ -689,7 +740,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                     .build();
                 match result {
                     Ok(n) => IngestOutcome {
-                        event: None,
+                        events: vec![],
                         packets: vec![OutboundPacket::broadcast(buf[..n].to_vec())],
                     },
                     Err(_) => IngestOutcome::empty(),
@@ -702,7 +753,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                     IngestOutcome::empty()
                 } else {
                     IngestOutcome {
-                        event: None,
+                        events: vec![],
                         packets: resource_pkts
                             .into_iter()
                             .map(OutboundPacket::broadcast)
@@ -711,6 +762,82 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 }
             }
         }
+    }
+
+    /// Dispatch a request through the handler system.
+    ///
+    /// Reused for both single-packet requests and request-as-resource.
+    /// Returns outbound response packets (empty if no handler or no response).
+    fn dispatch_request_handler<R: RngCore + CryptoRng>(
+        &mut self,
+        link_id: &[u8; TRUNCATED_HASH_LEN],
+        request_id: &[u8; TRUNCATED_HASH_LEN],
+        path_hash: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+        requested_at: f64,
+        rng: &mut R,
+    ) -> Vec<OutboundPacket> {
+        let mut response_packets = Vec::new();
+        let link_meta = self.transport.get_link(link_id).map(|link| {
+            let mtu = rete_transport::link::decode_mtu(&link.signalling) as usize;
+            let link_mdu = if mtu == 0 {
+                rete_transport::link::LINK_MDU
+            } else {
+                rete_transport::link::compute_link_mdu(mtu)
+            };
+            (
+                link.destination_hash,
+                link.identified_identity_hash().copied(),
+                link_mdu,
+            )
+        });
+        if let Some((dest_hash, remote_identity, link_mdu)) = link_meta {
+            if let Some(handler) = self.find_request_handler(&dest_hash, path_hash) {
+                if handler.policy.allows(remote_identity.as_ref()) {
+                    let ctx = super::RequestContext {
+                        destination_hash: dest_hash,
+                        path: &handler.path,
+                        path_hash: *path_hash,
+                        link_id: *link_id,
+                        request_id: *request_id,
+                        requested_at,
+                        remote_identity,
+                    };
+                    if let Some(response_data) = (handler.handler)(&ctx, data) {
+                        let final_data = if handler
+                            .compression_policy
+                            .should_compress(response_data.len())
+                        {
+                            self.compress_fn
+                                .and_then(|f| f(&response_data))
+                                .filter(|c| c.len() < response_data.len())
+                                .unwrap_or(response_data)
+                        } else {
+                            response_data
+                        };
+                        // Response framing: fixarray(2) + bin8 header(2) + request_id(16) + bin header(up to 3)
+                        const RESPONSE_FRAMING_OVERHEAD: usize = 1 + 2 + TRUNCATED_HASH_LEN + 3;
+                        if final_data.len() + RESPONSE_FRAMING_OVERHEAD <= link_mdu {
+                            if let Ok(pkt) =
+                                self.send_response(link_id, request_id, &final_data, rng)
+                            {
+                                response_packets.push(pkt);
+                            }
+                        } else {
+                            if let Ok(pkt) =
+                                self.start_response_resource(link_id, request_id, &final_data, rng)
+                            {
+                                response_packets.push(pkt);
+                            }
+                            for rpkt in self.transport.drain_resource_outbound() {
+                                response_packets.push(OutboundPacket::broadcast(rpkt));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        response_packets
     }
 
     /// Periodic maintenance: expire paths, collect pending announces, send keepalives.
@@ -742,12 +869,36 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         // Now run tick: expire paths, check stale links, etc.
         let result = self.transport.tick(now);
 
-        IngestOutcome {
-            event: Some(NodeEvent::Tick {
-                expired_paths: result.expired_paths,
-                closed_links: result.closed_links,
-            }),
-            packets,
-        }
+        // Check request timeouts
+        let mut events = self.check_request_timeouts(now);
+
+        events.push(NodeEvent::Tick {
+            expired_paths: result.expired_paths,
+            closed_links: result.closed_links,
+        });
+
+        IngestOutcome { events, packets }
+    }
+
+    /// Check pending requests for timeout and return timeout events.
+    fn check_request_timeouts(&mut self, now: u64) -> Vec<NodeEvent> {
+        use super::request_receipt::RequestStatus;
+
+        let mut events = Vec::new();
+        self.pending_requests.retain(|req| {
+            if matches!(req.status, RequestStatus::Sent | RequestStatus::Receiving)
+                && now.saturating_sub(req.sent_at) > req.timeout_secs
+            {
+                events.push(NodeEvent::RequestFailed {
+                    link_id: req.link_id,
+                    request_id: req.request_id,
+                    reason: RequestFailReason::Timeout,
+                });
+                false // remove timed-out request
+            } else {
+                true
+            }
+        });
+        events
     }
 }

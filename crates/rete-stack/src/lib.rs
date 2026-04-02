@@ -247,6 +247,26 @@ pub enum NodeEvent {
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
+    /// A pending request failed (timeout, link closed, resource failed, etc.).
+    RequestFailed {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The request_id.
+        request_id: [u8; TRUNCATED_HASH_LEN],
+        /// Why the request failed.
+        reason: RequestFailReason,
+    },
+    /// Progress on receiving a response-as-resource for a pending request.
+    RequestProgress {
+        /// The link_id.
+        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The request_id.
+        request_id: [u8; TRUNCATED_HASH_LEN],
+        /// Parts received so far.
+        current: usize,
+        /// Total parts expected.
+        total: usize,
+    },
     /// Periodic tick completed.
     Tick {
         /// Number of paths expired.
@@ -254,6 +274,18 @@ pub enum NodeEvent {
         /// Number of links closed due to staleness.
         closed_links: usize,
     },
+}
+
+/// Reason a request failed.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestFailReason {
+    /// The request timed out.
+    Timeout,
+    /// The link was closed before a response was received.
+    LinkClosed,
+    /// The response resource transfer failed.
+    ResourceFailed,
 }
 
 #[cfg(feature = "alloc")]
@@ -271,6 +303,8 @@ pub use node_core::{
     PacketRouting, ProveAppFn, RequestContext, RequestHandler, RequestHandlerFn, RequestPolicy,
     ResponseCompressionPolicy,
 };
+#[cfg(feature = "alloc")]
+pub use node_core::request_receipt::{PendingRequest, RequestStatus};
 #[cfg(all(feature = "alloc", feature = "hosted"))]
 pub use node_core::HostedNodeCore;
 #[cfg(feature = "alloc")]

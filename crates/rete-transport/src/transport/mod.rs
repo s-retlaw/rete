@@ -278,6 +278,8 @@ pub enum IngestResult<'a> {
         total_size: usize,
         /// True if this resource is a request or response payload (auto-accept regardless of strategy).
         is_request_or_response: bool,
+        /// True if this resource carries a response payload.
+        is_response: bool,
     },
     /// Resource transfer progress.
     ResourceProgress {

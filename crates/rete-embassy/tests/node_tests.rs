@@ -86,7 +86,7 @@ fn embassy_node_receives_announce() {
 
     // Should have received an AnnounceReceived event
     assert!(
-        matches!(outcome.event, Some(NodeEvent::AnnounceReceived { .. })),
+        matches!(outcome.events.first(), Some(NodeEvent::AnnounceReceived { .. })),
         "should receive an announce event"
     );
 
@@ -128,12 +128,12 @@ fn embassy_node_receives_encrypted_data() {
         .build()
         .unwrap();
 
-    let outcome = node
+    let mut outcome = node
         .core
         .handle_ingest(&pkt_buf[..pkt_len], 1002, 0, &mut rng);
 
     // Should have a DataReceived event with decrypted payload
-    match outcome.event {
+    match outcome.event() {
         Some(NodeEvent::DataReceived { payload, .. }) => {
             assert_eq!(payload, plaintext, "payload should be decrypted correctly");
         }

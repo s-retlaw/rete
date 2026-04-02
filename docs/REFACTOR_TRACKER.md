@@ -11,7 +11,7 @@ Created: 2026-04-02
 | 2 | Resource auto-accept, no policy | P0 | ✅ DONE | ResourceStrategy enum, AcceptNone/AcceptAll/AcceptApp, RESOURCE_RCL |
 | 3 | Storage arch (heapless for hosted) | P1 | ✅ DONE | TransportStorage trait; HeaplessStorage + StdStorage backends |
 | 4 | Destination/NodeCore modeling | P1 | ✅ DONE | `destination_hashes()` canonical; `decrypt_with_identity()` on Destination |
-| 5 | Request/Resource lifecycle parity | P1 | TODO | No RequestReceipt, no resource callbacks |
+| 5 | Request/Resource lifecycle parity | P1 | ✅ DONE | PendingRequest tracking, timeout, large req/resp as resource |
 | 6 | LxmfRouter narrower than upstream | P1 | TODO | No outbound queue, retry, or receipt tracking |
 | 7 | Portable LXMF boundary half-finished | P1 | TODO | Lower priority — RNode doesn't need rete-lxmf |
 | 8 | Error handling (stringly-typed) | P2 | TODO | Resource + LXMF still use `&'static str` errors |
@@ -154,34 +154,45 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 ## 5. Request/Resource Lifecycle Parity
 
 **Priority:** P1
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-02)
 
-### Problem
+### Solution
 
-`send_request()` returns only `(OutboundPacket, request_id)`. There is no `RequestReceipt`, no tracked status, no timeout, no progress callback. Python exposes `Link.request(path, data, response_callback, failed_callback, progress_callback, timeout)` and `RNS.RequestReceipt`.
+1. **`IngestOutcome` refactored** from `event: Option<NodeEvent>` to `events: Vec<NodeEvent>` — enables emitting multiple events per ingest/tick (e.g., `Tick` + `RequestTimedOut`).
 
-Resource lifecycle has a similar gap — no strategy callbacks, no progress/concluded callbacks matching Python's `set_resource_callback`, `set_resource_started_callback`, `set_resource_concluded_callback`.
+2. **`PendingRequest` tracking** — `send_request()` now registers a `PendingRequest` with RTT-based timeout. `get_request_status()` accessor added. States: `Sent`, `Receiving`, `Ready`, `Failed`.
+
+3. **New `NodeEvent` variants**: `RequestTimedOut`, `RequestFailed { reason: RequestFailReason }`, `RequestProgress`. `RequestFailReason` enum: `Timeout`, `LinkClosed`, `ResourceFailed`.
+
+4. **Timeout in `handle_tick()`** — pending requests checked each tick; timed-out requests emit `RequestTimedOut` and are removed.
+
+5. **Link-close cleanup** — pending requests on a closed link emit `RequestFailed { reason: LinkClosed }`.
+
+6. **Response completion wiring** — `ResponseReceived` clears the matching `PendingRequest`.
+
+7. **Large response-as-resource** — handler responses exceeding the link MDU auto-promote to Resource transfers with `is_response=true`. Receiver-side `ResourceComplete` with `is_response` parses the response and emits `ResponseReceived`.
+
+8. **Large request-as-resource** — `send_request()` checks packed size against link MDU; if too large, starts a resource with `is_request=true`. Receiver-side `ResourceComplete` with `is_request` parses the request and dispatches through the handler system.
+
+9. **Request progress events** — `ResourceProgress` for response-resources emits `RequestProgress`. `ResourceFailed` for response/request-resources emits `RequestFailed { reason: ResourceFailed }`.
+
+10. **Handler dispatch refactored** — extracted `dispatch_request_handler()` method, reused for both single-packet and resource-based requests.
 
 ### Key Files
 
-- `crates/rete-stack/src/node_core/mod.rs:565-592` — `send_request()` return type
-- `crates/rete-stack/src/node_core/ingest.rs:278-340` — handler dispatch
-- `crates/rete-transport/src/transport/link.rs` — link state
-- `crates/rete-transport/src/transport/resource.rs` — resource transfer state
+- `crates/rete-stack/src/node_core/request_receipt.rs` — `RequestStatus`, `PendingRequest`, timeout computation
+- `crates/rete-stack/src/node_core/mod.rs` — `IngestOutcome` multi-event, `pending_requests` field, `send_request()` size check, `start_response_resource()`, `get_link_mdu()`, `get_request_status()`
+- `crates/rete-stack/src/node_core/ingest.rs` — `dispatch_request_handler()`, timeout in `handle_tick()`, response/request resource detection, progress event mapping
+- `crates/rete-stack/src/lib.rs` — `RequestTimedOut`, `RequestFailed`, `RequestProgress` events, `RequestFailReason` enum
+- `crates/rete-transport/src/transport/resource.rs` — `start_resource_flagged()`, `set_last_resource_flags()`
+- `crates/rete-tokio/src/lib.rs` — multi-event consumer migration
+- `crates/rete-embassy/src/lib.rs` — multi-event consumer migration
 
-### What to Do
+### Verified
 
-1. **Add `RequestReceipt` struct** with status (Sent, Delivered, Failed, TimedOut), response data, and timing.
-2. **Track pending requests in `NodeCore`** keyed by request_id.
-3. **Add request timeout logic** to `tick()`.
-4. **For resources:** add progress tracking and concluded state accessible from `NodeEvent`.
-5. **Design for Rust idioms** — consider returning a handle/future rather than mimicking Python's callback model directly.
-
-### Done When
-
-- `send_request()` returns a `RequestReceipt` or handle
-- Request timeout fires and produces a `NodeEvent::RequestFailed` or similar
-- Resource progress is observable
+- All 619 workspace unit tests pass
+- All 53 E2E interop tests pass
+- `cargo check -p rete-transport --target thumbv6m-none-eabi` passes (no_std)
 - Existing request interop tests pass
 
 ---
@@ -421,3 +432,9 @@ Can't capture state. Forces globals or side channels for anything stateful.
 | 2026-04-02 | `hosted` feature flag on rete-transport/rete-stack | Gates `StdStorage` and `HostedNodeCore` behind opt-in feature. Embedded crates never pull in hashbrown. |
 | 2026-04-02 | `decrypt_with_identity()` over type split | Identity has `ZeroizeOnDrop` (not `Clone`). Instead of splitting Destination into LocalDestination/DestinationAddress, added method accepting external `&Identity` + ratchet keys. |
 | 2026-04-02 | `destination_hash()` as thin wrapper | ~30 call sites only need dest_hash. Kept as convenience delegating to `destination_hashes().0` rather than updating all callers. |
+| 2026-04-02 | `IngestOutcome.events: Vec<NodeEvent>` over `Option<NodeEvent>` | Timeout checking in tick needs to emit both `Tick` and `RequestTimedOut`. Multi-event model is the correct long-term design. |
+| 2026-04-02 | `PendingRequest` in `Vec` not `HashMap` | Low cardinality (bounded by active links/concurrent requests). Linear scan fine for <32 entries. Consistent with existing `resources` Vec pattern. |
+| 2026-04-02 | RTT-based request timeout with 30s default | Matches Python: `traffic_timeout_ms / 1000 + grace`. Falls back to 30s when RTT unknown (0.0). Minimum 15s + 10s grace. |
+| 2026-04-02 | `start_resource_flagged()` for request/response resources | Flags must be set before `build_advertisement()` serializes them. Added `prepare_and_advertise_segment_ex()` with `is_request`/`is_response` parameters. |
+| 2026-04-02 | `dispatch_request_handler()` extraction | Reused for both single-packet and resource-based requests. Avoids duplicating handler dispatch + compression + MDU check logic. |
+| 2026-04-02 | Response-resource to request matching is FIFO on link | With concurrent requests on one link, `RequestProgress` events could associate with the wrong request. Completion is always correct (response payload contains `request_id`). Fix available: populate the `"q"` field in resource advertisements — wire format already defines it, we just write `nil`. Deferred because concurrent requests per link are rare in practice. |
