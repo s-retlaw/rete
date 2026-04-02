@@ -3,11 +3,14 @@
 //! When the node sends a DATA packet, it registers a [`PacketReceipt`] keyed
 //! by the truncated packet hash. When a PROOF arrives, the receipt table
 //! validates the signature and fires a callback.
+//!
+//! Generic over [`StorageMap`] so it works with both fixed-size
+//! (`FnvIndexMap`) and growable (`HashMap`) backends.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use heapless::FnvIndexMap;
+use crate::storage::StorageMap;
 use rete_core::{Identity, TRUNCATED_HASH_LEN};
 
 /// Status of a packet receipt.
@@ -38,25 +41,20 @@ pub struct PacketReceipt {
 
 /// Table of outstanding packet receipts.
 ///
-/// Generic over `MAX` — the maximum number of concurrent receipts tracked.
-pub struct ReceiptTable<const MAX: usize> {
-    entries: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt, MAX>,
+/// Generic over `M` — the map backend (fixed-size or growable).
+pub struct ReceiptTable<M: StorageMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt>> {
+    entries: M,
 }
 
-impl<const MAX: usize> Default for ReceiptTable<MAX> {
+impl<M: StorageMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt>> Default for ReceiptTable<M> {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const MAX: usize> ReceiptTable<MAX> {
-    /// Create an empty receipt table.
-    pub const fn new() -> Self {
         ReceiptTable {
-            entries: FnvIndexMap::new(),
+            entries: M::default(),
         }
     }
+}
 
+impl<M: StorageMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt>> ReceiptTable<M> {
     /// Register a receipt for a sent packet.
     ///
     /// Returns `false` if the table is full.
@@ -171,6 +169,10 @@ impl<const MAX: usize> ReceiptTable<MAX> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use heapless::FnvIndexMap;
+
+    type TestTable = ReceiptTable<FnvIndexMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt, 16>>;
+    type SmallTable = ReceiptTable<FnvIndexMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt, 4>>;
 
     fn make_test_identity() -> Identity {
         Identity::from_seed(b"receipt-test-identity").unwrap()
@@ -178,7 +180,7 @@ mod tests {
 
     #[test]
     fn receipt_register_and_lookup() {
-        let mut table: ReceiptTable<16> = ReceiptTable::new();
+        let mut table = TestTable::default();
         let identity = make_test_identity();
         let packet_hash = [0xABu8; 32];
 
@@ -193,7 +195,7 @@ mod tests {
 
     #[test]
     fn receipt_validate_explicit_proof() {
-        let mut table: ReceiptTable<16> = ReceiptTable::new();
+        let mut table = TestTable::default();
         let identity = make_test_identity();
         let packet_hash = [0x42u8; 32];
 
@@ -213,7 +215,7 @@ mod tests {
 
     #[test]
     fn receipt_validate_implicit_proof() {
-        let mut table: ReceiptTable<16> = ReceiptTable::new();
+        let mut table = TestTable::default();
         let identity = make_test_identity();
         let packet_hash = [0x42u8; 32];
 
@@ -229,7 +231,7 @@ mod tests {
 
     #[test]
     fn receipt_bad_signature_rejected() {
-        let mut table: ReceiptTable<16> = ReceiptTable::new();
+        let mut table = TestTable::default();
         let identity = make_test_identity();
         let packet_hash = [0x42u8; 32];
 
@@ -248,7 +250,7 @@ mod tests {
 
     #[test]
     fn receipt_timeout_expiry() {
-        let mut table: ReceiptTable<16> = ReceiptTable::new();
+        let mut table = TestTable::default();
         let identity = make_test_identity();
         let packet_hash = [0x42u8; 32];
 
@@ -266,8 +268,7 @@ mod tests {
 
     #[test]
     fn test_receipt_table_full() {
-        // Fill all slots, then register should return false.
-        let mut table: ReceiptTable<4> = ReceiptTable::new();
+        let mut table = SmallTable::default();
         let identity = make_test_identity();
 
         for i in 0u8..4 {
@@ -293,8 +294,7 @@ mod tests {
 
     #[test]
     fn test_validate_proof_already_delivered() {
-        // validate_proof on an already-delivered receipt should return None.
-        let mut table: ReceiptTable<16> = ReceiptTable::new();
+        let mut table = TestTable::default();
         let identity = make_test_identity();
         let packet_hash = [0x42u8; 32];
 

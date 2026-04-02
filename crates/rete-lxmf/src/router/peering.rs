@@ -83,13 +83,10 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Called from the tick handler. Returns outbound packets (link requests).
     pub fn check_peer_syncs<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
     ) -> Vec<OutboundPacket> {
@@ -128,14 +125,11 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Sends an identify packet and transitions to Identifying.
     pub fn advance_sync_on_link_established<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
     ) -> Vec<OutboundPacket> {
@@ -214,15 +208,12 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// and packs + sends the wanted messages as a bz2-compressed Resource.
     pub fn advance_sync_on_response<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         response_data: &[u8],
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
     ) -> Vec<OutboundPacket> {
@@ -311,14 +302,11 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Marks all transferred messages as handled and completes the sync.
     pub fn advance_sync_on_resource_complete<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
     ) -> (Vec<OutboundPacket>, Option<LxmfEvent>) {

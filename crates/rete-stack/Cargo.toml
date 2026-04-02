@@ -11,6 +11,7 @@ categories.workspace = true
 [features]
 default = ["alloc"]
 alloc = []
+hosted = ["rete-transport/hosted"]
 serde = ["dep:serde", "rete-transport/serde"]
 
 [dependencies]

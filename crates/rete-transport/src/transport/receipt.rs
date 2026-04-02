@@ -4,7 +4,7 @@ use rete_core::{DestType, Identity, PacketBuilder, PacketType, TRUNCATED_HASH_LE
 
 use super::Transport;
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P, A, D, L> {
+impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Register a receipt for a sent packet.
     pub fn register_receipt(
         &mut self,

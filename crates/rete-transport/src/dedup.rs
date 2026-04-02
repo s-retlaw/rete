@@ -1,27 +1,25 @@
-//! Duplicate packet detection — fixed-size ring buffer of recent hashes.
+//! Duplicate packet detection — ring buffer of recent hashes.
+//!
+//! Generic over [`StorageDeque`] so it works with both fixed-size
+//! (`heapless::Deque`) and growable (`VecDeque`) backends.
+
+use crate::storage::StorageDeque;
 
 /// Rolling window for duplicate-packet detection.
 ///
-/// Uses a fixed-size ring buffer. O(N) lookup, but N is small on embedded.
+/// Uses a ring buffer. O(N) lookup, but N is small on embedded.
 /// When full the oldest entry is silently evicted.
-pub struct DedupWindow<const N: usize> {
-    buf: heapless::Deque<[u8; 32], N>,
+pub struct DedupWindow<D: StorageDeque<[u8; 32]>> {
+    buf: D,
 }
 
-impl<const N: usize> Default for DedupWindow<N> {
+impl<D: StorageDeque<[u8; 32]>> Default for DedupWindow<D> {
     fn default() -> Self {
-        Self::new()
+        DedupWindow { buf: D::default() }
     }
 }
 
-impl<const N: usize> DedupWindow<N> {
-    /// Create an empty window.
-    pub const fn new() -> Self {
-        DedupWindow {
-            buf: heapless::Deque::new(),
-        }
-    }
-
+impl<D: StorageDeque<[u8; 32]>> DedupWindow<D> {
     /// Check `hash` and insert it if not seen before.
     ///
     /// Returns `true` if the hash was already present (duplicate — drop it).
@@ -39,7 +37,7 @@ impl<const N: usize> DedupWindow<N> {
 
     /// Clear all entries.
     pub fn clear(&mut self) {
-        while self.buf.pop_front().is_some() {}
+        self.buf.clear();
     }
 
     /// Number of hashes currently tracked.
@@ -57,15 +55,19 @@ impl<const N: usize> DedupWindow<N> {
 mod tests {
     use super::*;
 
+    type TestDedup = DedupWindow<heapless::Deque<[u8; 32], 16>>;
+    type SmallDedup = DedupWindow<heapless::Deque<[u8; 32], 4>>;
+    type ExactDedup = DedupWindow<heapless::Deque<[u8; 32], 8>>;
+
     #[test]
     fn new_hash_not_duplicate() {
-        let mut w: DedupWindow<16> = DedupWindow::new();
+        let mut w = TestDedup::default();
         assert!(!w.check_and_insert(&[1u8; 32]));
     }
 
     #[test]
     fn repeated_hash_is_duplicate() {
-        let mut w: DedupWindow<16> = DedupWindow::new();
+        let mut w = TestDedup::default();
         let h = [2u8; 32];
         w.check_and_insert(&h);
         assert!(w.check_and_insert(&h));
@@ -73,7 +75,7 @@ mod tests {
 
     #[test]
     fn evicts_oldest_when_full() {
-        let mut w: DedupWindow<4> = DedupWindow::new();
+        let mut w = SmallDedup::default();
         for i in 0u8..4 {
             let mut h = [0u8; 32];
             h[0] = i;
@@ -92,7 +94,7 @@ mod tests {
 
     #[test]
     fn different_hashes_not_duplicates() {
-        let mut w: DedupWindow<16> = DedupWindow::new();
+        let mut w = TestDedup::default();
         for i in 0u8..8 {
             let mut h = [0u8; 32];
             h[0] = i;
@@ -103,9 +105,7 @@ mod tests {
 
     #[test]
     fn test_window_at_exact_capacity() {
-        // Fill window to exactly N entries, verify all N are tracked
-        // and duplicates are detected for each one.
-        let mut w: DedupWindow<8> = DedupWindow::new();
+        let mut w = ExactDedup::default();
 
         // Insert exactly 8 unique hashes
         for i in 0u8..8 {
@@ -121,7 +121,6 @@ mod tests {
             h[0] = i;
             assert!(w.check_and_insert(&h), "hash {} should be a duplicate", i);
         }
-        // Length should remain 8 (duplicates don't add entries)
         assert_eq!(w.len(), 8);
     }
 }

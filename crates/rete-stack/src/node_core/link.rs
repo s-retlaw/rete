@@ -8,7 +8,7 @@ use crate::NodeEvent;
 
 use super::{NodeCore, OutboundPacket};
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
+impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Initiate a link to a destination.
     ///
     /// Returns the outbound LINKREQUEST packet and the link_id on success.

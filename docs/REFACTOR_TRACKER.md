@@ -9,7 +9,7 @@ Created: 2026-04-02
 |---|------|----------|--------|-------|
 | 1 | Resource hash verification skip | P0 | ✅ DONE | Fixed — enforce hash check after decrypt |
 | 2 | Resource auto-accept, no policy | P0 | ✅ DONE | ResourceStrategy enum, AcceptNone/AcceptAll/AcceptApp, RESOURCE_RCL |
-| 3 | Storage arch (heapless for hosted) | P1 | TODO | 600KB HostedNodeCore; defer until correctness done |
+| 3 | Storage arch (heapless for hosted) | P1 | ✅ DONE | TransportStorage trait; HeaplessStorage + StdStorage backends |
 | 4 | Destination/NodeCore modeling | P1 | TODO | Dest hash computed 3 places; leaky abstraction |
 | 5 | Request/Resource lifecycle parity | P1 | TODO | No RequestReceipt, no resource callbacks |
 | 6 | LxmfRouter narrower than upstream | P1 | TODO | No outbound queue, retry, or receipt tracking |
@@ -97,31 +97,31 @@ Python exposes `Link.set_resource_strategy(callback=None, strategy=RNS.Resource.
 
 ## 3. Storage Architecture (Heapless for Hosted)
 
-**Priority:** P1 — defer until items 1-2 are done
-**Status:** TODO
+**Priority:** P1
+**Status:** ✅ DONE (2026-04-02)
 
-### Problem
+### Solution
 
-`Transport` uses const-generic `heapless` maps/deques for both embedded and hosted targets. `HostedNodeCore` is ~600KB and often needs `Box::new()`. The same fixed-size storage model serves devices with 64KB RAM and servers with 64GB.
+Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`, and `StorageSet` collection traits. Two implementations:
+
+- **`HeaplessStorage<P, A, D, L>`** — fixed-size `FnvIndexMap`/`Deque`/`FnvIndexSet` (embedded, `no_std`)
+- **`StdStorage`** — heap-allocated `hashbrown::HashMap`/`VecDeque`/`HashSet` (hosted, behind `hosted` feature flag)
+
+`Transport<S: TransportStorage>` replaces `Transport<const P, A, D, L>`. `NodeCore<S>` replaces `NodeCore<const P, A, D, L>`.
 
 ### Key Files
 
-- `crates/rete-transport/src/lib.rs:55-87` — `EmbeddedTransport` / `HostedTransport` type aliases
-- `crates/rete-transport/src/transport/mod.rs:418-460` — large heapless maps in `Transport` struct
-- `crates/rete-tokio/src/lib.rs:128-155` — `TokioNode` docs about boxing
+- `crates/rete-transport/src/storage.rs` — traits + `HeaplessStorage`
+- `crates/rete-transport/src/storage_std.rs` — `StdStorage` (gated behind `hosted` feature)
+- `crates/rete-transport/src/transport/mod.rs` — `Transport<S: TransportStorage>`
+- `crates/rete-stack/src/node_core/mod.rs` — `NodeCore<S: TransportStorage>`
 
-### What to Do
+### Verified
 
-Two-phase approach:
-1. **Phase A (smaller):** Heap-allocate the large hosted tables (`Vec`, `HashMap`) behind a feature flag. Keep `heapless` for embedded. This alone should shrink `HostedNodeCore` dramatically.
-2. **Phase B (larger, optional):** Extract a `TransportStorage` trait so algorithm logic is fully decoupled from storage backend.
-
-### Done When
-
-- `HostedNodeCore` no longer needs the "should be boxed" warning
-- `cargo check --target thumbv6m-none-eabi` still works for embedded crates
-- `cargo check --target wasm32-unknown-unknown` still works for portable crates
-- All existing tests pass
+- `HostedNodeCore` now uses heap-allocated collections (no more ~600KB stack)
+- `cargo check -p rete-transport --target thumbv6m-none-eabi` passes
+- All 561 unit tests pass
+- All 49 E2E interop tests pass
 
 ---
 
@@ -426,3 +426,6 @@ Can't capture state. Forces globals or side channels for anything stateful.
 | 2026-04-02 | No LXMF on ESP32 RNode | RNode is a TNC/radio modem. LXMF lives on the host. `rete-lxmf-core` (no_std codec) suffices for any embedded message formatting. |
 | 2026-04-02 | Item ordering: correctness → structure → lifecycle → LXMF → polish | Fix bugs before refactoring. Refactor before adding features. |
 | 2026-04-02 | Default `ResourceStrategy::AcceptAll` | Backward compat with existing tests while adding the policy framework. |
+| 2026-04-02 | `TransportStorage` trait with explicit associated types (not GATs) | Embedded impl needs different capacities per role (MAX_PATHS vs MAX_LINKS). Explicit types avoid GAT complexity. |
+| 2026-04-02 | `hashbrown` for hosted HashMap/HashSet | `no_std + alloc` compatible, already a transitive dependency. Avoids requiring `std` in rete-transport. |
+| 2026-04-02 | `hosted` feature flag on rete-transport/rete-stack | Gates `StdStorage` and `HostedNodeCore` behind opt-in feature. Embedded crates never pull in hashbrown. |

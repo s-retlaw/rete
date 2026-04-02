@@ -7,7 +7,7 @@ use crate::node_core::compute_dest_hashes;
 
 use super::NodeCore;
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
+impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Register an additional destination on this node.
     ///
     /// Computes the destination hash from the node's identity + given app_name/aspects,

@@ -2,6 +2,7 @@
 
 use crate::announce::{validate_announce, PendingAnnounce};
 use crate::path::Path;
+use crate::storage::{StorageDeque, StorageMap};
 use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, NAME_HASH_LEN,
     TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
@@ -15,7 +16,7 @@ use super::{
     PATH_REQUEST_MI, PATHFINDER_G, PATHFINDER_M, PATHFINDER_R, PATHFINDER_RW_MS, Transport,
 };
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P, A, D, L> {
+impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Queue an announce for transmission. Returns `false` if queue is full.
     pub fn queue_announce(&mut self, ann: PendingAnnounce) -> bool {
         self.announces.push_back(ann).is_ok()
@@ -385,9 +386,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         rng: &mut R,
     ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
         let mut to_send: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
-        let mut keep: heapless::Deque<PendingAnnounce, A> = heapless::Deque::new();
+        let mut old = core::mem::take(&mut self.announces);
 
-        while let Some(mut ann) = self.announces.pop_front() {
+        while let Some(mut ann) = old.pop_front() {
             // Skip if blocked by local rebroadcast detection
             if ann.block_rebroadcasts && !ann.local {
                 continue;
@@ -401,23 +402,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 }
                 self.stats.packets_sent += 1;
                 ann.tx_count += 1;
-                // Next retransmission: PATHFINDER_G + random jitter (0..PATHFINDER_RW_MS ms)
-                // Python: now + PATHFINDER_G + random.random() * PATHFINDER_RW
                 let jitter_ms = (rng.next_u32() % PATHFINDER_RW_MS as u32) as u64;
-                // Convert to seconds (integer math: add 1s if jitter >= 500ms)
                 let jitter_secs = if jitter_ms >= 500 { 1 } else { 0 };
                 ann.retransmit_timeout = now + PATHFINDER_G + jitter_secs;
                 debug_assert!(ann.retransmit_timeout > now);
                 ann.local = false;
                 if ann.tx_count <= PATHFINDER_R && !ann.block_rebroadcasts {
-                    let _ = keep.push_back(ann);
+                    let _ = self.announces.push_back(ann);
                 }
             } else {
-                let _ = keep.push_back(ann);
+                let _ = self.announces.push_back(ann);
             }
         }
 
-        self.announces = keep;
         to_send
     }
 

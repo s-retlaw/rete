@@ -2,6 +2,7 @@
 
 use crate::link::decode_mtu;
 use crate::resource::Resource;
+use crate::storage::StorageMap;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
     DestType, PacketBuilder, PacketType, CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV,
@@ -11,7 +12,15 @@ use rete_core::{
 
 use super::{IngestResult, SplitMeta, SplitSendEntry, Transport, RESOURCE_OUTBOUND_MAX, RESOURCE_RETRY_THRESHOLD_SECS};
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P, A, D, L> {
+/// Maximum concurrent resource transfers.
+///
+/// Previously bounded by the MAX_LINKS const generic (4 on embedded, 32 on
+/// hosted). Set to 32 as a reasonable default — one resource-per-link at the
+/// hosted link limit. Embedded nodes with fewer links are still well within
+/// this bound.
+const MAX_CONCURRENT_RESOURCES: usize = 32;
+
+impl<S: crate::storage::TransportStorage> Transport<S> {
     // -----------------------------------------------------------------------
     // Resource management
     // -----------------------------------------------------------------------
@@ -105,7 +114,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         )?;
 
         // Queue remaining data for later segments (only the tail after segment 1)
-        if self.split_send_queue.len() >= L {
+        if self.split_send_queue.len() >= MAX_CONCURRENT_RESOURCES {
             return None;
         }
         self.split_send_queue.push(SplitSendEntry {
@@ -191,7 +200,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         split: Option<SplitMeta>,
         rng: &mut R,
     ) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
-        if self.resources.len() >= L {
+        if self.resources.len() >= MAX_CONCURRENT_RESOURCES {
             return None;
         }
         let (encrypted, peer_mtu) = self.prepend_and_encrypt(link_id, send_data, rng)?;
@@ -458,7 +467,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
                 // Resource advertisement from sender
                 match Resource::from_advertisement(decrypted, *link_id) {
                     Ok(res) => {
-                        if self.resources.len() >= L {
+                        if self.resources.len() >= MAX_CONCURRENT_RESOURCES {
                             return IngestResult::Invalid;
                         }
                         let mut rh = [0u8; TRUNCATED_HASH_LEN];

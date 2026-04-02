@@ -25,13 +25,12 @@ pub(self) fn hex_short(h: &[u8]) -> alloc::string::String {
     }
 }
 
-use crate::announce::PendingAnnounce;
 use crate::dedup::DedupWindow;
-use crate::link::{compute_link_id, Link};
+use crate::link::compute_link_id;
 use crate::path::Path;
 use crate::receipt::ReceiptTable;
 use crate::resource::Resource;
-use heapless::{FnvIndexMap, FnvIndexSet};
+use crate::storage::{StorageMap, TransportStorage};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketType, CONTEXT_LRPROOF,
@@ -374,7 +373,7 @@ pub struct TickResult {
 ///
 /// All counters are monotonically increasing `u64` values. They are never
 /// reset — callers can snapshot and diff to compute rates.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TransportStats {
     /// Total packets received and parsed (excludes parse failures).
@@ -419,51 +418,41 @@ pub struct TransportStats {
 
 /// The Reticulum transport layer — path table, announce queue, dedup window, links.
 ///
-/// Generic over:
-/// - `MAX_PATHS`      — max learned destination paths
-/// - `MAX_ANNOUNCES`  — max pending outbound announces
-/// - `DEDUP_WINDOW`   — duplicate-detection window size
-/// - `MAX_LINKS`      — max concurrent link sessions
-pub struct Transport<
-    const MAX_PATHS: usize,
-    const MAX_ANNOUNCES: usize,
-    const DEDUP_WINDOW: usize,
-    const MAX_LINKS: usize,
-> {
-    pub(super) paths: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], Path, MAX_PATHS>,
-    pub(super) announces: heapless::Deque<PendingAnnounce, MAX_ANNOUNCES>,
-    pub(super) dedup: DedupWindow<DEDUP_WINDOW>,
-    pub(super) known_identities: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], [u8; 64], MAX_PATHS>,
+/// Generic over `S: TransportStorage` — pluggable storage backend.
+/// Use [`HeaplessStorage`](crate::HeaplessStorage) for embedded (fixed-size) or
+/// [`StdStorage`](crate::storage_std::StdStorage) for hosted (heap-allocated).
+pub struct Transport<S: TransportStorage> {
+    pub(super) paths: S::PathMap,
+    pub(super) announces: S::AnnounceDeque,
+    pub(super) dedup: DedupWindow<S::DedupDeque>,
+    pub(super) known_identities: S::IdentityMap,
     /// Identity hash of this node (enables HEADER_2 forwarding when set).
     pub(super) local_identity_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
     /// Reverse table: truncated packet hash → entry (for reply routing).
-    pub(super) reverse_table: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ReverseEntry, MAX_PATHS>,
+    pub(super) reverse_table: S::ReverseMap,
     /// Dedup window for announce random_hashes (replay detection).
-    pub(super) announce_dedup: DedupWindow<DEDUP_WINDOW>,
-    /// Destination hashes registered as local (self-announce filtering).
-    pub(super) local_destinations: FnvIndexSet<[u8; TRUNCATED_HASH_LEN], 8>,
+    pub(super) announce_dedup: DedupWindow<S::DedupDeque>,
+    /// Destination hashes registered as local (self-announce filtering, local delivery routing).
+    pub(super) local_destinations: alloc::vec::Vec<[u8; TRUNCATED_HASH_LEN]>,
     /// Active link sessions, keyed by link_id.
-    pub(super) links: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], Link, MAX_LINKS>,
+    pub(super) links: S::LinkMap,
     /// Receipts for sent packets, awaiting delivery proofs.
-    /// Sized by MAX_PATHS: 64 on embedded, 1024 on hosted (matching Python).
-    pub(super) receipts: ReceiptTable<MAX_PATHS>,
+    pub(super) receipts: ReceiptTable<S::ReceiptMap>,
     /// Receipts for channel messages: truncated packet hash → ChannelReceipt.
     /// Used to match incoming PROOFs to channel sequences and call mark_delivered().
-    pub(super) channel_receipts: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ChannelReceipt, MAX_LINKS>,
+    pub(super) channel_receipts: S::ChannelReceiptMap,
     /// Active resource transfers.
     pub(super) resources: alloc::vec::Vec<Resource>,
     /// Pending outbound resource packets (parts, HMU, etc.) built during ingest.
     pub(super) resource_outbound: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     /// Link routing table: link_id → entry (for bidirectional relay of link traffic).
     /// Entries persist for the lifetime of the relayed link.
-    pub(super) link_table: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], LinkTableEntry, MAX_LINKS>,
+    pub(super) link_table: S::LinkTableMap,
     /// Announce rate limiting: dest_hash → (last_announce_time, violations, blocked_until).
-    pub(super) announce_rate: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], AnnounceRateEntry, MAX_PATHS>,
+    pub(super) announce_rate: S::AnnounceRateMap,
     /// Path request throttling: dest_hash → last_request_time.
-    pub(super) path_request_times: FnvIndexMap<[u8; TRUNCATED_HASH_LEN], u64, MAX_PATHS>,
+    pub(super) path_request_times: S::PathRequestTimeMap,
     /// Pending split resource segments waiting to be advertised.
-    /// When a split sender resource's proof is received, the next segment is
-    /// popped from here, processed, and advertised.
     pub(super) split_send_queue: alloc::vec::Vec<SplitSendEntry>,
     /// Cumulative transport-layer counters.
     pub(super) stats: TransportStats,
@@ -494,60 +483,40 @@ pub(super) struct SplitSendEntry {
 
 /// Per-destination announce rate tracking entry.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct AnnounceRateEntry {
-    pub(super) last: u64,
-    pub(super) violations: u8,
-    pub(super) blocked_until: u64,
+pub struct AnnounceRateEntry {
+    pub(crate) last: u64,
+    pub(crate) violations: u8,
+    pub(crate) blocked_until: u64,
 }
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> Default
-    for Transport<P, A, D, L>
-{
+impl<S: TransportStorage> Default for Transport<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P, A, D, L> {
+impl<S: TransportStorage> Transport<S> {
     /// Create a new, empty transport.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Transport {
-            paths: FnvIndexMap::new(),
-            announces: heapless::Deque::new(),
-            dedup: DedupWindow::new(),
-            known_identities: FnvIndexMap::new(),
+            paths: Default::default(),
+            announces: Default::default(),
+            dedup: Default::default(),
+            known_identities: Default::default(),
             local_identity_hash: None,
-            reverse_table: FnvIndexMap::new(),
-            announce_dedup: DedupWindow::new(),
-            local_destinations: FnvIndexSet::new(),
-            links: FnvIndexMap::new(),
-            receipts: ReceiptTable::new(),
-            channel_receipts: FnvIndexMap::new(),
+            reverse_table: Default::default(),
+            announce_dedup: Default::default(),
+            local_destinations: Default::default(),
+            links: Default::default(),
+            receipts: Default::default(),
+            channel_receipts: Default::default(),
             resources: alloc::vec::Vec::new(),
             resource_outbound: alloc::vec::Vec::new(),
-            link_table: FnvIndexMap::new(),
-            announce_rate: FnvIndexMap::new(),
-            path_request_times: FnvIndexMap::new(),
+            link_table: Default::default(),
+            announce_rate: Default::default(),
+            path_request_times: Default::default(),
             split_send_queue: alloc::vec::Vec::new(),
-            stats: TransportStats {
-                packets_received: 0,
-                packets_sent: 0,
-                packets_forwarded: 0,
-                packets_dropped_dedup: 0,
-                packets_dropped_invalid: 0,
-                announces_received: 0,
-                announces_sent: 0,
-                announces_retransmitted: 0,
-                announces_rate_limited: 0,
-                links_established: 0,
-                links_closed: 0,
-                links_failed: 0,
-                link_requests_received: 0,
-                paths_learned: 0,
-                paths_expired: 0,
-                crypto_failures: 0,
-                started_at: 0,
-            },
+            stats: TransportStats::default(),
         }
     }
 
@@ -558,7 +527,9 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 
     /// Register a destination hash as belonging to this node.
     pub fn add_local_destination(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN]) {
-        let _ = self.local_destinations.insert(dest_hash);
+        if !self.local_destinations.contains(&dest_hash) {
+            self.local_destinations.push(dest_hash);
+        }
     }
 
     /// Check whether a destination hash is registered as local.
@@ -1179,66 +1150,28 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         }
 
         // Expire old paths
-        let mut expired = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
-        for (dest, path) in self.paths.iter() {
-            if now.saturating_sub(path.learned_at) > path.expiry_time() {
-                let _ = expired.push(*dest);
-            }
-        }
-        let expired_count = expired.len();
-        for dest in &expired {
-            self.paths.remove(dest);
-        }
+        let prev_paths = self.paths.len();
+        self.paths.retain(|_, path| now.saturating_sub(path.learned_at) <= path.expiry_time());
+        let expired_count = prev_paths - self.paths.len();
 
         // Expire old reverse table entries
-        let mut expired_reverse = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
-        for (hash, entry) in self.reverse_table.iter() {
-            if now.saturating_sub(entry.timestamp) > REVERSE_TIMEOUT {
-                let _ = expired_reverse.push(*hash);
-            }
-        }
-        for hash in &expired_reverse {
-            self.reverse_table.remove(hash);
-        }
+        self.reverse_table.retain(|_, entry| now.saturating_sub(entry.timestamp) <= REVERSE_TIMEOUT);
 
         // Expire old link table entries (stale relayed links)
-        let mut expired_link_table = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
-        for (lid, entry) in self.link_table.iter() {
-            // Link table entries live longer than reverse entries since links
-            // maintain keepalives. Use stale_time (KEEPALIVE * 2 = 12 min).
-            if now.saturating_sub(entry.timestamp) > crate::link::STALE_TIMEOUT_SECS {
-                let _ = expired_link_table.push(*lid);
-            }
-        }
-        for lid in &expired_link_table {
-            self.link_table.remove(lid);
-        }
+        self.link_table.retain(|_, entry| {
+            now.saturating_sub(entry.timestamp) <= crate::link::STALE_TIMEOUT_SECS
+        });
 
         // Check for stale links
-        let mut closed_links_list = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
-        for (lid, link) in self.links.iter_mut() {
-            if link.check_stale(now) {
-                let _ = closed_links_list.push(*lid);
-            }
-        }
-        let closed_count = closed_links_list.len();
-        for lid in &closed_links_list {
-            self.links.remove(lid);
-        }
+        let prev_links = self.links.len();
+        self.links.retain(|_, link| !link.check_stale(now));
+        let closed_count = prev_links - self.links.len();
 
         // Expire timed-out receipts
         self.receipts.tick(now);
 
         // Expire stale channel receipts
-        let mut expired_cr = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], 32>::new();
-        for (hash, cr) in self.channel_receipts.iter() {
-            if now.saturating_sub(cr.sent_at) > RECEIPT_TIMEOUT {
-                let _ = expired_cr.push(*hash);
-            }
-        }
-        for hash in &expired_cr {
-            self.channel_receipts.remove(hash);
-        }
+        self.channel_receipts.retain(|_, cr| now.saturating_sub(cr.sent_at) <= RECEIPT_TIMEOUT);
 
         self.stats.paths_expired += expired_count as u64;
         self.stats.links_closed += closed_count as u64;
@@ -1256,6 +1189,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::announce::PendingAnnounce;
     use crate::link::{compute_link_id, Link};
     use crate::path::Path;
     use rete_core::{
@@ -1263,7 +1197,7 @@ mod tests {
         CONTEXT_KEEPALIVE, CONTEXT_LRPROOF, TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
     };
 
-    type TestTransport = Transport<64, 16, 128, 4>;
+    type TestTransport = Transport<crate::HeaplessStorage<64, 16, 128, 4>>;
 
     #[test]
     fn test_path_expiry() {

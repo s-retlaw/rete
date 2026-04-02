@@ -208,14 +208,12 @@ pub struct NodeStats {
 // NodeCore
 // ---------------------------------------------------------------------------
 
-/// Shared node logic, parameterized by Transport const generics.
-///
-/// `P` = max paths, `A` = max announces, `D` = dedup window size, `L` = max links.
-pub struct NodeCore<const P: usize, const A: usize, const D: usize, const L: usize> {
+/// Shared node logic, generic over [`TransportStorage`](rete_transport::TransportStorage).
+pub struct NodeCore<S: rete_transport::TransportStorage> {
     /// The local identity for this node.
     pub identity: Identity,
     /// Transport state (path table, announce queue, dedup).
-    pub transport: Transport<P, A, D, L>,
+    pub transport: Transport<S>,
     /// Primary destination (addressing metadata, proof strategy, app data).
     pub(super) primary_dest: Destination,
     /// Additional registered destinations (e.g. LXMF delivery).
@@ -287,7 +285,7 @@ pub(super) fn compute_dest_hashes(
     Ok((dest_hash, name_hash))
 }
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
+impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Create a new NodeCore with the given identity and destination.
     pub fn new(
         identity: Identity,
@@ -526,7 +524,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
 
     /// Build a path request packet for a destination.
     pub fn request_path(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> OutboundPacket {
-        let raw = Transport::<P, A, D, L>::build_path_request(dest_hash);
+        let raw = Transport::<S>::build_path_request(dest_hash);
         OutboundPacket::broadcast(raw)
     }
 
@@ -534,7 +532,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     ///
     /// Uses `dest_type=Single` — for non-link (DATA) proofs only.
     pub(super) fn proof_outbound(&self, packet_hash: &[u8; 32]) -> Option<OutboundPacket> {
-        Transport::<P, A, D, L>::build_proof_packet(&self.identity, packet_hash).map(|data| {
+        Transport::<S>::build_proof_packet(&self.identity, packet_hash).map(|data| {
             OutboundPacket {
                 data,
                 routing: PacketRouting::SourceInterface,
@@ -551,7 +549,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
         packet_hash: &[u8; 32],
         link_id: &[u8; TRUNCATED_HASH_LEN],
     ) -> Option<OutboundPacket> {
-        Transport::<P, A, D, L>::build_link_proof_packet(&self.identity, packet_hash, link_id).map(
+        Transport::<S>::build_link_proof_packet(&self.identity, packet_hash, link_id).map(
             |data| OutboundPacket {
                 data,
                 routing: PacketRouting::SourceInterface,
@@ -696,21 +694,19 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
     }
 }
 
-/// Hosted node core (generous memory for desktop/gateway).
-pub type HostedNodeCore = NodeCore<
-    { rete_transport::HOSTED_MAX_PATHS },
-    { rete_transport::HOSTED_MAX_ANNOUNCES },
-    { rete_transport::HOSTED_DEDUP_WINDOW },
-    { rete_transport::HOSTED_MAX_LINKS },
+/// Embedded node core (conservative memory for MCUs, fixed-size heapless storage).
+pub type EmbeddedNodeCore = NodeCore<
+    rete_transport::HeaplessStorage<
+        { rete_transport::EMBEDDED_MAX_PATHS },
+        { rete_transport::EMBEDDED_MAX_ANNOUNCES },
+        { rete_transport::EMBEDDED_DEDUP_WINDOW },
+        { rete_transport::EMBEDDED_MAX_LINKS },
+    >,
 >;
 
-/// Embedded node core (conservative memory for MCUs).
-pub type EmbeddedNodeCore = NodeCore<
-    { rete_transport::EMBEDDED_MAX_PATHS },
-    { rete_transport::EMBEDDED_MAX_ANNOUNCES },
-    { rete_transport::EMBEDDED_DEDUP_WINDOW },
-    { rete_transport::EMBEDDED_MAX_LINKS },
->;
+/// Hosted node core (generous memory for desktop/gateway, heap-allocated).
+#[cfg(feature = "hosted")]
+pub type HostedNodeCore = NodeCore<rete_transport::StdStorage>;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -722,7 +718,7 @@ mod tests {
     use alloc::vec;
     use rete_core::{HeaderType, Packet, PacketType, TRANSPORT_TYPE_TRANSPORT};
 
-    type TestNodeCore = NodeCore<64, 16, 128, 4>;
+    type TestNodeCore = NodeCore<rete_transport::HeaplessStorage<64, 16, 128, 4>>;
 
     fn make_core(seed: &[u8]) -> TestNodeCore {
         let identity = Identity::from_seed(seed).unwrap();
@@ -1703,7 +1699,7 @@ mod tests {
     fn test_queue_announce_when_full() {
         // Queue announces until the transport queue is full, then verify
         // the next queue attempt handles gracefully.
-        type SmallNodeCore = NodeCore<64, 4, 128, 4>; // only 4 announce slots
+        type SmallNodeCore = NodeCore<rete_transport::HeaplessStorage<64, 4, 128, 4>>; // only 4 announce slots
         let identity = Identity::from_seed(b"queue-full-test").unwrap();
         let mut core = SmallNodeCore::new(identity, "testapp", &["aspect1"]).unwrap();
         let mut rng = rand::thread_rng();

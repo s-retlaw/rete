@@ -4,7 +4,7 @@ use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN};
 use rete_transport::{IngestResult, Transport, PATH_REQUEST_DEST};
 
 /// Small transport suitable for tests.
-type TestTransport = Transport<64, 16, 128, 4>;
+type TestTransport = Transport<rete_transport::HeaplessStorage<64, 16, 128, 4>>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,7 +38,7 @@ fn path_request_known_dest_queues_announce() {
     let mut rng = rand::thread_rng();
     let mut buf = [0u8; MTU];
     let identity = Identity::from_seed(b"test-identity").unwrap();
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -121,7 +121,7 @@ fn cached_announce_stored_on_path_learn() {
 
     let mut buf = [0u8; MTU];
     let identity = Identity::from_seed(b"test-identity").unwrap();
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],

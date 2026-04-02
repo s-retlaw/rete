@@ -1,6 +1,7 @@
 //! Link lifecycle, handshake, keepalives, close.
 
 use crate::link::{compute_link_id, Link};
+use crate::storage::StorageMap;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
     DestType, Identity, PacketBuilder, PacketType, CONTEXT_CHANNEL, CONTEXT_KEEPALIVE,
@@ -11,7 +12,7 @@ use rete_core::{
 
 use super::{ChannelReceipt, IngestResult, SendError, Transport};
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P, A, D, L> {
+impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Look up an active link by link_id.
     pub fn get_link(&self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> Option<&Link> {
         self.links.get(link_id)
@@ -579,13 +580,12 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         rng: &mut R,
     ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
         let mut packets = alloc::vec::Vec::new();
-        let mut teardown_links = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], L>::new();
+        let mut teardown_links = alloc::vec::Vec::<[u8; TRUNCATED_HASH_LEN]>::new();
 
-        // Collect link_ids with channels first (heapless to avoid heap alloc on MCU)
-        let mut link_ids = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], L>::new();
+        let mut link_ids = alloc::vec::Vec::<[u8; TRUNCATED_HASH_LEN]>::new();
         for (lid, l) in self.links.iter() {
             if l.channel.is_some() && l.is_active() {
-                let _ = link_ids.push(*lid);
+                link_ids.push(*lid);
             }
         }
 
@@ -600,7 +600,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
             };
             let retransmits = channel.pending_retransmit(now);
             if channel.teardown {
-                let _ = teardown_links.push(lid);
+                teardown_links.push(lid);
                 continue;
             }
             for envelope_bytes in retransmits {
@@ -634,11 +634,10 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P
         now: u64,
         rng: &mut R,
     ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
-        // Collect link_ids that need keepalive first (heapless to avoid heap alloc on MCU)
-        let mut need_ka = heapless::Vec::<[u8; TRUNCATED_HASH_LEN], L>::new();
+        let mut need_ka = alloc::vec::Vec::<[u8; TRUNCATED_HASH_LEN]>::new();
         for (lid, link) in self.links.iter() {
             if link.needs_keepalive(now) {
-                let _ = need_ka.push(*lid);
+                need_ka.push(*lid);
             }
         }
 

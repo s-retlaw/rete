@@ -14,7 +14,7 @@ use crate::{NodeEvent, ProofStrategy, ResourceStrategy};
 
 use super::{IngestOutcome, NodeCore, OutboundPacket, PacketRouting, SplitRecvEntry};
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
+impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Process an inbound raw packet and return the outcome.
     ///
     /// The runtime loop dispatches packets based on `IngestOutcome.packets`

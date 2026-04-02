@@ -267,10 +267,12 @@ pub use destination::{Destination, DestinationType, Direction};
 
 #[cfg(feature = "alloc")]
 pub use node_core::{
-    EmbeddedNodeCore, HostedNodeCore, IngestOutcome, NodeCore, NodeStats, OutboundPacket,
+    EmbeddedNodeCore, IngestOutcome, NodeCore, NodeStats, OutboundPacket,
     PacketRouting, ProveAppFn, RequestContext, RequestHandler, RequestHandlerFn, RequestPolicy,
     ResponseCompressionPolicy,
 };
+#[cfg(all(feature = "alloc", feature = "hosted"))]
+pub use node_core::HostedNodeCore;
 #[cfg(feature = "alloc")]
 pub use node_core::ratchet::{InMemoryRatchetStore, RatchetStore};
 

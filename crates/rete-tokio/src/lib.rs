@@ -138,9 +138,6 @@ pub struct TokioNode {
 
 impl TokioNode {
     /// Create a new node with the given identity and destination.
-    ///
-    /// **Note:** `HostedNodeCore` is ~600 KB. Prefer [`new_boxed`](Self::new_boxed)
-    /// in contexts where stack space is limited.
     pub fn new(
         identity: Identity,
         app_name: &str,
@@ -152,8 +149,7 @@ impl TokioNode {
         })
     }
 
-    /// Heap-allocate a new node, avoiding stack overflow from the large
-    /// `HostedNodeCore` (~600 KB).
+    /// Heap-allocate a new node (convenience for `Box::new(TokioNode::new(...))`).
     pub fn new_boxed(
         identity: Identity,
         app_name: &str,

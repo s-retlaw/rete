@@ -30,9 +30,9 @@ impl<S: MessageStore> LxmfRouter<S> {
     ///
     /// Returns the outbound packet, or None if the recipient's identity
     /// is not cached (announce not yet received).
-    pub fn send_opportunistic<R, const P: usize, const A: usize, const D: usize, const L: usize>(
+    pub fn send_opportunistic<R, TS: rete_transport::TransportStorage>(
         &self,
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         msg: &LXMessage,
         rng: &mut R,
         now: u64,
@@ -78,9 +78,9 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Send an LXMF message directly via Resource over a Link.
     ///
     /// Returns the outbound resource advertisement packet.
-    pub fn send_direct<R, const P: usize, const A: usize, const D: usize, const L: usize>(
+    pub fn send_direct<R, TS: rete_transport::TransportStorage>(
         &self,
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         msg: &LXMessage,
         rng: &mut R,

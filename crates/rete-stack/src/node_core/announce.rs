@@ -8,7 +8,7 @@ use rete_transport::{PendingAnnounce, Transport};
 
 use super::{NodeCore, OutboundPacket};
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P, A, D, L> {
+impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Build and return a raw announce packet for this node.
     pub fn build_announce<R: RngCore + CryptoRng>(
         &self,
@@ -27,7 +27,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .ratchet_store
             .as_ref()
             .and_then(|s| s.local_ratchet_public());
-        let n = Transport::<P, A, D, L>::create_announce(
+        let n = Transport::<S>::create_announce(
             &self.identity,
             &self.primary_dest.app_name,
             &aspects_refs,
@@ -85,7 +85,7 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> NodeCore<P,
             .as_ref()
             .and_then(|s| s.local_ratchet_public());
         let mut buf = [0u8; MTU];
-        let n = match Transport::<P, A, D, L>::create_announce(
+        let n = match Transport::<S>::create_announce(
             &self.identity,
             &dest.app_name,
             &aspects_refs,

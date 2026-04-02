@@ -2,11 +2,12 @@
 
 use crate::path::Path;
 use crate::snapshot;
+use crate::storage::StorageMap;
 use rete_core::TRUNCATED_HASH_LEN;
 
 use super::Transport;
 
-impl<const P: usize, const A: usize, const D: usize, const L: usize> Transport<P, A, D, L> {
+impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Look up a learned path to `dest`.
     pub fn get_path(&self, dest: &[u8; TRUNCATED_HASH_LEN]) -> Option<&Path> {
         self.paths.get(dest)

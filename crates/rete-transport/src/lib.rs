@@ -22,6 +22,9 @@ pub mod receipt;
 pub mod request;
 pub mod resource;
 pub mod snapshot;
+pub mod storage;
+#[cfg(feature = "hosted")]
+pub mod storage_std;
 pub mod transport;
 
 pub use announce::{
@@ -48,9 +51,14 @@ pub use resource::{
     HASHMAP_MAX_LEN_DEFAULT,
 };
 pub use snapshot::{IdentityEntry, PathEntry, Snapshot, SnapshotDetail, SnapshotStore};
+pub use storage::{
+    HeaplessStorage, StorageDeque, StorageMap, TransportStorage,
+};
+#[cfg(feature = "hosted")]
+pub use storage_std::StdStorage;
 pub use transport::{
-    IngestResult, ReverseEntry, SendError, TickResult, Transport, TransportStats,
-    PATH_REQUEST_DEST, RECEIPT_TIMEOUT, REVERSE_TIMEOUT,
+    AnnounceRateEntry, IngestResult, ReverseEntry, SendError, TickResult, Transport,
+    TransportStats, PATH_REQUEST_DEST, RECEIPT_TIMEOUT, REVERSE_TIMEOUT,
 };
 
 // ---------------------------------------------------------------------------
@@ -75,17 +83,19 @@ pub const HOSTED_DEDUP_WINDOW: usize = 4096;
 /// Hosted: max concurrent link sessions.
 pub const HOSTED_MAX_LINKS: usize = 32;
 
-/// Transport for embedded targets (conservative memory).
+/// Transport for embedded targets (conservative memory, fixed-size).
 pub type EmbeddedTransport = Transport<
-    EMBEDDED_MAX_PATHS,
-    EMBEDDED_MAX_ANNOUNCES,
-    EMBEDDED_DEDUP_WINDOW,
-    EMBEDDED_MAX_LINKS,
+    HeaplessStorage<
+        EMBEDDED_MAX_PATHS,
+        EMBEDDED_MAX_ANNOUNCES,
+        EMBEDDED_DEDUP_WINDOW,
+        EMBEDDED_MAX_LINKS,
+    >,
 >;
 
-/// Transport for hosted/gateway targets.
-pub type HostedTransport =
-    Transport<HOSTED_MAX_PATHS, HOSTED_MAX_ANNOUNCES, HOSTED_DEDUP_WINDOW, HOSTED_MAX_LINKS>;
+/// Transport for hosted/gateway targets (heap-allocated, growable).
+#[cfg(feature = "hosted")]
+pub type HostedTransport = Transport<storage_std::StdStorage>;
 
 /// Default announce interval in seconds.
 pub const ANNOUNCE_INTERVAL_SECS: u64 = 300;

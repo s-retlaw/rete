@@ -33,7 +33,7 @@ fn make_node(seed: &[u8]) -> EmbassyNode {
 fn build_announce(identity: &Identity) -> Vec<u8> {
     let mut rng = rand::thread_rng();
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = rete_transport::EmbeddedTransport::create_announce(
         identity,
         "testapp",
         &["aspect1"],

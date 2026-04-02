@@ -226,8 +226,8 @@ impl LxmfRouter<InMemoryMessageStore> {
     /// Creates a router with the default in-memory message store.
     /// Sets ProveAll strategy on the delivery destination (LXMF expects
     /// delivery proofs).
-    pub fn register<const P: usize, const A: usize, const D: usize, const L: usize>(
-        core: &mut NodeCore<P, A, D, L>,
+    pub fn register<TS: rete_transport::TransportStorage>(
+        core: &mut NodeCore<TS>,
     ) -> Self {
         Self::register_with_store(core)
     }
@@ -238,8 +238,8 @@ impl<S: MessageStore> LxmfRouter<S> {
     ///
     /// Sets ProveAll strategy on the delivery destination (LXMF expects
     /// delivery proofs).
-    pub fn register_with_store<const P: usize, const A: usize, const D: usize, const L: usize>(
-        core: &mut NodeCore<P, A, D, L>,
+    pub fn register_with_store<TS: rete_transport::TransportStorage>(
+        core: &mut NodeCore<TS>,
     ) -> Self
     where
         S: Default,
@@ -302,13 +302,10 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Queue an LXMF delivery announce.
     pub fn queue_delivery_announce<
         R,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &self,
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
     ) -> bool
@@ -337,7 +334,7 @@ mod tests {
 
     // Use the concrete type alias for static method calls in tests.
     type Router = DefaultLxmfRouter;
-    type TestNodeCore = NodeCore<64, 16, 128, 4>;
+    type TestNodeCore = NodeCore<rete_transport::HeaplessStorage<64, 16, 128, 4>>;
 
     fn make_core(seed: &[u8]) -> TestNodeCore {
         let identity = Identity::from_seed(seed).unwrap();

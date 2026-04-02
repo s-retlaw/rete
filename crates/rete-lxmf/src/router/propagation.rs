@@ -17,9 +17,9 @@ impl<S: MessageStore> LxmfRouter<S> {
     ///
     /// Creates a SINGLE destination (identity-bound) for `lxmf.propagation`,
     /// sets ProveAll, and initializes the message store using `S::default()`.
-    pub fn register_propagation<const P: usize, const A: usize, const D: usize, const L: usize>(
+    pub fn register_propagation<TS: rete_transport::TransportStorage>(
         &mut self,
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
     ) where
         S: Default,
     {
@@ -28,13 +28,10 @@ impl<S: MessageStore> LxmfRouter<S> {
 
     /// Register an `lxmf.propagation` destination with a specific store instance.
     pub fn register_propagation_with_store<
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         store: S,
     ) {
         let dest_hash = core
@@ -72,13 +69,10 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Returns false if propagation is not enabled.
     pub fn queue_propagation_announce<
         R,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &self,
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
     ) -> bool
@@ -238,15 +232,12 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Returns the outbound packets (resource advertisement).
     pub fn start_retrieval_send<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         message_hashes: Vec<[u8; 32]>,
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
     ) -> Vec<super::OutboundPacket> {
         use super::RetrievalJob;
@@ -271,15 +262,12 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Marks the delivered message and sends the next one, or cleans up if done.
     pub fn advance_retrieval_on_resource_complete<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         _resource_hash: &[u8; TRUNCATED_HASH_LEN],
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
     ) -> Vec<super::OutboundPacket> {
         use super::RetrievalJob;

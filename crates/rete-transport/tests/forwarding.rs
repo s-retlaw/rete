@@ -22,7 +22,7 @@ fn build_header1_proof(dest_hash: &[u8; TRUNCATED_HASH_LEN], payload: &[u8]) -> 
 }
 
 /// Small transport suitable for tests.
-type TestTransport = Transport<64, 16, 128, 4>;
+type TestTransport = Transport<rete_transport::HeaplessStorage<64, 16, 128, 4>>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -399,7 +399,7 @@ fn announce_replay_same_random_hash_rejected() {
 
     // Create an announce
     let mut buf1 = [0u8; MTU];
-    let n1 = Transport::<64, 16, 128, 4>::create_announce(
+    let n1 = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -462,7 +462,7 @@ fn announce_different_random_hash_accepted() {
 
     // Create first announce
     let mut buf1 = [0u8; MTU];
-    let n1 = Transport::<64, 16, 128, 4>::create_announce(
+    let n1 = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -481,7 +481,7 @@ fn announce_different_random_hash_accepted() {
 
     // Create second announce (different random_hash due to different rng state + time)
     let mut buf2 = [0u8; MTU];
-    let n2 = Transport::<64, 16, 128, 4>::create_announce(
+    let n2 = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -600,7 +600,7 @@ fn header1_announce_still_works_with_identity_set() {
     let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -665,7 +665,7 @@ fn self_announce_filtered() {
 
     // Create an announce for this identity
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -699,7 +699,7 @@ fn self_announce_no_path_stored() {
     t.add_local_destination(dest_hash);
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -735,7 +735,7 @@ fn self_announce_no_retransmission() {
     t.add_local_destination(dest_hash);
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -774,7 +774,7 @@ fn foreign_announce_still_accepted() {
 
     // Create announce from a different identity
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -891,7 +891,7 @@ fn announce_rebroadcast_as_header2_when_transport() {
     let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -938,7 +938,7 @@ fn announce_rebroadcast_keeps_header1_without_transport() {
     let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],
@@ -977,7 +977,7 @@ fn rebroadcast_hops_preserved() {
     let identity = Identity::from_seed(b"test-identity").unwrap();
 
     let mut buf = [0u8; MTU];
-    let n = Transport::<64, 16, 128, 4>::create_announce(
+    let n = TestTransport::create_announce(
         &announcer,
         "testapp",
         &["aspect1"],

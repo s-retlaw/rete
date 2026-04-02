@@ -9,7 +9,7 @@ use rete_core::{
 };
 use rete_transport::{compute_link_id, IngestResult, Link, LinkState, Transport};
 
-type TestTransport = Transport<64, 16, 128, 4>;
+type TestTransport = Transport<rete_transport::HeaplessStorage<64, 16, 128, 4>>;
 
 // ---------------------------------------------------------------------------
 // Helpers

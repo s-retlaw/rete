@@ -10,8 +10,8 @@ categories.workspace = true
 
 [dependencies]
 rete-core      = { workspace = true }
-rete-transport = { workspace = true }
-rete-stack     = { workspace = true }
+rete-transport = { workspace = true, features = ["hosted"] }
+rete-stack     = { workspace = true, features = ["hosted"] }
 tokio          = { workspace = true }
 rand_core      = { version = "0.6", features = ["std"] }
 rand           = "0.8"

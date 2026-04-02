@@ -32,14 +32,11 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// - no path to the destination (identity not cached)
     pub fn start_propagation_forward<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
         dest_hash: &[u8; TRUNCATED_HASH_LEN],
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
     ) -> Option<(OutboundPacket, [u8; TRUNCATED_HASH_LEN])> {
@@ -64,14 +61,11 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Transitions from Linking -> Sending and sends the first Resource.
     pub fn advance_forward_on_link_established<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
         // Find the Linking job for this link_id
@@ -117,15 +111,12 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Marks the delivered message and sends the next one, or cleans up if done.
     pub fn advance_forward_on_resource_complete<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &mut self,
         link_id: &[u8; TRUNCATED_HASH_LEN],
         _resource_hash: &[u8; TRUNCATED_HASH_LEN],
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
         // Find the Sending job for this link_id
@@ -170,15 +161,12 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Look up a stored message by hash and send it as a bz2-compressed Resource.
     pub(super) fn send_stored_message_resource<
         R: rand_core::RngCore + rand_core::CryptoRng,
-        const P: usize,
-        const A: usize,
-        const D: usize,
-        const L: usize,
+        TS: rete_transport::TransportStorage,
     >(
         &self,
         message_hash: &[u8; 32],
         link_id: &[u8; TRUNCATED_HASH_LEN],
-        core: &mut NodeCore<P, A, D, L>,
+        core: &mut NodeCore<TS>,
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
         let prop = match &self.propagation {
