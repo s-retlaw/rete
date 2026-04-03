@@ -12,7 +12,7 @@ pub use rete_lxmf_core::stamp;
 
 pub use rete_lxmf_core::message::{
     DeliveryMethod, LXMessage, LXMessageState, FIELD_AUDIO, FIELD_COMMANDS, FIELD_EMBEDDED_LXMS,
-    FIELD_FILE_ATTACHMENTS, FIELD_IMAGE, FIELD_TELEMETRY, FIELD_THREAD,
+    FIELD_FILE_ATTACHMENTS, FIELD_IMAGE, FIELD_TELEMETRY, FIELD_THREAD, FIELD_TICKET,
 };
 
 #[cfg(feature = "router")]

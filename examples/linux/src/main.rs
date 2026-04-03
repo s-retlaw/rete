@@ -870,6 +870,23 @@ async fn main() {
         eprintln!("[rete] LXMF delivery announce queued");
     }
 
+    // --lxmf-stamp-cost <N>: set inbound stamp cost
+    let stamp_cost = args
+        .windows(2)
+        .find(|w| w[0] == "--lxmf-stamp-cost")
+        .and_then(|w| w[1].parse::<u8>().ok());
+    if let Some(cost) = stamp_cost {
+        lxmf_router.set_inbound_stamp_cost(Some(cost));
+        eprintln!("[rete] LXMF inbound stamp cost set to {cost}");
+    }
+
+    // --lxmf-enforce-stamps: reject messages with invalid stamps
+    let enforce_stamps = args.iter().any(|a| a == "--lxmf-enforce-stamps");
+    if enforce_stamps {
+        lxmf_router.set_enforce_stamps(true);
+        eprintln!("[rete] LXMF stamp enforcement enabled");
+    }
+
     // --autopeer: enable auto-peering with propagation nodes
     let autopeer_enabled = args.iter().any(|a| a == "--autopeer");
     if autopeer_enabled {
@@ -1391,6 +1408,15 @@ fn on_event(
             let _ = stats_tx.send(Some(stats));
         }
 
+        // Process outbound message queue (delivery events are emitted
+        // via handle_event_mut when ProofReceived arrives, not here)
+        let (out_pkts, _out_events) = lxmf_router
+            .borrow_mut()
+            .process_outbound(core, rng, now);
+        if !out_pkts.is_empty() {
+            return out_pkts;
+        }
+
         // Check peer syncs
         let sync_pkts = lxmf_router.borrow_mut().check_peer_syncs(core, rng, now);
         if !sync_pkts.is_empty() {
@@ -1565,6 +1591,18 @@ fn on_event(
                 return vec![pkt];
             }
         }
+        LxmfEvent::MessageDelivered { message_hash, dest_hash } => {
+            println!("LXMF_DELIVERED:{}:{}", hex::encode(&message_hash[..8]), hex::encode(dest_hash));
+            eprintln!("[lxmf] message delivered: hash={}, dest={}", hex::encode(&message_hash[..8]), hex::encode(dest_hash));
+        }
+        LxmfEvent::MessageFailed { message_hash, dest_hash } => {
+            println!("LXMF_FAILED:{}:{}", hex::encode(&message_hash[..8]), hex::encode(dest_hash));
+            eprintln!("[lxmf] message failed: hash={}, dest={}", hex::encode(&message_hash[..8]), hex::encode(dest_hash));
+        }
+        LxmfEvent::MessageRejectedStamp { source_hash, message_hash } => {
+            println!("LXMF_REJECTED_STAMP:{}:{}", hex::encode(source_hash), hex::encode(&message_hash[..8]));
+            eprintln!("[lxmf] message rejected (invalid stamp): source={}, hash={}", hex::encode(source_hash), hex::encode(&message_hash[..8]));
+        }
         LxmfEvent::Other(event) => {
             // Check if this is a link event that advances a forward or sync job
             match &event {
@@ -1580,6 +1618,19 @@ fn on_event(
                             pkts.len(),
                         );
                         println!("PROP_FORWARD_SENDING:{}", hex::encode(link_id));
+                        on_node_event(event);
+                        return pkts;
+                    }
+
+                    // Try outbound direct jobs
+                    let pkts = lxmf_router
+                        .borrow_mut()
+                        .advance_outbound_on_link_established(link_id, core, rng);
+                    if !pkts.is_empty() {
+                        eprintln!(
+                            "[rete] LXMF_OUTBOUND_SENDING link={}",
+                            hex::encode(link_id),
+                        );
                         on_node_event(event);
                         return pkts;
                     }
@@ -2031,7 +2082,7 @@ fn handle_lxmf_command(
                 return None;
             };
             let now_secs = rete_tokio::current_time_secs();
-            let router = lxmf_router.borrow();
+            let mut router = lxmf_router.borrow_mut();
             let source_hash = *router.delivery_dest_hash();
             let msg = match LXMessage::new(
                 dest_hash,
@@ -2049,20 +2100,17 @@ fn handle_lxmf_command(
                 }
             };
 
-            match router.send_opportunistic(core, &msg, rng, now_secs) {
-                Some(pkt) => {
-                    eprintln!("[rete] LXMF sent to {}", hex::encode(dest_hash));
-                    println!("LXMF_SENT:{}", hex::encode(dest_hash));
-                    Some(vec![pkt])
-                }
-                None => {
-                    eprintln!(
-                        "[rete] lxmf-send: failed to send (unknown dest {})",
-                        hex::encode(dest_hash)
-                    );
-                    None
-                }
-            }
+            let message_hash = router.handle_outbound(msg, now_secs, rng);
+            eprintln!(
+                "[rete] LXMF queued for {} (hash={})",
+                hex::encode(dest_hash),
+                hex::encode(&message_hash[..8])
+            );
+            println!("LXMF_SENT:{}", hex::encode(dest_hash));
+            use std::io::Write as _;
+            std::io::stdout().flush().ok();
+            // The actual send happens in process_outbound on next tick
+            None
         }
         "lxmf-announce" => {
             let now = rete_tokio::current_time_secs();

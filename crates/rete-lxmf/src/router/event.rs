@@ -5,7 +5,7 @@ use rete_stack::NodeEvent;
 
 use crate::peer::{LxmPeer, SyncStrategy};
 use crate::propagation::MessageStore;
-use crate::DeliveryMethod;
+use crate::{DeliveryMethod, LXMessage, FIELD_TICKET};
 
 use super::codec::{parse_lxmf_announce_data, try_parse_lxmf_announce_data};
 use super::{LxmfEvent, LxmfRouter};
@@ -30,36 +30,23 @@ impl<S: MessageStore> LxmfRouter<S> {
                 ref payload,
             } => {
                 if let Some(msg) = self.try_parse_lxmf(&dest_hash, payload) {
-                    LxmfEvent::MessageReceived {
-                        message: msg,
-                        method: DeliveryMethod::Opportunistic,
-                    }
+                    // now=0: ticket expiry not checked in immutable path.
+                    // Use handle_event_mut for correct ticket expiry.
+                    self.validate_and_emit(msg, DeliveryMethod::Opportunistic, 0)
                 } else {
                     LxmfEvent::Other(event)
                 }
             }
             NodeEvent::LinkData { ref data, .. } => {
-                // Direct delivery: small LXMF messages are sent as link data.
-                // The data is the full packed LXMF message (same format as resource).
                 if let Some(msg) = Self::try_parse_lxmf_resource(data) {
-                    LxmfEvent::MessageReceived {
-                        message: msg,
-                        method: DeliveryMethod::Direct,
-                    }
+                    self.validate_and_emit(msg, DeliveryMethod::Direct, 0)
                 } else {
                     LxmfEvent::Other(event)
                 }
             }
             NodeEvent::ResourceComplete { ref data, .. } => {
-                // Direct delivery: large LXMF messages are sent as resources.
-                // Note: Python LXMF compresses resource data with bz2. The example
-                // binary decompresses ResourceComplete data before it reaches here.
-                // If you call handle_event() directly, decompress first.
                 if let Some(msg) = Self::try_parse_lxmf_resource(data) {
-                    LxmfEvent::MessageReceived {
-                        message: msg,
-                        method: DeliveryMethod::Direct,
-                    }
+                    self.validate_and_emit(msg, DeliveryMethod::Direct, 0)
                 } else {
                     LxmfEvent::Other(event)
                 }
@@ -175,7 +162,122 @@ impl<S: MessageStore> LxmfRouter<S> {
             }
         }
 
-        // Fall through to immutable handling
-        self.handle_event(event)
+        // Check ProofReceived for delivery receipt correlation
+        if let NodeEvent::ProofReceived { packet_hash } = &event {
+            if let Some(receipt_event) = self.check_delivery_receipt(packet_hash) {
+                return receipt_event;
+            }
+        }
+
+        // Check LinkClosed for outbound direct job cleanup
+        if let NodeEvent::LinkClosed { link_id } = &event {
+            self.cleanup_outbound_jobs_for_link(link_id);
+        }
+
+        // For AnnounceReceived: update outbound stamp cost cache
+        if let NodeEvent::AnnounceReceived {
+            dest_hash,
+            ref app_data,
+            ..
+        } = event
+        {
+            if let Some(ref data) = app_data {
+                if let Some(parsed) = parse_lxmf_announce_data(data) {
+                    if let Some(cost) = parsed.stamp_cost {
+                        self.outbound_stamp_costs.insert(dest_hash, (now, cost));
+                    }
+                }
+            }
+        }
+
+        // For ResourceComplete on outbound direct links: check for delivery
+        if let NodeEvent::ResourceComplete { link_id, .. } = &event {
+            self.advance_outbound_on_resource_complete(link_id);
+        }
+
+        // Fall through to immutable handling — but use now for stamp validation
+        let lxmf_event = self.handle_event_with_now(event, now);
+
+        // If an inbound message was accepted, extract tickets from it
+        if let LxmfEvent::MessageReceived { ref message, .. } = lxmf_event {
+            self.extract_and_store_ticket(message);
+        }
+
+        lxmf_event
+    }
+
+    /// Like `handle_event` but with `now` for correct ticket expiry checking.
+    fn handle_event_with_now(&self, event: NodeEvent, now: u64) -> LxmfEvent {
+        match event {
+            NodeEvent::DataReceived {
+                dest_hash,
+                ref payload,
+            } => {
+                if let Some(msg) = self.try_parse_lxmf(&dest_hash, payload) {
+                    self.validate_and_emit(msg, DeliveryMethod::Opportunistic, now)
+                } else {
+                    LxmfEvent::Other(event)
+                }
+            }
+            NodeEvent::LinkData { ref data, .. } => {
+                if let Some(msg) = Self::try_parse_lxmf_resource(data) {
+                    self.validate_and_emit(msg, DeliveryMethod::Direct, now)
+                } else {
+                    LxmfEvent::Other(event)
+                }
+            }
+            NodeEvent::ResourceComplete { ref data, .. } => {
+                if let Some(msg) = Self::try_parse_lxmf_resource(data) {
+                    self.validate_and_emit(msg, DeliveryMethod::Direct, now)
+                } else {
+                    LxmfEvent::Other(event)
+                }
+            }
+            _ => self.handle_event(event),
+        }
+    }
+
+    /// Validate inbound stamp and emit appropriate event.
+    fn validate_and_emit(&self, msg: LXMessage, method: DeliveryMethod, now: u64) -> LxmfEvent {
+        if let Some(cost) = self.inbound_stamp_cost {
+            if cost > 0 {
+                let tickets = self.tickets.get_inbound_tickets(&msg.source_hash, now);
+                if !msg.validate_stamp(cost, &tickets) && self.enforce_stamps {
+                    let message_hash = msg.hash();
+                    return LxmfEvent::MessageRejectedStamp {
+                        source_hash: msg.source_hash,
+                        message_hash,
+                    };
+                }
+            }
+        }
+        LxmfEvent::MessageReceived {
+            message: msg,
+            method,
+        }
+    }
+
+    /// Extract ticket from a received message's fields and store it.
+    fn extract_and_store_ticket(&mut self, msg: &LXMessage) {
+        if let Some(ticket_data) = msg.fields.get(&FIELD_TICKET) {
+            // Ticket field format: msgpack [expires_timestamp, ticket_bytes]
+            let mut pos = 0;
+            if let Ok(arr_len) = rete_core::msgpack::read_array_len(ticket_data, &mut pos) {
+                if arr_len >= 2 {
+                    if let Ok(expires) = rete_core::msgpack::read_uint(ticket_data, &mut pos) {
+                        if let Ok(ticket_bytes) =
+                            rete_core::msgpack::read_bin_or_str(ticket_data, &mut pos)
+                        {
+                            if ticket_bytes.len() >= 2 {
+                                let mut ticket = [0u8; 2];
+                                ticket.copy_from_slice(&ticket_bytes[..2]);
+                                self.tickets
+                                    .store_outbound(msg.source_hash, ticket, expires);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

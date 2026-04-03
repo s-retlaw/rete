@@ -12,7 +12,7 @@ Created: 2026-04-02
 | 3 | Storage arch (heapless for hosted) | P1 | ✅ DONE | TransportStorage trait; HeaplessStorage + StdStorage backends |
 | 4 | Destination/NodeCore modeling | P1 | ✅ DONE | `destination_hashes()` canonical; `decrypt_with_identity()` on Destination |
 | 5 | Request/Resource lifecycle parity | P1 | ✅ DONE | PendingRequest tracking, timeout, large req/resp as resource |
-| 6 | LxmfRouter narrower than upstream | P1 | TODO | No outbound queue, retry, or receipt tracking |
+| 6 | LxmfRouter narrower than upstream | P1 | ✅ DONE | Outbound queue, retry, receipts, stamps, tickets |
 | 7 | Portable LXMF boundary half-finished | P1 | TODO | Lower priority — RNode doesn't need rete-lxmf |
 | 8 | Error handling (stringly-typed) | P2 | TODO | Resource + LXMF still use `&'static str` errors |
 | 9 | Callbacks too narrow (fn pointers) | P2 | TODO | Can't capture state; need trait-based hooks |
@@ -200,37 +200,48 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 ## 6. LxmfRouter Narrower Than Upstream
 
 **Priority:** P1 — only relevant for hosted nodes, not RNode
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-02)
 
-### Problem
+### Solution
 
-The Rust `LxmfRouter` handles some delivery/propagation flows but lacks:
-- Outbound message queue
-- Delivery receipt tracking
-- Retry and failure notification
-- `handle_outbound()` workflow
-- Stamp/ticket policy integration (announces hardcode stamp cost 0)
+1. **`OutboundEntry` + `OutboundDirectJob`** — state machine for outbound messages with retry tracking (`OutboundState`: Queued, Sending, Delivered, Failed).
+
+2. **`handle_outbound(message, now, rng)`** — queues a message with dedup, auto-assigns stamp cost from announce cache, uses ticket if available, includes reply ticket in message fields.
+
+3. **`process_outbound(core, rng, now)`** — called each tick. Attempts opportunistic delivery, initiates direct links, increments retry count, marks failed after `MAX_DELIVERY_ATTEMPTS=5` with `DELIVERY_RETRY_WAIT=10s`.
+
+4. **Delivery receipt correlation** — `check_delivery_receipt(packet_hash)` matches `ProofReceived` events to outbound entries, emits `MessageDelivered`.
+
+5. **Direct delivery state machine** — `advance_outbound_on_link_established`, `advance_outbound_on_resource_complete`, `cleanup_outbound_jobs_for_link`.
+
+6. **Stamp cost enforcement** — `set_inbound_stamp_cost(cost)`, `set_enforce_stamps(true)`. Announces include cost. Inbound messages validated with `validate_stamp()`. Invalid stamps emit `MessageRejectedStamp`.
+
+7. **Ticket cache** — `TicketCache` with inbound/outbound stores. `generate_ticket()` on outbound, `extract_and_store_ticket()` on inbound. Export/import for persistence.
+
+8. **LXMessage stamp support** — `stamp` field, `generate_stamp(cost)`, `validate_stamp(cost, tickets)`, `message_id()`. Wire format: 5-element msgpack array when stamp present. Signature verification always uses 4-element payload (matching Python).
+
+9. **New `LxmfEvent` variants** — `MessageDelivered`, `MessageFailed`, `MessageRejectedStamp`.
+
+10. **Serialization** — `export_stamp_costs/import_stamp_costs`, `export_tickets/import_tickets`, `export_outbound_queue/import_outbound_queue` for persistence.
 
 ### Key Files
 
-- `crates/rete-lxmf/src/router/mod.rs:188-321` — router core
-- `crates/rete-lxmf/src/router/delivery.rs:15-100` — delivery logic
-- `crates/rete-lxmf/src/router/peering.rs` — peer sync
-- `crates/rete-lxmf-core/src/stamp.rs` — stamp primitives (not integrated into routing)
+- `crates/rete-lxmf-core/src/message.rs` — stamp field, encode/decode, validate, generate, FIELD_TICKET
+- `crates/rete-lxmf/src/router/outbound.rs` — outbound queue, process, receipts, serialization
+- `crates/rete-lxmf/src/router/tickets.rs` — ticket cache
+- `crates/rete-lxmf/src/router/codec.rs` — stamp_cost in LxmfAnnounceData
+- `crates/rete-lxmf/src/router/event.rs` — stamp enforcement, receipt wiring, ticket extraction
+- `crates/rete-lxmf/src/router/mod.rs` — new fields, events, public methods
 
-### What to Do
+### Verified
 
-1. **Add `OutboundMessage` struct** with status (Queued, Sending, Delivered, Failed) and retry count.
-2. **Add outbound queue** with `handle_outbound(message)` entry point.
-3. **Integrate stamp cost** — use non-zero cost in announces, enforce on inbound.
-4. **Add delivery receipt tracking** — emit events on success/failure.
-
-### Done When
-
-- `handle_outbound()` exists and queues messages
-- Retry on failed delivery works
-- Non-zero stamp cost is respected
-- Existing LXMF interop tests pass
+- All 663 workspace unit tests pass
+- All 9 existing LXMF E2E interop tests pass (57/57 assertions)
+- 3 new E2E interop tests pass:
+  - `lxmf_outbound_interop.py` — Rust sends, Python receives, delivery proof
+  - `lxmf_stamp_interop.py` — stamp cost advertised and enforced
+  - `lxmf_outbound_retry_interop.py` — retry delivers after delayed announce
+- `cargo check -p rete-transport --target thumbv6m-none-eabi` passes (no_std)
 
 ---
 
@@ -438,3 +449,9 @@ Can't capture state. Forces globals or side channels for anything stateful.
 | 2026-04-02 | `start_resource_flagged()` for request/response resources | Flags must be set before `build_advertisement()` serializes them. Added `prepare_and_advertise_segment_ex()` with `is_request`/`is_response` parameters. |
 | 2026-04-02 | `dispatch_request_handler()` extraction | Reused for both single-packet and resource-based requests. Avoids duplicating handler dispatch + compression + MDU check logic. |
 | 2026-04-02 | Response-resource to request matching is FIFO on link | With concurrent requests on one link, `RequestProgress` events could associate with the wrong request. Completion is always correct (response payload contains `request_id`). Fix available: populate the `"q"` field in resource advertisements — wire format already defines it, we just write `nil`. Deferred because concurrent requests per link are rare in practice. |
+| 2026-04-02 | Separate `outbound.rs` and `tickets.rs` from router core | Outbound queue + tickets are orthogonal concerns with their own state machines. Keeps `mod.rs` focused on registration/announce/config. |
+| 2026-04-02 | `handle_outbound` auto-includes reply ticket | Every outbound message includes a `FIELD_TICKET` so the recipient can reply without PoW. Matches Python `include_ticket=True` default. |
+| 2026-04-02 | Signature verification uses re-encoded 4-element payload | Python LXMF signs over 4-element msgpack (without stamp), then appends stamp as 5th element. On unpack, must re-encode 4-element for verification. Critical for stamped message interop. |
+| 2026-04-02 | Ticket cache is in-memory with export/import | Tickets are small (2 bytes each). In-memory HashMap with export/import msgpack serialization for persistence. No trait abstraction — simple enough for direct use. |
+| 2026-04-02 | `process_outbound` in tick, not separate poll | Consistent with `check_peer_syncs()` pattern. Called from the application event loop during tick processing. |
+| 2026-04-02 | Stamp enforcement defaults to off (`enforce_stamps=false`) | Matches Python: stamps are validated but invalid stamps are logged, not rejected, unless enforcement is explicitly enabled. |

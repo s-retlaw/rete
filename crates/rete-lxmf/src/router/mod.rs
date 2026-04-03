@@ -10,8 +10,10 @@ mod codec;
 mod delivery;
 mod event;
 mod forward;
+pub(crate) mod outbound;
 mod peering;
 mod propagation;
+pub(crate) mod tickets;
 
 use std::collections::HashMap;
 
@@ -88,6 +90,27 @@ pub enum LxmfEvent {
         request_id: [u8; TRUNCATED_HASH_LEN],
         /// Response data to send back (msgpack: false/true/[hashes]).
         response_data: Vec<u8>,
+    },
+    /// An outbound message was delivered (proof received).
+    MessageDelivered {
+        /// SHA-256 hash of the delivered message.
+        message_hash: [u8; 32],
+        /// Destination hash of the recipient.
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// An outbound message failed after max delivery attempts.
+    MessageFailed {
+        /// SHA-256 hash of the failed message.
+        message_hash: [u8; 32],
+        /// Destination hash of the intended recipient.
+        dest_hash: [u8; TRUNCATED_HASH_LEN],
+    },
+    /// An inbound message was rejected due to invalid stamp.
+    MessageRejectedStamp {
+        /// Source hash of the rejected sender.
+        source_hash: [u8; TRUNCATED_HASH_LEN],
+        /// SHA-256 hash of the rejected message.
+        message_hash: [u8; 32],
     },
     /// A non-LXMF NodeEvent (pass-through).
     Other(NodeEvent),
@@ -215,6 +238,18 @@ pub struct LxmfRouter<S: MessageStore = InMemoryMessageStore> {
     pub(super) autopeer_maxdepth: u8,
     /// Maximum number of peers (default 20).
     pub(super) max_peers: usize,
+    /// Outbound message queue.
+    pub(super) pending_outbound: Vec<outbound::OutboundEntry>,
+    /// Active outbound direct delivery jobs.
+    pub(super) outbound_direct_jobs: Vec<outbound::OutboundDirectJob>,
+    /// Outbound stamp cost cache: dest_hash → (timestamp_secs, cost).
+    pub(super) outbound_stamp_costs: HashMap<[u8; TRUNCATED_HASH_LEN], (u64, u8)>,
+    /// Our inbound stamp cost (advertised in announces, enforced on receipt).
+    pub(super) inbound_stamp_cost: Option<u8>,
+    /// Whether to enforce stamps on inbound messages (default: false).
+    pub(super) enforce_stamps: bool,
+    /// Ticket cache for stamp bypass.
+    pub(super) tickets: tickets::TicketCache,
 }
 
 /// Type alias for the common in-memory router variant.
@@ -265,6 +300,12 @@ impl<S: MessageStore> LxmfRouter<S> {
             autopeer: false,
             autopeer_maxdepth: 4,
             max_peers: 20,
+            pending_outbound: Vec::new(),
+            outbound_direct_jobs: Vec::new(),
+            outbound_stamp_costs: HashMap::new(),
+            inbound_stamp_cost: None,
+            enforce_stamps: false,
+            tickets: tickets::TicketCache::new(),
         }
     }
 
@@ -282,11 +323,37 @@ impl<S: MessageStore> LxmfRouter<S> {
     // Announce helpers
     // -----------------------------------------------------------------------
 
+    /// Set the inbound stamp cost advertised in announces.
+    ///
+    /// `None` means no stamp required. When set, inbound messages are validated
+    /// against this cost (if `enforce_stamps` is true).
+    pub fn set_inbound_stamp_cost(&mut self, cost: Option<u8>) {
+        self.inbound_stamp_cost = cost;
+    }
+
+    /// Set whether to enforce stamp validation on inbound messages.
+    ///
+    /// When `true`, messages with invalid stamps are rejected with
+    /// `LxmfEvent::MessageRejectedStamp`. When `false` (default), stamps
+    /// are validated but invalid stamps are allowed through.
+    pub fn set_enforce_stamps(&mut self, enforce: bool) {
+        self.enforce_stamps = enforce;
+    }
+
+    /// Get the cached stamp cost for a destination (from their announce).
+    pub fn get_outbound_stamp_cost(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+    ) -> Option<u8> {
+        self.outbound_stamp_costs.get(dest_hash).map(|&(_, c)| c)
+    }
+
     /// Build LXMF announce app_data in the format Python LXMF expects.
     ///
     /// Format: msgpack array `[display_name_bytes, stamp_cost_int]`
     pub fn build_announce_app_data(&self) -> Vec<u8> {
-        self.build_announce_app_data_with_tag(0x00) // stamp_cost = 0
+        let tag = self.inbound_stamp_cost.unwrap_or(0);
+        self.build_announce_app_data_with_tag(tag)
     }
 
     /// Build msgpack announce app_data: `[display_name, tag_byte]`.
@@ -326,7 +393,8 @@ mod tests {
     use super::*;
     use super::codec::{
         decode_offer_hashes, encode_msgpack_uint, encode_offer_hashes, pack_sync_messages,
-        parse_offer_response, try_parse_lxmf_announce_data, unpack_sync_messages,
+        parse_lxmf_announce_data, parse_offer_response, try_parse_lxmf_announce_data,
+        unpack_sync_messages,
     };
     use crate::peer::SyncStrategy;
     use rete_core::Identity;
@@ -675,6 +743,62 @@ mod tests {
     fn test_parse_lxmf_announce_data_garbage() {
         assert!(try_parse_lxmf_announce_data(b"not msgpack").is_none());
         assert!(try_parse_lxmf_announce_data(&[]).is_none());
+    }
+
+    #[test]
+    fn test_parse_announce_extracts_stamp_cost_integer() {
+        let mut data = Vec::new();
+        data.push(0x92); // fixarray of 2
+        data.push(0xc4); // bin8
+        data.push(5); // length
+        data.extend_from_slice(b"Alice");
+        data.push(8); // stamp_cost = 8 (positive fixint)
+
+        let parsed = parse_lxmf_announce_data(&data).unwrap();
+        assert_eq!(parsed.display_name, b"Alice");
+        assert!(!parsed.is_propagation);
+        assert_eq!(parsed.stamp_cost, Some(8));
+    }
+
+    #[test]
+    fn test_parse_announce_zero_cost() {
+        let mut data = Vec::new();
+        data.push(0x92);
+        data.push(0xc4);
+        data.push(3);
+        data.extend_from_slice(b"Bob");
+        data.push(0x00); // stamp_cost = 0
+
+        let parsed = parse_lxmf_announce_data(&data).unwrap();
+        assert_eq!(parsed.stamp_cost, None); // 0 means no cost
+    }
+
+    #[test]
+    fn test_parse_announce_propagation_flag_not_cost() {
+        let mut data = Vec::new();
+        data.push(0x92);
+        data.push(0xc4);
+        data.push(3);
+        data.extend_from_slice(b"PN1");
+        data.push(0xc3); // true = propagation node
+
+        let parsed = parse_lxmf_announce_data(&data).unwrap();
+        assert!(parsed.is_propagation);
+        assert_eq!(parsed.stamp_cost, None);
+    }
+
+    #[test]
+    fn test_parse_announce_nil_tag_no_cost() {
+        let mut data = Vec::new();
+        data.push(0x92);
+        data.push(0xc4);
+        data.push(4);
+        data.extend_from_slice(b"Test");
+        data.push(0xc0); // nil
+
+        let parsed = parse_lxmf_announce_data(&data).unwrap();
+        assert!(!parsed.is_propagation);
+        assert_eq!(parsed.stamp_cost, None);
     }
 
     #[test]

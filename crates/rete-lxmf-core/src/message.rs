@@ -23,6 +23,8 @@ pub const FIELD_IMAGE: u8 = 0x06;
 pub const FIELD_AUDIO: u8 = 0x07;
 /// Thread identifier field.
 pub const FIELD_THREAD: u8 = 0x08;
+/// Ticket field — reply stamp ticket included in message.
+pub const FIELD_TICKET: u8 = 0x0C;
 
 /// LXMF delivery method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +89,8 @@ pub struct LXMessage {
     pub fields: BTreeMap<u8, Vec<u8>>,
     /// Ed25519 signature over dest_hash || source_hash || msgpack_payload.
     pub signature: [u8; 64],
+    /// Proof-of-work stamp (2 bytes), if present.
+    pub stamp: Option<[u8; crate::stamp::STAMP_SIZE]>,
     /// Current message state.
     pub state: LXMessageState,
     /// Delivery method.
@@ -127,15 +131,25 @@ impl LXMessage {
             content: content.to_vec(),
             fields,
             signature,
+            stamp: None,
             state: LXMessageState::New,
             method: DeliveryMethod::Opportunistic,
         })
     }
 
     /// Pack into wire format: dest_hash[16] || source_hash[16] || signature[64] || msgpack_payload
+    ///
+    /// The msgpack payload is a 4-element array `[ts, title, content, fields]` when
+    /// no stamp is set, or a 5-element array `[ts, title, content, fields, stamp]`
+    /// when a stamp is present.
     pub fn pack(&self) -> Vec<u8> {
-        let msgpack_payload =
-            encode_msgpack_payload(self.timestamp, &self.title, &self.content, &self.fields);
+        let msgpack_payload = encode_msgpack_payload_opt_stamp(
+            self.timestamp,
+            &self.title,
+            &self.content,
+            &self.fields,
+            self.stamp.as_ref(),
+        );
         let mut out = Vec::with_capacity(96 + msgpack_payload.len());
         out.extend_from_slice(&self.destination_hash);
         out.extend_from_slice(&self.source_hash);
@@ -148,6 +162,9 @@ impl LXMessage {
     ///
     /// If `verify_identity` is provided, the signature is verified against it.
     /// Otherwise, the signature is stored but not verified.
+    ///
+    /// Handles both 4-element (no stamp) and 5-element (with stamp) payloads.
+    /// Signature is always verified over the 4-element payload, matching Python LXMF.
     pub fn unpack(data: &[u8], verify_identity: Option<&Identity>) -> Result<Self, &'static str> {
         if data.len() < 96 {
             return Err("message too short (need at least 96 bytes)");
@@ -162,16 +179,21 @@ impl LXMessage {
         signature.copy_from_slice(&data[32..96]);
         let msgpack_payload = &data[96..];
 
-        // Verify signature if identity provided
+        // Parse msgpack payload (extracts stamp if present)
+        let (timestamp, title, content, fields, stamp) =
+            decode_msgpack_payload(msgpack_payload)?;
+
+        // Verify signature over the 4-element payload (without stamp).
+        // Python LXMF strips the stamp and re-encodes before verifying.
         if let Some(identity) = verify_identity {
-            let sign_data = build_sign_data(&destination_hash, &source_hash, msgpack_payload);
+            let payload_for_signing =
+                encode_msgpack_payload(timestamp, &title, &content, &fields);
+            let sign_data =
+                build_sign_data(&destination_hash, &source_hash, &payload_for_signing);
             identity
                 .verify(&sign_data, &signature)
                 .map_err(|_| "signature verification failed")?;
         }
-
-        // Parse msgpack payload
-        let (timestamp, title, content, fields) = decode_msgpack_payload(msgpack_payload)?;
 
         Ok(LXMessage {
             destination_hash,
@@ -181,6 +203,7 @@ impl LXMessage {
             content,
             fields,
             signature,
+            stamp,
             state: LXMessageState::New,
             method: DeliveryMethod::Opportunistic,
         })
@@ -202,6 +225,60 @@ impl LXMessage {
     pub fn hash(&self) -> [u8; 32] {
         let packed = self.pack();
         Sha256::digest(&packed).into()
+    }
+
+    /// Compute the message ID used for stamp material.
+    ///
+    /// This is `SHA-256(dest_hash || source_hash || msgpack(4-element-payload))`
+    /// — always computed WITHOUT the stamp, matching Python LXMF.
+    pub fn message_id(&self) -> [u8; 32] {
+        let payload = encode_msgpack_payload(self.timestamp, &self.title, &self.content, &self.fields);
+        let mut hasher = Sha256::new();
+        hasher.update(&self.destination_hash);
+        hasher.update(&self.source_hash);
+        hasher.update(&payload);
+        hasher.finalize().into()
+    }
+
+    /// Generate a proof-of-work stamp for this message.
+    ///
+    /// Sets `self.stamp` to the generated stamp. Uses the message_id as
+    /// material for workblock generation.
+    pub fn generate_stamp(&mut self, cost: u8) {
+        if cost == 0 {
+            return;
+        }
+        let mid = self.message_id();
+        if let Some((stamp, _value)) = crate::stamp::generate_stamp(&mid, cost) {
+            self.stamp = Some(stamp);
+        }
+    }
+
+    /// Validate the stamp on this message against a target cost.
+    ///
+    /// Checks ticket-based stamps first (if any tickets provided), then
+    /// falls back to proof-of-work validation.
+    ///
+    /// Returns `true` if stamp is valid or if `target_cost` is 0.
+    pub fn validate_stamp(&self, target_cost: u8, tickets: &[[u8; 2]]) -> bool {
+        if target_cost == 0 {
+            return true;
+        }
+        let stamp = match &self.stamp {
+            Some(s) => s,
+            None => return false,
+        };
+        let mid = self.message_id();
+        // Try ticket validation first (avoid Vec<Vec<u8>> allocation)
+        for ticket in tickets {
+            let expected = crate::stamp::ticket_stamp(ticket, &mid);
+            if *stamp == expected {
+                return true;
+            }
+        }
+        // Fall back to proof-of-work
+        let workblock = crate::stamp::stamp_workblock(&mid, crate::stamp::WORKBLOCK_EXPAND_ROUNDS);
+        crate::stamp::stamp_valid(stamp, target_cost, &workblock)
     }
 
     /// Encode this message as an `lxm://` URI for paper/QR transport.
@@ -284,35 +361,46 @@ fn build_sign_data(
 // Msgpack encoding/decoding helpers
 // ---------------------------------------------------------------------------
 
-/// Encode the msgpack payload: array of [timestamp, title, content, fields]
+/// Encode the msgpack payload: 4-element array `[timestamp, title, content, fields]`.
+///
+/// Used for signing and message_id computation (always without stamp).
 fn encode_msgpack_payload(
     timestamp: f64,
     title: &[u8],
     content: &[u8],
     fields: &BTreeMap<u8, Vec<u8>>,
 ) -> Vec<u8> {
+    encode_msgpack_payload_opt_stamp(timestamp, title, content, fields, None)
+}
+
+/// Encode the msgpack payload with optional stamp for wire format.
+///
+/// If stamp is `Some`, produces a 5-element array; otherwise 4-element.
+fn encode_msgpack_payload_opt_stamp(
+    timestamp: f64,
+    title: &[u8],
+    content: &[u8],
+    fields: &BTreeMap<u8, Vec<u8>>,
+    stamp: Option<&[u8; crate::stamp::STAMP_SIZE]>,
+) -> Vec<u8> {
     let mut buf = Vec::new();
-
-    // fixarray of 4
-    buf.push(0x94);
-
-    // float64
+    if stamp.is_some() {
+        buf.push(0x95); // fixarray of 5
+    } else {
+        buf.push(0x94); // fixarray of 4
+    }
     msgpack::write_float64(&mut buf, timestamp);
-
-    // title as bin
     msgpack::write_bin(&mut buf, title);
-
-    // content as bin
     msgpack::write_bin(&mut buf, content);
-
-    // fields as map
     write_map(&mut buf, fields);
-
+    if let Some(s) = stamp {
+        msgpack::write_bin(&mut buf, s);
+    }
     buf
 }
 
-/// Decoded msgpack payload: (timestamp, title, content, fields).
-type DecodedPayload = (f64, Vec<u8>, Vec<u8>, BTreeMap<u8, Vec<u8>>);
+/// Decoded msgpack payload: (timestamp, title, content, fields, stamp).
+type DecodedPayload = (f64, Vec<u8>, Vec<u8>, BTreeMap<u8, Vec<u8>>, Option<[u8; crate::stamp::STAMP_SIZE]>);
 
 /// Decode the msgpack payload.
 fn decode_msgpack_payload(data: &[u8]) -> Result<DecodedPayload, &'static str> {
@@ -325,19 +413,25 @@ fn decode_msgpack_payload(data: &[u8]) -> Result<DecodedPayload, &'static str> {
         return Err("expected array of 4 or 5 elements");
     }
 
-    // Read timestamp (float64)
     let timestamp = msgpack::read_float64(data, &mut pos).map_err(|e| e.as_str())?;
-
-    // Read title (bin)
     let title = msgpack::read_bin_or_str(data, &mut pos).map_err(|e| e.as_str())?.to_vec();
-
-    // Read content (bin)
     let content = msgpack::read_bin_or_str(data, &mut pos).map_err(|e| e.as_str())?.to_vec();
-
-    // Read fields (map)
     let fields = read_map(data, &mut pos)?;
 
-    Ok((timestamp, title, content, fields))
+    let stamp = if arr_len == 5 {
+        let stamp_bytes = msgpack::read_bin_or_str(data, &mut pos).map_err(|e| e.as_str())?;
+        if stamp_bytes.len() >= crate::stamp::STAMP_SIZE {
+            let mut s = [0u8; crate::stamp::STAMP_SIZE];
+            s.copy_from_slice(&stamp_bytes[..crate::stamp::STAMP_SIZE]);
+            Some(s)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok((timestamp, title, content, fields, stamp))
 }
 
 // ---------------------------------------------------------------------------
@@ -636,5 +730,136 @@ mod tests {
     fn test_lxmf_too_short_rejected() {
         let data = [0u8; 50]; // less than 96 bytes minimum
         assert!(LXMessage::unpack(&data, None).is_err());
+    }
+
+    // --- Stamp tests (Step 1 TDD) ---
+
+    #[test]
+    fn test_pack_without_stamp_produces_4_element_array() {
+        let (msg, _) = make_test_message();
+        assert!(msg.stamp.is_none());
+        let packed = msg.pack();
+        // msgpack payload starts at offset 96
+        assert_eq!(packed[96], 0x94); // fixarray of 4
+    }
+
+    #[test]
+    fn test_pack_with_stamp_produces_5_element_array() {
+        let (mut msg, _) = make_test_message();
+        msg.stamp = Some([0xAB, 0xCD]);
+        let packed = msg.pack();
+        assert_eq!(packed[96], 0x95); // fixarray of 5
+    }
+
+    #[test]
+    fn test_unpack_4_element_has_none_stamp() {
+        let (msg, source) = make_test_message();
+        let packed = msg.pack();
+        let unpacked = LXMessage::unpack(&packed, Some(&source)).unwrap();
+        assert!(unpacked.stamp.is_none());
+    }
+
+    #[test]
+    fn test_unpack_5_element_extracts_stamp() {
+        let (mut msg, source) = make_test_message();
+        msg.stamp = Some([0xAB, 0xCD]);
+        let packed = msg.pack();
+        // Signature was computed over 4-element payload in new(), and
+        // unpack() re-encodes 4-element for verification — should work.
+        let unpacked = LXMessage::unpack(&packed, Some(&source)).unwrap();
+        assert_eq!(unpacked.stamp, Some([0xAB, 0xCD]));
+    }
+
+    #[test]
+    fn test_message_id_deterministic() {
+        let (msg, _) = make_test_message();
+        let id1 = msg.message_id();
+        let id2 = msg.message_id();
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 32);
+    }
+
+    #[test]
+    fn test_message_id_independent_of_stamp() {
+        let (mut msg, _) = make_test_message();
+        let id_before = msg.message_id();
+        msg.stamp = Some([0x12, 0x34]);
+        let id_after = msg.message_id();
+        assert_eq!(id_before, id_after);
+    }
+
+    #[test]
+    fn test_generate_stamp_populates_field() {
+        let (mut msg, _) = make_test_message();
+        assert!(msg.stamp.is_none());
+        // Cost 1 should always succeed quickly
+        msg.generate_stamp(1);
+        assert!(msg.stamp.is_some());
+    }
+
+    #[test]
+    fn test_generate_stamp_zero_cost_is_noop() {
+        let (mut msg, _) = make_test_message();
+        msg.generate_stamp(0);
+        assert!(msg.stamp.is_none());
+    }
+
+    #[test]
+    fn test_validate_stamp_valid_pow() {
+        let (mut msg, _) = make_test_message();
+        msg.generate_stamp(1);
+        assert!(msg.validate_stamp(1, &[]));
+    }
+
+    #[test]
+    fn test_validate_stamp_invalid_pow() {
+        let (mut msg, _) = make_test_message();
+        msg.stamp = Some([0xFF, 0xFF]); // unlikely to have any leading zeros
+        // Cost 16 means 16 leading zero bits — [0xFF, 0xFF] won't satisfy
+        assert!(!msg.validate_stamp(16, &[]));
+    }
+
+    #[test]
+    fn test_validate_stamp_zero_cost_always_valid() {
+        let (msg, _) = make_test_message();
+        // No stamp, zero cost — should pass
+        assert!(msg.validate_stamp(0, &[]));
+    }
+
+    #[test]
+    fn test_validate_stamp_no_stamp_fails() {
+        let (msg, _) = make_test_message();
+        assert!(msg.stamp.is_none());
+        assert!(!msg.validate_stamp(1, &[]));
+    }
+
+    #[test]
+    fn test_validate_stamp_with_ticket() {
+        let (mut msg, _) = make_test_message();
+        let ticket = [0x42, 0x37];
+        let mid = msg.message_id();
+        // Generate the correct ticket-based stamp
+        let stamp = crate::stamp::ticket_stamp(&ticket, &mid);
+        msg.stamp = Some(stamp);
+        assert!(msg.validate_stamp(8, &[ticket])); // ticket bypasses PoW
+    }
+
+    #[test]
+    fn test_field_ticket_constant() {
+        assert_eq!(FIELD_TICKET, 0x0C);
+    }
+
+    #[test]
+    fn test_roundtrip_with_stamp_and_signature_verification() {
+        // Full round-trip: create message, add stamp, pack, unpack with verification
+        let (mut msg, source) = make_test_message();
+        msg.generate_stamp(1);
+        assert!(msg.stamp.is_some());
+
+        let packed = msg.pack();
+        let unpacked = LXMessage::unpack(&packed, Some(&source)).unwrap();
+        assert_eq!(unpacked.stamp, msg.stamp);
+        assert_eq!(unpacked.title, b"Hello");
+        assert_eq!(unpacked.content, b"World");
     }
 }

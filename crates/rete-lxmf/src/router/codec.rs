@@ -22,6 +22,8 @@ pub(super) struct LxmfAnnounceData {
     pub(super) display_name: Vec<u8>,
     /// True if this is a propagation node announce (second element is `true`).
     pub(super) is_propagation: bool,
+    /// Stamp cost from delivery announce (integer tag), if present and non-zero.
+    pub(super) stamp_cost: Option<u8>,
 }
 
 /// Try to parse LXMF announce app_data: msgpack `[display_name_bytes, tag]`
@@ -31,7 +33,7 @@ pub(super) fn try_parse_lxmf_announce_data(data: &[u8]) -> Option<Vec<u8>> {
     Some(parsed.display_name)
 }
 
-/// Parse full LXMF announce app_data including propagation flag.
+/// Parse full LXMF announce app_data including propagation flag and stamp cost.
 pub(super) fn parse_lxmf_announce_data(data: &[u8]) -> Option<LxmfAnnounceData> {
     let mut pos = 0;
     let arr_len = msgpack::read_array_len(data, &mut pos).ok()?;
@@ -39,11 +41,25 @@ pub(super) fn parse_lxmf_announce_data(data: &[u8]) -> Option<LxmfAnnounceData> 
         return None;
     }
     let display_name = msgpack::read_bin_or_str(data, &mut pos).ok()?.to_vec();
-    // Second element: 0xc3 = true (propagation), integer = stamp_cost (delivery)
-    let is_propagation = data.get(pos) == Some(&0xc3);
+    // Second element: 0xc3 = true (propagation), 0xc0 = nil, integer = stamp_cost
+    let tag_byte = *data.get(pos)?;
+    let is_propagation = tag_byte == 0xc3;
+    let stamp_cost = if !is_propagation && tag_byte != 0xc0 && tag_byte != 0xc2 {
+        // Try to read as unsigned integer
+        msgpack::read_uint(data, &mut pos).ok().and_then(|v| {
+            if v > 0 && v <= 255 {
+                Some(v as u8)
+            } else {
+                None // 0 means no cost required
+            }
+        })
+    } else {
+        None
+    };
     Some(LxmfAnnounceData {
         display_name,
         is_propagation,
+        stamp_cost,
     })
 }
 
