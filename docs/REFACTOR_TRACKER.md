@@ -16,7 +16,7 @@ Created: 2026-04-02
 | 7 | Portable LXMF boundary half-finished | P1 | ✅ DONE | Documented: rete-lxmf-core (no_std) vs rete-lxmf (hosted). AES-256 + scope fixed (item 11 overlap). |
 | 8 | Error handling (stringly-typed) | P2 | ✅ DONE | ResourceError expanded (8 variants), LxmfMessageError (5 variants), as_str() bridge removed |
 | 9 | Callbacks too narrow (fn pointers) | P2 | ✅ DONE | NodeHooks trait + RequestCallback trait, Box<dyn> like RatchetStore |
-| 10 | Type system underused for hashes | P2 | TODO | Do last — touches every signature |
+| 10 | Type system underused for hashes | P2 | ✅ DONE | DestHash, IdentityHash, LinkId, PathHash, RequestId newtypes |
 | 11 | Docs out of date | P2 | PARTIAL | AES-256, scope, ProveApp fixed. Portability matrix deferred. |
 | 12 | Linux example is a de facto daemon | P2 | TODO | 2000+ line main.rs mixing concerns |
 
@@ -394,28 +394,41 @@ Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>
 ## 10. Type System Underused for Hashes
 
 **Priority:** P2 — do last (touches every signature)
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-03)
 
 ### Problem
 
 `[u8; 16]` is used for destination hash, identity hash, link ID, request ID, and path hash. Easy to mix them up; compiler can't help.
 
+### Solution
+
+1. **`define_hash_newtype!` macro** in `rete-core/src/hash_types.rs` — stamps out 5 newtypes, each wrapping `[u8; 16]` with `#[repr(transparent)]`. Derives: `Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash`. Implements: `Zeroize`, `From<[u8;16]>`, `Into<[u8;16]>`, `AsRef<[u8]>`, custom `Debug` with type name + hex prefix. Optional `serde(transparent)` when `serde` feature enabled.
+
+2. **Five newtypes:** `DestHash`, `IdentityHash`, `LinkId`, `PathHash`, `RequestId`.
+
+3. **Construction functions updated:** `identity_hash() → IdentityHash`, `destination_hash() → DestHash`, `destination_hashes() → (DestHash, [u8; NAME_HASH_LEN])`, `Identity::hash() → IdentityHash`, `compute_link_id() → LinkId`, `path_hash() → PathHash`, `request_id() → RequestId`.
+
+4. **TransportStorage trait** — maps now use semantic key types: `PathMap<DestHash, Path>`, `LinkMap<LinkId, Link>`, etc. Three maps remain `[u8; TRUNCATED_HASH_LEN]` (ReverseMap, ReceiptMap, ChannelReceiptMap — keyed by truncated packet hashes, not one of the 5 semantic types).
+
+5. **All struct fields, method signatures, and event variants** updated across all 8 crates: rete-core, rete-transport, rete-stack, rete-lxmf-core, rete-lxmf, rete-tokio, rete-embassy, examples/linux.
+
+6. **`Packet<'a>` unchanged** — zero-copy parser keeps `destination_hash: &'a [u8]`. Conversion to newtypes happens at extraction sites.
+
 ### Key Files
 
-- `crates/rete-stack/src/node_core/mod.rs:38-54` — `RequestContext` with multiple `[u8; 16]` fields
-- Throughout `crates/rete-transport/` — maps keyed by raw arrays
+- `crates/rete-core/src/hash_types.rs` — macro + 5 newtypes + 16 unit tests
+- `crates/rete-core/src/identity.rs` — construction functions return newtypes
+- `crates/rete-transport/src/storage.rs` — `TransportStorage` trait with typed map keys
+- `crates/rete-stack/src/lib.rs` — `NodeEvent` variants use newtypes
+- `crates/rete-stack/src/node_core/mod.rs` — `RequestContext` fields use newtypes
 
-### What to Do
+### Verified
 
-1. **Add newtypes in `rete-core`:** `DestHash`, `IdentityHash`, `LinkId`, `RequestId`, `PathHash`.
-2. **Derive `Copy`, `Clone`, `Eq`, `Hash`, `Ord`, `AsRef<[u8]>`.**
-3. **Migrate signatures** crate by crate, starting from `rete-core` outward.
-
-### Done When
-
-- Newtypes exist and are used in public APIs
-- Compiler prevents mixing hash types
-- All tests pass
+- All 586 workspace unit tests pass
+- All 53 E2E interop tests pass
+- `cargo check -p rete-core --target thumbv6m-none-eabi` passes (no_std)
+- `cargo check -p rete-transport --target thumbv6m-none-eabi` passes (no_std)
+- Serde backward compatibility preserved via `#[serde(transparent)]`
 
 ---
 
@@ -510,3 +523,7 @@ Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>
 | 2026-04-03 | `Box<dyn NodeHooks>` over generic `H: NodeHooks` | Matches existing `Box<dyn RatchetStore>` pattern. Dynamic dispatch avoids adding a second generic param to NodeCore (which would propagate to EmbeddedNodeCore, HostedNodeCore, EmbassyNode, TokioNode, LxmfRouter). Callbacks already require `alloc`, so `Box` costs nothing extra. |
 | 2026-04-03 | `handler_fn()` helper for HRTB coercion | `Box::new(|ctx, data| ...)` can't infer higher-ranked lifetimes for `RequestContext<'a>`. A named function with explicit bounds handles the coercion. Common pattern in tower/axum. |
 | 2026-04-03 | Single `NodeHooks` for 4 global hooks, separate `RequestCallback` for per-path | Global hooks (compress, decompress, prove_app, log_packet) share a lifecycle and are set once. Request handlers are per-path, per-destination, registered dynamically — different extension point. |
+| 2026-04-03 | `define_hash_newtype!` macro over generic `Hash16<Tag>` phantom type | Macro produces 5 concrete named types with natural Debug output and clear error messages. Phantom generic would yield `Hash16<DestTag>` in errors — less readable. Macro is ~60 lines, stamped out 5 times. |
+| 2026-04-03 | ReverseMap/ReceiptMap/ChannelReceiptMap stay `[u8; 16]` | These are keyed by truncated packet hashes (first 16 bytes of SHA-256), not one of the 5 semantic types. Introducing a 6th `TruncatedPacketHash` type would add complexity for 3 maps with no mix-up risk. |
+| 2026-04-03 | `#[serde(transparent)]` on hash newtypes | Serializes identically to `[u8; 16]`, preserving backward compatibility with existing snapshot formats. |
+| 2026-04-03 | `Packet<'a>` stays zero-copy `&[u8]` | Wire-level parser must not allocate or copy. Conversion to newtypes happens at extraction sites (`let dh = DestHash::from(arr)`) where callers already copy into fixed arrays. |

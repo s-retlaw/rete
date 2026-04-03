@@ -1,6 +1,6 @@
 //! Request receipt tracking for the request/response lifecycle.
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{LinkId, RequestId, TRUNCATED_HASH_LEN};
 
 /// Status of a pending request.
 ///
@@ -18,9 +18,9 @@ pub enum RequestStatus {
 #[derive(Debug)]
 pub struct PendingRequest {
     /// Request ID (truncated packet hash or SHA-256(packed)[..16] for resource-based).
-    pub request_id: [u8; TRUNCATED_HASH_LEN],
+    pub request_id: RequestId,
     /// Link the request was sent on.
-    pub link_id: [u8; TRUNCATED_HASH_LEN],
+    pub link_id: LinkId,
     /// Current status.
     pub status: RequestStatus,
     /// Monotonic time (seconds) when the request was sent.

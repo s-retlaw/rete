@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::DestHash;
 
 use super::RequestContext;
 
@@ -52,7 +52,7 @@ pub trait NodeHooks: Send {
     /// Return `true` to generate and send proof, `false` to skip.
     fn prove_app(
         &self,
-        _dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        _dest_hash: &DestHash,
         _packet_hash: &[u8; 32],
         _payload: &[u8],
     ) -> bool {
@@ -121,6 +121,7 @@ mod tests {
     use alloc::sync::Arc;
     use alloc::vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use rete_core::{LinkId, PathHash, RequestId};
 
     // --- NodeHooks: state capture ---
 
@@ -153,7 +154,7 @@ mod tests {
         let h = Empty;
         assert_eq!(h.compress(b"data"), None);
         assert_eq!(h.decompress(b"data"), None);
-        assert!(!h.prove_app(&[0; 16], &[0; 32], b"payload"));
+        assert!(!h.prove_app(&DestHash::ZERO, &[0; 32], b"payload"));
         h.log_packet(b"raw", "IN", 0); // should not panic
     }
 
@@ -177,11 +178,11 @@ mod tests {
 
     fn dummy_ctx() -> RequestContext<'static> {
         RequestContext {
-            destination_hash: [0; 16],
+            destination_hash: DestHash::ZERO,
             path: "/test",
-            path_hash: [0; 16],
-            link_id: [0; 16],
-            request_id: [0; 16],
+            path_hash: PathHash::ZERO,
+            link_id: LinkId::ZERO,
+            request_id: RequestId::ZERO,
             requested_at: 0.0,
             remote_identity: None,
         }

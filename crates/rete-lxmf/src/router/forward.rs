@@ -1,6 +1,6 @@
 //! Auto-forward store-and-forward delivery.
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, LinkId, TRUNCATED_HASH_LEN};
 use rete_stack::{NodeCore, OutboundPacket};
 
 use crate::propagation::MessageStore;
@@ -14,7 +14,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     // -----------------------------------------------------------------------
 
     /// Check if there is already a forward job for the given destination.
-    pub fn has_forward_job_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+    pub fn has_forward_job_for(&self, dest_hash: &DestHash) -> bool {
         self.pending_forwards.iter().any(|job| match job {
             ForwardJob::Linking { dest_hash: d, .. } => d == dest_hash,
             ForwardJob::Sending { dest_hash: d, .. } => d == dest_hash,
@@ -35,11 +35,11 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
         core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
-    ) -> Option<(OutboundPacket, [u8; TRUNCATED_HASH_LEN])> {
+    ) -> Option<(OutboundPacket, LinkId)> {
         // Check we have messages
         if self.propagation_count_for(dest_hash) == 0 {
             return None;
@@ -64,7 +64,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         core: &mut NodeCore<TS>,
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
@@ -114,7 +114,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         _resource_hash: &[u8; TRUNCATED_HASH_LEN],
         core: &mut NodeCore<TS>,
         rng: &mut R,
@@ -165,7 +165,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     >(
         &self,
         message_hash: &[u8; 32],
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         core: &mut NodeCore<TS>,
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
@@ -187,7 +187,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Remove forward jobs for a link that was closed.
-    pub fn cleanup_forward_jobs_for_link(&mut self, link_id: &[u8; TRUNCATED_HASH_LEN]) {
+    pub fn cleanup_forward_jobs_for_link(&mut self, link_id: &LinkId) {
         self.pending_forwards.retain(|job| match job {
             ForwardJob::Linking { link_id: lid, .. } => lid != link_id,
             ForwardJob::Sending { link_id: lid, .. } => lid != link_id,

@@ -33,8 +33,8 @@ use crate::resource::Resource;
 use crate::storage::{StorageMap, TransportStorage};
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    DestType, HeaderType, Identity, Packet, PacketType, CONTEXT_LRPROOF,
-    CONTEXT_RESOURCE_PRF, TRUNCATED_HASH_LEN,
+    DestHash, DestType, HeaderType, Identity, IdentityHash, LinkId, Packet, PacketType,
+    CONTEXT_LRPROOF, CONTEXT_RESOURCE_PRF, TRUNCATED_HASH_LEN,
 };
 
 // ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ impl core::fmt::Display for SendError {
 #[derive(Debug, Clone)]
 pub struct ChannelReceipt {
     /// Link the channel message was sent on.
-    pub link_id: [u8; TRUNCATED_HASH_LEN],
+    pub link_id: LinkId,
     /// Sequence number in the channel.
     pub sequence: u16,
     /// Monotonic timestamp when sent.
@@ -146,9 +146,9 @@ pub struct ChannelReceipt {
 /// Destination hash for `rnstransport.path.request` (PLAIN, no identity).
 ///
 /// Precomputed: `destination_hash("rnstransport.path.request", None)`.
-pub const PATH_REQUEST_DEST: [u8; TRUNCATED_HASH_LEN] = [
+pub const PATH_REQUEST_DEST: DestHash = DestHash::new([
     0x6b, 0x9f, 0x66, 0x01, 0x4d, 0x98, 0x53, 0xfa, 0xab, 0x22, 0x0f, 0xba, 0x47, 0xd0, 0x27, 0x61,
-];
+]);
 
 // ---------------------------------------------------------------------------
 // ReverseEntry — tracks forwarded packets for reply routing
@@ -189,7 +189,7 @@ pub struct LinkTableEntry {
     /// Matches Python `IDX_LT_REM_HOPS`.
     pub outbound_hops: u8,
     /// Destination hash of the link target.
-    pub destination_hash: [u8; TRUNCATED_HASH_LEN],
+    pub destination_hash: DestHash,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +202,7 @@ pub enum IngestResult<'a> {
     /// Data packet addressed to one of our destinations.
     LocalData {
         /// Destination hash the packet was addressed to.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Payload data.
         payload: &'a [u8],
         /// Full 32-byte packet hash (for proof generation).
@@ -211,9 +211,9 @@ pub enum IngestResult<'a> {
     /// A valid announce was received and its path has been learned.
     AnnounceReceived {
         /// Destination hash of the announcing identity.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Identity hash of the announcer.
-        identity_hash: [u8; TRUNCATED_HASH_LEN],
+        identity_hash: IdentityHash,
         /// Hop count at time of receipt.
         hops: u8,
         /// Optional application data from the announce.
@@ -231,19 +231,19 @@ pub enum IngestResult<'a> {
     /// A LINKREQUEST was received for one of our destinations.
     LinkRequestReceived {
         /// The computed link_id (16 bytes).
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// The LRPROOF response to send back (raw packet bytes, owned).
         proof_raw: alloc::vec::Vec<u8>,
     },
     /// A link handshake completed (LRPROOF validated or LRRTT processed).
     LinkEstablished {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
     },
     /// Decrypted data received on an active link.
     LinkData {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Decrypted payload data (owned).
         data: alloc::vec::Vec<u8>,
         /// The context byte from the packet.
@@ -252,7 +252,7 @@ pub enum IngestResult<'a> {
     /// Channel messages received on a link (reliable ordered delivery).
     ChannelMessages {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Delivered channel envelopes.
         messages: alloc::vec::Vec<crate::channel::ChannelEnvelope>,
         /// The packet hash of the DATA packet carrying these channel messages.
@@ -261,7 +261,7 @@ pub enum IngestResult<'a> {
     /// A link was closed (teardown or timeout).
     LinkClosed {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
     },
     /// A proof was received for a packet we sent.
     ProofReceived {
@@ -271,7 +271,7 @@ pub enum IngestResult<'a> {
     /// A resource advertisement was received on a link.
     ResourceOffered {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes for keying).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
         /// Total size of the resource data.
@@ -284,7 +284,7 @@ pub enum IngestResult<'a> {
     /// Resource transfer progress.
     ResourceProgress {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
         /// Parts received so far.
@@ -295,7 +295,7 @@ pub enum IngestResult<'a> {
     /// Resource transfer completed successfully.
     ResourceComplete {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
         /// The assembled resource data.
@@ -304,25 +304,25 @@ pub enum IngestResult<'a> {
     /// Resource transfer failed.
     ResourceFailed {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
     /// A resource we sent was rejected by the receiver (RESOURCE_RCL received).
     ResourceRejected {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
     /// A link.request() was received on a link.
     RequestReceived {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// The request_id (truncated packet hash for single-packet requests).
-        request_id: [u8; TRUNCATED_HASH_LEN],
+        request_id: rete_core::RequestId,
         /// The path_hash (SHA-256(path)[..16]).
-        path_hash: [u8; TRUNCATED_HASH_LEN],
+        path_hash: rete_core::PathHash,
         /// The request data payload.
         data: alloc::vec::Vec<u8>,
         /// Timestamp from the wire format (seconds since epoch).
@@ -331,9 +331,9 @@ pub enum IngestResult<'a> {
     /// A link.response() was received on a link.
     ResponseReceived {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// The request_id this response is for.
-        request_id: [u8; TRUNCATED_HASH_LEN],
+        request_id: rete_core::RequestId,
         /// The response data payload.
         data: alloc::vec::Vec<u8>,
     },
@@ -344,7 +344,7 @@ pub enum IngestResult<'a> {
         /// The packet hash of the DATA packet (receiver should prove it).
         packet_hash: [u8; 32],
         /// The link_id (used to build a link-destination proof).
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
     },
     /// A path request for an unknown destination should be forwarded to other interfaces.
     PathRequestForward {
@@ -429,13 +429,13 @@ pub struct Transport<S: TransportStorage> {
     pub(super) dedup: DedupWindow<S::DedupDeque>,
     pub(super) known_identities: S::IdentityMap,
     /// Identity hash of this node (enables HEADER_2 forwarding when set).
-    pub(super) local_identity_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
+    pub(super) local_identity_hash: Option<IdentityHash>,
     /// Reverse table: truncated packet hash → entry (for reply routing).
     pub(super) reverse_table: S::ReverseMap,
     /// Dedup window for announce random_hashes (replay detection).
     pub(super) announce_dedup: DedupWindow<S::DedupDeque>,
     /// Destination hashes registered as local (self-announce filtering, local delivery routing).
-    pub(super) local_destinations: alloc::vec::Vec<[u8; TRUNCATED_HASH_LEN]>,
+    pub(super) local_destinations: alloc::vec::Vec<DestHash>,
     /// Active link sessions, keyed by link_id.
     pub(super) links: S::LinkMap,
     /// Receipts for sent packets, awaiting delivery proofs.
@@ -470,7 +470,7 @@ pub(super) struct SplitMeta {
 }
 
 pub(super) struct SplitSendEntry {
-    pub(super) link_id: [u8; TRUNCATED_HASH_LEN],
+    pub(super) link_id: LinkId,
     /// Group key: resource_hash of segment 1.
     pub(super) original_hash: [u8; 32],
     /// 1-based index of the next segment to send.
@@ -528,14 +528,14 @@ impl<S: TransportStorage> Transport<S> {
     }
 
     /// Register a destination hash as belonging to this node.
-    pub fn add_local_destination(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN]) {
+    pub fn add_local_destination(&mut self, dest_hash: DestHash) {
         if !self.local_destinations.contains(&dest_hash) {
             self.local_destinations.push(dest_hash);
         }
     }
 
     /// Check whether a destination hash is registered as local.
-    pub fn is_local_destination(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+    pub fn is_local_destination(&self, dest_hash: &DestHash) -> bool {
         self.local_destinations.contains(dest_hash)
     }
 
@@ -545,12 +545,12 @@ impl<S: TransportStorage> Transport<S> {
     }
 
     /// Set the local identity hash, enabling HEADER_2 forwarding.
-    pub fn set_local_identity(&mut self, hash: [u8; TRUNCATED_HASH_LEN]) {
+    pub fn set_local_identity(&mut self, hash: IdentityHash) {
         self.local_identity_hash = Some(hash);
     }
 
     /// Get the local identity hash (transport node ID), if set.
-    pub fn local_identity_hash(&self) -> Option<[u8; TRUNCATED_HASH_LEN]> {
+    pub fn local_identity_hash(&self) -> Option<IdentityHash> {
         self.local_identity_hash
     }
 
@@ -635,12 +635,10 @@ impl<S: TransportStorage> Transport<S> {
         if pkt.header_type == HeaderType::Header2 {
             if let Some(local_id) = self.local_identity_hash {
                 if let Some(tid) = pkt.transport_id {
-                    let mut tid_arr = [0u8; TRUNCATED_HASH_LEN];
-                    tid_arr.copy_from_slice(tid);
+                    let tid_hash = IdentityHash::from_slice(tid);
 
-                    if tid_arr == local_id {
-                        let mut dest = [0u8; TRUNCATED_HASH_LEN];
-                        dest.copy_from_slice(pkt.destination_hash);
+                    if tid_hash == local_id {
+                        let dest = DestHash::from_slice(pkt.destination_hash);
                         let is_link_request = pkt.packet_type == PacketType::LinkRequest;
                         let is_link_dest = pkt.dest_type == DestType::Link;
 
@@ -673,8 +671,8 @@ impl<S: TransportStorage> Transport<S> {
                                     path_entry.and_then(|p| p.received_on).unwrap_or(0);
                                 relay_log!(
                                     "[relay] H2 LINKREQUEST link_table INSERT lid={} dest={} in_hops={} out_hops={} rcvd={} out={}",
-                                    hex_short(&lid),
-                                    hex_short(&dest),
+                                    hex_short(lid.as_ref()),
+                                    hex_short(dest.as_ref()),
                                     inbound_hops,
                                     remaining,
                                     iface,
@@ -698,11 +696,11 @@ impl<S: TransportStorage> Transport<S> {
                             Some(Path { via: Some(via), .. }) => {
                                 relay_log!(
                                     "[relay] H2 FWD via={} dest={} iface={}",
-                                    hex_short(via),
-                                    hex_short(&dest),
+                                    hex_short(via.as_ref()),
+                                    hex_short(dest.as_ref()),
                                     iface,
                                 );
-                                raw[2..18].copy_from_slice(via);
+                                raw[2..18].copy_from_slice(via.as_ref());
                                 IngestResult::Forward {
                                     raw: &raw[..len],
                                     source_iface: iface,
@@ -711,7 +709,7 @@ impl<S: TransportStorage> Transport<S> {
                             Some(_path) => {
                                 relay_log!(
                                     "[relay] H2->H1 FWD direct dest={} iface={} len={}->{}",
-                                    hex_short(&dest),
+                                    hex_short(dest.as_ref()),
                                     iface,
                                     len,
                                     len - TRUNCATED_HASH_LEN,
@@ -730,7 +728,8 @@ impl<S: TransportStorage> Transport<S> {
                                 // This handles H2 link DATA, channel, keepalive,
                                 // etc. where the destination_hash is a link_id
                                 // (not in path_table).
-                                if let Some(lte) = self.link_table.get_mut(&dest) {
+                                let dest_as_lid = LinkId::from_slice(dest.as_ref());
+                                if let Some(lte) = self.link_table.get_mut(&dest_as_lid) {
                                     // Exact hop-count match (same as H1 link_table)
                                     let hops = raw[1];
                                     let hop_ok = if lte.outbound_to == lte.received_on {
@@ -746,7 +745,7 @@ impl<S: TransportStorage> Transport<S> {
                                         lte.timestamp = now;
                                         relay_log!(
                                             "[relay] H2 link_table FWD lid={} iface={} hops={}",
-                                            hex_short(&dest),
+                                            hex_short(dest.as_ref()),
                                             iface,
                                             hops,
                                         );
@@ -762,7 +761,7 @@ impl<S: TransportStorage> Transport<S> {
                                     } else {
                                         relay_log!(
                                             "[relay] H2 link_table HOP_EXCEED lid={} hops={}",
-                                            hex_short(&dest),
+                                            hex_short(dest.as_ref()),
                                             raw[1],
                                         );
                                         IngestResult::Invalid
@@ -770,13 +769,13 @@ impl<S: TransportStorage> Transport<S> {
                                 } else {
                                     relay_log!(
                                         "[relay] H2 link_table MISS lid={}",
-                                        hex_short(&dest),
+                                        hex_short(dest.as_ref()),
                                     );
                                     IngestResult::Invalid
                                 }
                             }
                             _ => {
-                                relay_log!("[relay] H2 NO_PATH dest={}", hex_short(&dest),);
+                                relay_log!("[relay] H2 NO_PATH dest={}", hex_short(dest.as_ref()),);
                                 IngestResult::Invalid
                             }
                         };
@@ -806,8 +805,7 @@ impl<S: TransportStorage> Transport<S> {
         match pkt.packet_type {
             PacketType::Announce => self.handle_announce(&pkt, raw, now, iface),
             PacketType::Data => {
-                let mut dh = [0u8; TRUNCATED_HASH_LEN];
-                dh.copy_from_slice(pkt.destination_hash);
+                let dh = DestHash::from_slice(pkt.destination_hash);
 
                 // Path request handling
                 if self.local_identity_hash.is_some() && dh == PATH_REQUEST_DEST {
@@ -816,10 +814,11 @@ impl<S: TransportStorage> Transport<S> {
 
                 // Link data handling: dest_type == Link
                 if pkt.dest_type == DestType::Link {
+                    let lid = LinkId::from_slice(dh.as_ref());
                     // If we own this link locally, handle it.
-                    if self.links.contains_key(&dh) {
+                    if self.links.contains_key(&lid) {
                         return self.handle_link_data(
-                            &dh,
+                            &lid,
                             pkt.context,
                             pkt.payload,
                             now,
@@ -831,7 +830,7 @@ impl<S: TransportStorage> Transport<S> {
                     // the link_table (keyed by link_id) to forward
                     // bidirectionally through this relay.
                     if self.local_identity_hash.is_some() {
-                        if let Some(lte) = self.link_table.get_mut(&dh) {
+                        if let Some(lte) = self.link_table.get_mut(&lid) {
                             // Exact hop-count match with direction awareness
                             // (Python Transport.py:1514-1549).
                             let hop_ok = if lte.outbound_to == lte.received_on {
@@ -850,7 +849,7 @@ impl<S: TransportStorage> Transport<S> {
                                 lte.timestamp = now; // refresh for expiry
                                 relay_log!(
                                     "[relay] link_table FORWARD lid={} ctx={:#04x} iface={} hops={}",
-                                    hex_short(&dh),
+                                    hex_short(lid.as_ref()),
                                     pkt.context,
                                     iface,
                                     pkt.hops,
@@ -863,7 +862,7 @@ impl<S: TransportStorage> Transport<S> {
                             } else {
                                 relay_log!(
                                     "[relay] link_table HOP_FAIL lid={} ctx={:#04x} iface={} hops={} in_hops={} out_hops={} rcvd={} out={}",
-                                    hex_short(&dh),
+                                    hex_short(lid.as_ref()),
                                     pkt.context,
                                     iface,
                                     pkt.hops,
@@ -876,7 +875,7 @@ impl<S: TransportStorage> Transport<S> {
                         } else {
                             relay_log!(
                                 "[relay] link_table MISS lid={} ctx={:#04x} (no entry)",
-                                hex_short(&dh),
+                                hex_short(lid.as_ref()),
                                 pkt.context,
                             );
                         }
@@ -884,7 +883,7 @@ impl<S: TransportStorage> Transport<S> {
                     // Fall through: non-transport node or no link_table entry.
                     // Try local handling (will return Invalid if link not found).
                     return self.handle_link_data(
-                        &dh,
+                        &lid,
                         pkt.context,
                         pkt.payload,
                         now,
@@ -912,8 +911,8 @@ impl<S: TransportStorage> Transport<S> {
                     );
                     relay_log!(
                         "[relay] H1 DATA FORWARD dest={} reverse={}",
-                        hex_short(&dh),
-                        hex_short(&trunc_hash),
+                        hex_short(dh.as_ref()),
+                        hex_short(&trunc_hash[..]),
                     );
                     self.stats.packets_forwarded += 1;
                     return IngestResult::Forward {
@@ -937,18 +936,24 @@ impl<S: TransportStorage> Transport<S> {
                 }
             }
             PacketType::Proof => {
-                let mut dh = [0u8; TRUNCATED_HASH_LEN];
-                dh.copy_from_slice(pkt.destination_hash);
+                // For proof packets, the destination_hash may be a link_id (Link type)
+                // or a truncated packet hash (Single type). We use both typed forms below.
+                // Proof dest_hash is overloaded: link_id for Link-typed, truncated
+                // packet hash for Single-typed. Keep raw bytes for ReverseMap/ReceiptMap.
+                let raw_dh: [u8; TRUNCATED_HASH_LEN] = pkt.destination_hash.try_into().unwrap();
+                #[allow(unused_variables)]
+                let dh = DestHash::from(raw_dh);
+                let lid = LinkId::from(raw_dh);
 
                 if pkt.context == CONTEXT_LRPROOF && pkt.dest_type == DestType::Link {
                     relay_log!(
                         "[relay] LRPROOF_IN lid={} hops={} plen={} local_link={} link_table={} reverse={}",
-                        hex_short(&dh),
+                        hex_short(lid.as_ref()),
                         pkt.hops,
                         pkt.payload.len(),
-                        self.links.contains_key(&dh),
-                        self.link_table.contains_key(&dh),
-                        self.reverse_table.contains_key(&dh),
+                        self.links.contains_key(&lid),
+                        self.link_table.contains_key(&lid),
+                        self.reverse_table.contains_key(&raw_dh),
                     );
                 }
 
@@ -957,9 +962,9 @@ impl<S: TransportStorage> Transport<S> {
                 // otherwise fall through to reverse-table forwarding (relay case).
                 if pkt.context == CONTEXT_LRPROOF
                     && pkt.dest_type == DestType::Link
-                    && self.links.contains_key(&dh)
+                    && self.links.contains_key(&lid)
                 {
-                    return self.handle_lrproof(&dh, pkt.payload, now);
+                    return self.handle_lrproof(&lid, pkt.payload, now);
                 }
 
                 // Check for RESOURCE_PRF (resource completion proof from receiver).
@@ -968,16 +973,16 @@ impl<S: TransportStorage> Transport<S> {
                 // link-encrypted (Python: Packet.pack special-cases RESOURCE_PRF).
                 if pkt.context == CONTEXT_RESOURCE_PRF
                     && pkt.dest_type == DestType::Link
-                    && self.links.contains_key(&dh)
+                    && self.links.contains_key(&lid)
                 {
-                    if let Some(link) = self.links.get_mut(&dh) {
+                    if let Some(link) = self.links.get_mut(&lid) {
                         link.touch_inbound(now);
                     }
-                    return self.handle_resource_data(&dh, pkt.context, pkt.payload, now, rng);
+                    return self.handle_resource_data(&lid, pkt.context, pkt.payload, now, rng);
                 }
 
                 // Check receipt table for delivery proof (DATA packets)
-                if let Some(packet_hash) = self.receipts.validate_proof(&dh, pkt.payload) {
+                if let Some(packet_hash) = self.receipts.validate_proof(&raw_dh, pkt.payload) {
                     return IngestResult::ProofReceived { packet_hash };
                 }
 
@@ -1022,10 +1027,10 @@ impl<S: TransportStorage> Transport<S> {
                 }
 
                 if self.local_identity_hash.is_some() {
-                    if self.reverse_table.remove(&dh).is_some() {
+                    if self.reverse_table.remove(&raw_dh).is_some() {
                         relay_log!(
                             "[relay] PROOF reverse_table FORWARD dest={} ctx={:#04x}",
-                            hex_short(&dh),
+                            hex_short(dh.as_ref()),
                             pkt.context,
                         );
                         self.stats.packets_forwarded += 1;
@@ -1033,7 +1038,7 @@ impl<S: TransportStorage> Transport<S> {
                             raw,
                             source_iface: iface,
                         }
-                    } else if let Some(lte) = self.link_table.get_mut(&dh) {
+                    } else if let Some(lte) = self.link_table.get_mut(&lid) {
                         // Link-destined proof (LRPROOF or channel proof):
                         // route via the persistent link_table entry.
                         lte.timestamp = now; // refresh for expiry
@@ -1046,23 +1051,23 @@ impl<S: TransportStorage> Transport<S> {
                                 if let Ok(dest_id) = Identity::from_public_key(pub_key) {
                                     relay_log!(
                                         "[relay] LRPROOF_VALIDATE lid={} dest={} has_identity={}",
-                                        hex_short(&dh),
-                                        hex_short(&dest_hash_for_link),
+                                        hex_short(lid.as_ref()),
+                                        hex_short(dest_hash_for_link.as_ref()),
                                         true,
                                     );
-                                    if !self.validate_lrproof_relay(pkt.payload, &dh, &dest_id) {
+                                    if !self.validate_lrproof_relay(pkt.payload, &lid, &dest_id) {
                                         relay_log!(
                                             "[relay] LRPROOF REJECTED lid={} dest={}",
-                                            hex_short(&dh),
-                                            hex_short(&dest_hash_for_link),
+                                            hex_short(lid.as_ref()),
+                                            hex_short(dest_hash_for_link.as_ref()),
                                         );
                                         self.stats.packets_dropped_invalid += 1;
                                         return IngestResult::Invalid;
                                     }
                                     relay_log!(
                                         "[relay] LRPROOF_VALID lid={} dest={}",
-                                        hex_short(&dh),
-                                        hex_short(&dest_hash_for_link),
+                                        hex_short(lid.as_ref()),
+                                        hex_short(dest_hash_for_link.as_ref()),
                                     );
                                 }
                                 // If identity can't be reconstructed, forward
@@ -1073,7 +1078,7 @@ impl<S: TransportStorage> Transport<S> {
 
                         relay_log!(
                             "[relay] PROOF link_table FORWARD lid={} ctx={:#04x} raw[0..20]={:02x?}",
-                            hex_short(&dh),
+                            hex_short(lid.as_ref()),
                             pkt.context,
                             &raw[..core::cmp::min(20, raw.len())],
                         );
@@ -1095,8 +1100,7 @@ impl<S: TransportStorage> Transport<S> {
                 }
             }
             PacketType::LinkRequest => {
-                let mut dh = [0u8; TRUNCATED_HASH_LEN];
-                dh.copy_from_slice(pkt.destination_hash);
+                let dh = DestHash::from_slice(pkt.destination_hash);
                 if self.is_local_destination(&dh) {
                     self.handle_link_request(raw, &dh, pkt.payload, now, rng, identity)
                 } else {
@@ -1111,8 +1115,8 @@ impl<S: TransportStorage> Transport<S> {
                                 path_entry.and_then(|p| p.received_on).unwrap_or(0);
                             relay_log!(
                                 "[relay] H1 LINKREQUEST link_table INSERT lid={} dest={} out_hops={} rcvd={} out={}",
-                                hex_short(&lid),
-                                hex_short(&dh),
+                                hex_short(lid.as_ref()),
+                                hex_short(dh.as_ref()),
                                 remaining,
                                 iface,
                                 outbound_iface,
@@ -1204,7 +1208,7 @@ mod tests {
     #[test]
     fn test_path_expiry() {
         let mut transport = TestTransport::new();
-        let dest = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         // Insert a path learned at timestamp 100
         let path = Path::direct(100);
@@ -1229,7 +1233,7 @@ mod tests {
 
         for i in 0u8..16 {
             let ann = PendingAnnounce {
-                dest_hash: [i; TRUNCATED_HASH_LEN],
+                dest_hash: DestHash::from([i; TRUNCATED_HASH_LEN]),
                 raw: alloc::vec![i],
                 tx_count: 0,
                 retransmit_timeout: 0,
@@ -1248,7 +1252,7 @@ mod tests {
 
         // 17th announce should fail gracefully (returns false, no panic)
         let overflow = PendingAnnounce {
-            dest_hash: [0xFF; TRUNCATED_HASH_LEN],
+            dest_hash: DestHash::from([0xFF; TRUNCATED_HASH_LEN]),
             raw: alloc::vec![0xFF],
             tx_count: 0,
             retransmit_timeout: 0,
@@ -1282,7 +1286,7 @@ mod tests {
         // Verify build_link_proof_packet produces dest_type=Link and dest_hash=link_id
         let identity = Identity::from_seed(b"link-proof-test").unwrap();
         let packet_hash = [0xAA; 32];
-        let link_id = [0xBB; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0xBBu8; TRUNCATED_HASH_LEN]);
 
         let raw = TestTransport::build_link_proof_packet(&identity, &packet_hash, &link_id)
             .expect("should build link proof packet");
@@ -1290,7 +1294,7 @@ mod tests {
         let pkt = rete_core::Packet::parse(&raw).expect("should parse");
         assert_eq!(pkt.packet_type, PacketType::Proof);
         assert_eq!(pkt.dest_type, DestType::Link);
-        assert_eq!(pkt.destination_hash, &link_id);
+        assert_eq!(pkt.destination_hash, link_id.as_ref());
         assert_eq!(pkt.payload.len(), 96);
         assert_eq!(&pkt.payload[..32], &packet_hash);
         // Verify signature is valid
@@ -1320,7 +1324,7 @@ mod tests {
         // in dest_type and destination_hash
         let identity = Identity::from_seed(b"diff-proof-test").unwrap();
         let packet_hash = [0xDD; 32];
-        let link_id = [0xEE; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0xEEu8; TRUNCATED_HASH_LEN]);
 
         let link_raw = TestTransport::build_link_proof_packet(&identity, &packet_hash, &link_id)
             .expect("link proof");
@@ -1332,7 +1336,7 @@ mod tests {
 
         assert_eq!(link_pkt.dest_type, DestType::Link);
         assert_eq!(single_pkt.dest_type, DestType::Single);
-        assert_eq!(link_pkt.destination_hash, &link_id);
+        assert_eq!(link_pkt.destination_hash, link_id.as_ref());
         assert_eq!(
             single_pkt.destination_hash,
             &packet_hash[..TRUNCATED_HASH_LEN]
@@ -1347,8 +1351,8 @@ mod tests {
 
     /// Helper: build a HEADER_2 LINKREQUEST packet targeting a relay.
     fn build_h2_linkrequest(
-        relay_id: &[u8; TRUNCATED_HASH_LEN],
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        relay_id: &IdentityHash,
+        dest_hash: &DestHash,
         payload: &[u8],
     ) -> ([u8; rete_core::MTU], usize) {
         let mut buf = [0u8; rete_core::MTU];
@@ -1358,8 +1362,8 @@ mod tests {
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
             .hops(0)
-            .transport_id(relay_id)
-            .destination_hash(dest_hash)
+            .transport_id(relay_id.as_ref())
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(payload)
             .build()
@@ -1369,8 +1373,8 @@ mod tests {
 
     /// Helper: set up a transport relay with a learned path for the destination.
     fn make_relay_transport(
-        relay_hash: [u8; TRUNCATED_HASH_LEN],
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        relay_hash: IdentityHash,
+        dest_hash: DestHash,
     ) -> TestTransport {
         let mut t = TestTransport::new();
         t.set_local_identity(relay_hash);
@@ -1380,8 +1384,8 @@ mod tests {
 
     #[test]
     fn test_h2_linkrequest_creates_link_table_entry() {
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-lr-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1412,8 +1416,8 @@ mod tests {
 
     #[test]
     fn test_link_data_forwarded_via_link_table() {
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-data-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1432,7 +1436,7 @@ mod tests {
         let data_len = PacketBuilder::new(&mut data_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
-            .destination_hash(&link_id)
+            .destination_hash(link_id.as_ref())
             .context(0x00)
             .payload(&[0x42; 16])
             .build()
@@ -1449,8 +1453,8 @@ mod tests {
 
     #[test]
     fn test_link_proof_forwarded_via_link_table() {
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-proof-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1467,7 +1471,7 @@ mod tests {
         let proof_len = PacketBuilder::new(&mut proof_buf)
             .packet_type(PacketType::Proof)
             .dest_type(DestType::Link)
-            .destination_hash(&link_id)
+            .destination_hash(link_id.as_ref())
             .context(CONTEXT_LRPROOF)
             .payload(&[0x42; 96])
             .build()
@@ -1484,7 +1488,7 @@ mod tests {
 
     #[test]
     fn test_link_data_without_link_table_entry_is_invalid() {
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut transport = TestTransport::new();
         transport.set_local_identity(relay_hash);
         let identity = Identity::from_seed(b"relay-no-entry-test").unwrap();
@@ -1513,8 +1517,8 @@ mod tests {
 
     #[test]
     fn test_link_table_entry_refreshed_on_traffic() {
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-refresh-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1532,7 +1536,7 @@ mod tests {
         let data_len = PacketBuilder::new(&mut data_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
-            .destination_hash(&link_id)
+            .destination_hash(link_id.as_ref())
             .context(0x00)
             .payload(&[0x42; 16])
             .build()
@@ -1549,8 +1553,8 @@ mod tests {
 
     #[test]
     fn test_link_table_entry_expires_after_stale_timeout() {
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-expiry-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1579,8 +1583,8 @@ mod tests {
     #[test]
     fn test_multiple_link_data_forwarded_via_link_table() {
         // Verify that multiple DATA packets can be forwarded (entry persists)
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-multi-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1597,7 +1601,7 @@ mod tests {
             let data_len = PacketBuilder::new(&mut data_buf)
                 .packet_type(PacketType::Data)
                 .dest_type(DestType::Link)
-                .destination_hash(&link_id)
+                .destination_hash(link_id.as_ref())
                 .context(0x00)
                 .payload(&[i; 16])
                 .build()
@@ -1631,8 +1635,8 @@ mod tests {
     fn test_h2_link_table_stores_post_increment_hops() {
         // Bug A: H2 handler captured inbound_hops BEFORE incrementing raw[1].
         // Python stores post-increment (Transport.py:1319,1488).
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-hops-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1662,8 +1666,8 @@ mod tests {
     fn test_link_data_rejected_with_wrong_hop_count() {
         // Bug B: Rust used hops <= max_hops (lax). Python uses exact match
         // (Transport.py:1530-1537). Wrong hop count must be rejected.
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-exact-hops-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1686,7 +1690,7 @@ mod tests {
         let data_len = PacketBuilder::new(&mut data_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
-            .destination_hash(&link_id)
+            .destination_hash(link_id.as_ref())
             .hops(correct_hops)
             .context(CONTEXT_CHANNEL)
             .payload(&[0x42; 16])
@@ -1707,7 +1711,7 @@ mod tests {
         let bad_len = PacketBuilder::new(&mut bad_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
-            .destination_hash(&link_id)
+            .destination_hash(link_id.as_ref())
             .hops(wrong_hops)
             .context(CONTEXT_CHANNEL)
             .payload(&[0x43; 16])
@@ -1726,8 +1730,8 @@ mod tests {
         // Bug C: LinkTableEntry must track the outbound interface (toward
         // responder) so bidirectional routing can validate packet direction,
         // matching Python's IDX_LT_NH_IF.
-        let relay_hash = [0x11u8; TRUNCATED_HASH_LEN];
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let relay_hash = IdentityHash::from([0x11u8; TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let mut transport = make_relay_transport(relay_hash, dest_hash);
         let identity = Identity::from_seed(b"relay-iface-test").unwrap();
         let mut rng = rand_core::OsRng;
@@ -1763,7 +1767,7 @@ mod tests {
     /// Returns (transport, link_id, responder_identity).
     fn make_transport_with_active_link(
         now: u64,
-    ) -> (TestTransport, [u8; TRUNCATED_HASH_LEN], Identity) {
+    ) -> (TestTransport, LinkId, Identity) {
         let mut transport = TestTransport::new();
         let mut rng = rand_core::OsRng;
 
@@ -1799,7 +1803,7 @@ mod tests {
         let proof_len = PacketBuilder::new(&mut proof_buf)
             .packet_type(PacketType::Proof)
             .dest_type(DestType::Link)
-            .destination_hash(&link_id)
+            .destination_hash(link_id.as_ref())
             .context(CONTEXT_LRPROOF)
             .payload(&proof_payload)
             .build()
@@ -1888,12 +1892,12 @@ mod tests {
         let req_pkt = rete_core::Packet::parse(&request_raw).expect("should parse request");
         assert_eq!(req_pkt.dest_type, DestType::Link);
         assert_eq!(req_pkt.context, CONTEXT_KEEPALIVE);
-        assert_eq!(req_pkt.destination_hash, &link_id);
+        assert_eq!(req_pkt.destination_hash, link_id.as_ref());
 
         let resp_pkt = rete_core::Packet::parse(&response_raw).expect("should parse response");
         assert_eq!(resp_pkt.dest_type, DestType::Link);
         assert_eq!(resp_pkt.context, CONTEXT_KEEPALIVE);
-        assert_eq!(resp_pkt.destination_hash, &link_id);
+        assert_eq!(resp_pkt.destination_hash, link_id.as_ref());
     }
 
     #[test]

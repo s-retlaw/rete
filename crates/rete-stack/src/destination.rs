@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rete_core::{Identity, Token, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, Identity, PathHash, Token, NAME_HASH_LEN};
 
 use crate::node_core::RequestHandler;
 use crate::ProofStrategy;
@@ -51,7 +51,7 @@ pub struct Destination {
     /// Aspect strings (e.g. ["aspect1"]).
     pub aspects: Vec<String>,
     /// The 16-byte destination hash.
-    pub dest_hash: [u8; TRUNCATED_HASH_LEN],
+    pub dest_hash: DestHash,
     /// The 10-byte name hash.
     pub name_hash: [u8; NAME_HASH_LEN],
     /// Proof generation strategy for incoming packets.
@@ -62,7 +62,7 @@ pub struct Destination {
     pub default_app_data: Option<Vec<u8>>,
     group_token: Option<Token>,
     /// Registered request handlers, keyed by path_hash.
-    request_handlers: Vec<([u8; TRUNCATED_HASH_LEN], RequestHandler)>,
+    request_handlers: Vec<(PathHash, RequestHandler)>,
 }
 
 impl Destination {
@@ -132,7 +132,7 @@ impl Destination {
         direction: Direction,
         app_name: &str,
         aspects: &[&str],
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         name_hash: [u8; NAME_HASH_LEN],
     ) -> Self {
         Destination {
@@ -152,7 +152,7 @@ impl Destination {
     }
 
     /// Get the 16-byte destination hash.
-    pub fn hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+    pub fn hash(&self) -> &DestHash {
         &self.dest_hash
     }
 
@@ -201,7 +201,7 @@ impl Destination {
     /// Look up a request handler by path_hash.
     pub fn lookup_request_handler(
         &self,
-        path_hash: &[u8; TRUNCATED_HASH_LEN],
+        path_hash: &PathHash,
     ) -> Option<&RequestHandler> {
         self.request_handlers
             .iter()
@@ -687,7 +687,7 @@ mod tests {
             Direction::In,
             "testapp",
             &["aspect1"],
-            [0u8; 16],
+            DestHash::ZERO,
             [0u8; 10],
         );
 

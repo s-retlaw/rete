@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::IdentityHash;
 
 /// Interface mode — determines path expiry timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub const PATH_EXPIRES_ROAMING: u64 = 21600;
 #[derive(Debug, Clone)]
 pub struct Path {
     /// Identity hash of the next-hop repeater, or `None` for direct.
-    pub via: Option<[u8; TRUNCATED_HASH_LEN]>,
+    pub via: Option<IdentityHash>,
     /// Monotonic timestamp (ticks or seconds) when this path was learned.
     pub learned_at: u64,
     /// Monotonic timestamp of last access (for LRU eviction).
@@ -59,7 +59,7 @@ impl Path {
     }
 
     /// Create a path via an intermediate repeater.
-    pub fn via_repeater(repeater: [u8; TRUNCATED_HASH_LEN], hops: u8, learned_at: u64) -> Self {
+    pub fn via_repeater(repeater: IdentityHash, hops: u8, learned_at: u64) -> Self {
         Path {
             via: Some(repeater),
             learned_at,
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_path_via_repeater_creation() {
-        let repeater = [0xAAu8; TRUNCATED_HASH_LEN];
+        let repeater = IdentityHash::from([0xAAu8; 16]);
         let path = Path::via_repeater(repeater, 3, 200);
         assert_eq!(path.via, Some(repeater));
         assert_eq!(path.hops, 3);

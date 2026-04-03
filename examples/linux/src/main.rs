@@ -413,14 +413,22 @@ fn parse_hex_16(hex_str: &str) -> Option<[u8; 16]> {
     bytes.as_slice().try_into().ok()
 }
 
+fn parse_dest_hash(hex_str: &str) -> Option<rete_core::DestHash> {
+    parse_hex_16(hex_str).map(rete_core::DestHash::from)
+}
+
+fn parse_link_id(hex_str: &str) -> Option<rete_core::LinkId> {
+    parse_hex_16(hex_str).map(rete_core::LinkId::from)
+}
+
 /// Parse `<cmd> <link_id_hex> <text>` into (link_id, payload).
-fn parse_link_and_text(line: &str, cmd: &str) -> Option<([u8; 16], Vec<u8>)> {
+fn parse_link_and_text(line: &str, cmd: &str) -> Option<(rete_core::LinkId, Vec<u8>)> {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     if parts.len() < 3 {
         eprintln!("[rete] usage: {cmd} <link_id_hex> <text>");
         return None;
     }
-    let link_id = parse_hex_16(parts[1])?;
+    let link_id = parse_link_id(parts[1])?;
     Some((link_id, parts[2].as_bytes().to_vec()))
 }
 
@@ -428,11 +436,11 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     match parts.first().copied()? {
         "send" if parts.len() >= 3 => Some(NodeCommand::SendData {
-            dest_hash: parse_hex_16(parts[1])?,
+            dest_hash: parse_dest_hash(parts[1])?,
             payload: parts[2].as_bytes().to_vec(),
         }),
         "link" if parts.len() >= 2 => Some(NodeCommand::InitiateLink {
-            dest_hash: parse_hex_16(parts[1])?,
+            dest_hash: parse_dest_hash(parts[1])?,
         }),
         "channel" => {
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
@@ -440,7 +448,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
                 eprintln!("[rete] usage: channel <link_id_hex> <msg_type_hex> <text>");
                 return None;
             }
-            let link_id = parse_hex_16(parts[1])?;
+            let link_id = parse_link_id(parts[1])?;
             let msg_type = u16::from_str_radix(parts[2].trim_start_matches("0x"), 16).ok()?;
             Some(NodeCommand::SendChannelMessage {
                 link_id,
@@ -449,7 +457,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             })
         }
         "path" if parts.len() >= 2 => Some(NodeCommand::RequestPath {
-            dest_hash: parse_hex_16(parts[1])?,
+            dest_hash: parse_dest_hash(parts[1])?,
         }),
         "announce" => {
             let app_data = if parts.len() >= 2 {
@@ -468,7 +476,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             Some(NodeCommand::SendResource { link_id, data })
         }
         "accept" if parts.len() >= 3 => {
-            let link_id = parse_hex_16(parts[1])?;
+            let link_id = parse_link_id(parts[1])?;
             let resource_hash = parse_hex_16(parts[2])?;
             Some(NodeCommand::AcceptResource {
                 link_id,
@@ -476,7 +484,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             })
         }
         "reject" if parts.len() >= 3 => {
-            let link_id = parse_hex_16(parts[1])?;
+            let link_id = parse_link_id(parts[1])?;
             let resource_hash = parse_hex_16(parts[2])?;
             Some(NodeCommand::RejectResource {
                 link_id,
@@ -484,7 +492,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             })
         }
         "close" if parts.len() >= 2 => Some(NodeCommand::CloseLink {
-            link_id: parse_hex_16(parts[1])?,
+            link_id: parse_link_id(parts[1])?,
         }),
         "request" => {
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
@@ -492,7 +500,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
                 eprintln!("[rete] usage: request <link_id_hex> <path> <data>");
                 return None;
             }
-            let link_id = parse_hex_16(parts[1])?;
+            let link_id = parse_link_id(parts[1])?;
             Some(NodeCommand::SendRequest {
                 link_id,
                 path: parts[2].to_string(),
@@ -507,7 +515,7 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             }
             Some(NodeCommand::AppCommand {
                 name: "lxmf-send".to_string(),
-                dest_hash: Some(parse_hex_16(parts[1])?),
+                dest_hash: Some(parse_dest_hash(parts[1])?),
                 link_id: None,
                 payload: parts[2].as_bytes().to_vec(),
             })
@@ -520,8 +528,8 @@ fn parse_command(line: &str) -> Option<NodeCommand> {
             }
             Some(NodeCommand::AppCommand {
                 name: "lxmf-link-send".to_string(),
-                dest_hash: Some(parse_hex_16(parts[2])?),
-                link_id: Some(parse_hex_16(parts[1])?),
+                dest_hash: Some(parse_dest_hash(parts[2])?),
+                link_id: Some(parse_link_id(parts[1])?),
                 payload: parts[3].as_bytes().to_vec(),
             })
         }
@@ -2018,8 +2026,8 @@ fn on_node_event(event: NodeEvent) {
         } => {
             eprintln!(
                 "[rete] link {} identified: peer {}",
-                hex::encode(&link_id[..4]),
-                hex::encode(&identity_hash[..4])
+                hex::encode(&link_id.as_bytes()[..4]),
+                hex::encode(&identity_hash.as_bytes()[..4])
             );
         }
         NodeEvent::ResourceRejected {
@@ -2028,7 +2036,7 @@ fn on_node_event(event: NodeEvent) {
         } => {
             eprintln!(
                 "[rete] RESOURCE rejected on link={} hash={}",
-                hex::encode(&link_id[..4]),
+                hex::encode(&link_id.as_bytes()[..4]),
                 hex::encode(&resource_hash[..4])
             );
             println!(
@@ -2044,8 +2052,8 @@ fn on_node_event(event: NodeEvent) {
         } => {
             eprintln!(
                 "[rete] REQUEST failed link={} req={} reason={:?}",
-                hex::encode(&link_id[..4]),
-                hex::encode(&request_id[..4]),
+                hex::encode(&link_id.as_bytes()[..4]),
+                hex::encode(&request_id.as_bytes()[..4]),
                 reason
             );
         }
@@ -2057,8 +2065,8 @@ fn on_node_event(event: NodeEvent) {
         } => {
             eprintln!(
                 "[rete] REQUEST progress link={} req={} {}/{}",
-                hex::encode(&link_id[..4]),
-                hex::encode(&request_id[..4]),
+                hex::encode(&link_id.as_bytes()[..4]),
+                hex::encode(&request_id.as_bytes()[..4]),
                 current,
                 total
             );

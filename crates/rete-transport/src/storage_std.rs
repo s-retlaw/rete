@@ -16,7 +16,7 @@ use crate::storage::{
     StorageDeque, StorageMap, TransportStorage,
 };
 use crate::transport::{AnnounceRateEntry, ChannelReceipt, LinkTableEntry, ReverseEntry};
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, LinkId, TRUNCATED_HASH_LEN};
 
 // ---------------------------------------------------------------------------
 // StdStorage — heap-allocated, growable
@@ -30,16 +30,17 @@ use rete_core::TRUNCATED_HASH_LEN;
 pub struct StdStorage;
 
 impl TransportStorage for StdStorage {
-    type PathMap = HashMap<[u8; TRUNCATED_HASH_LEN], Path>;
-    type IdentityMap = HashMap<[u8; TRUNCATED_HASH_LEN], [u8; 64]>;
+    type PathMap = HashMap<DestHash, Path>;
+    type IdentityMap = HashMap<DestHash, [u8; 64]>;
+    type AnnounceRateMap = HashMap<DestHash, AnnounceRateEntry>;
+    type PathRequestTimeMap = HashMap<DestHash, u64>;
+
     type ReverseMap = HashMap<[u8; TRUNCATED_HASH_LEN], ReverseEntry>;
     type ReceiptMap = HashMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt>;
-    type AnnounceRateMap = HashMap<[u8; TRUNCATED_HASH_LEN], AnnounceRateEntry>;
-    type PathRequestTimeMap = HashMap<[u8; TRUNCATED_HASH_LEN], u64>;
 
-    type LinkMap = HashMap<[u8; TRUNCATED_HASH_LEN], Link>;
+    type LinkMap = HashMap<LinkId, Link>;
     type ChannelReceiptMap = HashMap<[u8; TRUNCATED_HASH_LEN], ChannelReceipt>;
-    type LinkTableMap = HashMap<[u8; TRUNCATED_HASH_LEN], LinkTableEntry>;
+    type LinkTableMap = HashMap<LinkId, LinkTableEntry>;
 
     type AnnounceDeque = VecDeque<PendingAnnounce>;
     type DedupDeque = VecDeque<[u8; 32]>;

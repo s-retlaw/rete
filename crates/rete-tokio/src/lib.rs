@@ -21,7 +21,7 @@ pub(crate) mod test_utils {
     }
 }
 
-use rete_core::{Identity, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, Identity, LinkId, TRUNCATED_HASH_LEN};
 pub use rete_stack::NodeEvent;
 pub use rete_stack::ProofStrategy;
 pub use rete_stack::ResourceStrategy;
@@ -63,44 +63,44 @@ impl InterfaceSlot {
 pub enum NodeCommand {
     /// Send encrypted DATA to a destination.
     SendData {
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         payload: Vec<u8>,
     },
     /// Initiate a link to a destination.
-    InitiateLink { dest_hash: [u8; TRUNCATED_HASH_LEN] },
+    InitiateLink { dest_hash: DestHash },
     /// Send a channel message on an active link.
     SendChannelMessage {
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         message_type: u16,
         payload: Vec<u8>,
     },
     /// Request a path to a destination.
-    RequestPath { dest_hash: [u8; TRUNCATED_HASH_LEN] },
+    RequestPath { dest_hash: DestHash },
     /// Send plain data over an established link.
     SendLinkData {
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         payload: Vec<u8>,
     },
     /// Send a resource (large data) over a link.
     SendResource {
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         data: Vec<u8>,
     },
     /// Accept an offered resource (for AcceptApp strategy).
     AcceptResource {
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
     /// Reject an offered resource (for AcceptApp strategy).
     RejectResource {
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
     /// Close an established link.
-    CloseLink { link_id: [u8; TRUNCATED_HASH_LEN] },
+    CloseLink { link_id: LinkId },
     /// Send a request on an established link.
     SendRequest {
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         path: String,
         payload: Vec<u8>,
     },
@@ -115,9 +115,9 @@ pub enum NodeCommand {
         /// Subcommand name (e.g. "lxmf-send", "lxmf-link-send").
         name: String,
         /// Target destination hash (if applicable).
-        dest_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
+        dest_hash: Option<DestHash>,
         /// Target link ID (if applicable).
-        link_id: Option<[u8; TRUNCATED_HASH_LEN]>,
+        link_id: Option<LinkId>,
         /// Payload / message text.
         payload: Vec<u8>,
     },
@@ -133,7 +133,7 @@ pub struct TokioNode {
     /// Shared node logic (identity, transport, packet processing).
     pub core: HostedNodeCore,
     /// Initial data to send right after the first announce (to a pre-registered peer).
-    initial_send: Option<(Vec<u8>, [u8; TRUNCATED_HASH_LEN])>,
+    initial_send: Option<(Vec<u8>, DestHash)>,
 }
 
 impl TokioNode {
@@ -162,7 +162,7 @@ impl TokioNode {
     }
 
     /// Queue a data message to send immediately after the initial announce.
-    pub fn send_on_start(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN], data: Vec<u8>) {
+    pub fn send_on_start(&mut self, dest_hash: DestHash, data: Vec<u8>) {
         self.initial_send = Some((data, dest_hash));
     }
 

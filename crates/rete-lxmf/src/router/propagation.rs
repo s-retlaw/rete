@@ -1,6 +1,6 @@
 //! Propagation store API, deposit, retrieval request handling, prune.
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, LinkId, PathHash, TRUNCATED_HASH_LEN};
 use rete_stack::NodeCore;
 
 use crate::propagation::{MessageStore, PropagationNode};
@@ -47,7 +47,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Returns the `lxmf.propagation` destination hash, if propagation is enabled.
-    pub fn propagation_dest_hash(&self) -> Option<&[u8; TRUNCATED_HASH_LEN]> {
+    pub fn propagation_dest_hash(&self) -> Option<&DestHash> {
         self.propagation_dest_hash.as_ref()
     }
 
@@ -103,7 +103,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Get message hashes for a destination from the propagation store.
     ///
     /// Returns hashes without loading message data.
-    pub fn propagation_hashes_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Vec<[u8; 32]> {
+    pub fn propagation_hashes_for(&self, dest_hash: &DestHash) -> Vec<[u8; 32]> {
         match &self.propagation {
             Some(prop) => prop.hashes_for(dest_hash),
             None => Vec::new(),
@@ -119,7 +119,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Count messages for a destination in the propagation store.
-    pub fn propagation_count_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> usize {
+    pub fn propagation_count_for(&self, dest_hash: &DestHash) -> usize {
         match &self.propagation {
             Some(prop) => prop.count_for(dest_hash),
             None => 0,
@@ -140,7 +140,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// announcing destination, returns `Some(LxmfEvent::PropagationForward)`.
     pub fn check_propagation_forward(
         &self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
     ) -> Option<LxmfEvent> {
         let prop = self.propagation.as_ref()?;
         let count = prop.count_for(dest_hash);
@@ -177,7 +177,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     // -----------------------------------------------------------------------
 
     /// Path hash for the propagation retrieval path.
-    pub fn propagation_retrieve_path_hash() -> [u8; TRUNCATED_HASH_LEN] {
+    pub fn propagation_retrieve_path_hash() -> PathHash {
         rete_transport::request::path_hash("/lxmf/propagation/retrieve")
     }
 
@@ -193,7 +193,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Returns `None` if the path does not match or propagation is not enabled.
     pub fn handle_propagation_request(
         &self,
-        path_hash: &[u8; TRUNCATED_HASH_LEN],
+        path_hash: &PathHash,
         data: &[u8],
     ) -> Option<PropagationRetrievalResult> {
         // Check that the path matches
@@ -211,8 +211,9 @@ impl<S: MessageStore> LxmfRouter<S> {
             return None;
         }
 
-        let mut dest_hash = [0u8; TRUNCATED_HASH_LEN];
-        dest_hash.copy_from_slice(&data[..TRUNCATED_HASH_LEN]);
+        let mut dest_bytes = [0u8; TRUNCATED_HASH_LEN];
+        dest_bytes.copy_from_slice(&data[..TRUNCATED_HASH_LEN]);
+        let dest_hash = DestHash::from(dest_bytes);
 
         let message_hashes = self.propagation_hashes_for(&dest_hash);
 
@@ -235,7 +236,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         message_hashes: Vec<[u8; 32]>,
         core: &mut NodeCore<TS>,
         rng: &mut R,
@@ -265,7 +266,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         _resource_hash: &[u8; TRUNCATED_HASH_LEN],
         core: &mut NodeCore<TS>,
         rng: &mut R,
@@ -310,7 +311,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Check if a retrieval job exists for the given link_id.
-    pub fn has_retrieval_job_for_link(&self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+    pub fn has_retrieval_job_for_link(&self, link_id: &LinkId) -> bool {
         use super::RetrievalJob;
 
         self.pending_retrievals.iter().any(|job| {

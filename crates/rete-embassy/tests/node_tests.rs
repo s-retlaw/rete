@@ -18,7 +18,6 @@ use embassy_executor as _;
 use rete_core::{Identity, Packet, PacketType, MTU};
 use rete_embassy::EmbassyNode;
 use rete_stack::NodeEvent;
-use rete_transport::Transport;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -122,7 +121,7 @@ fn embassy_node_receives_encrypted_data() {
     let pkt_len = rete_core::PacketBuilder::new(&mut pkt_buf)
         .packet_type(PacketType::Data)
         .dest_type(rete_core::DestType::Single)
-        .destination_hash(&node_dest)
+        .destination_hash(node_dest.as_ref())
         .context(0x00)
         .payload(&ct_buf[..ct_len])
         .build()

@@ -24,7 +24,7 @@
 
 use crate::channel::Channel;
 use rand_core::{CryptoRng, RngCore};
-use rete_core::{Identity, Token, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, Identity, IdentityHash, LinkId, Token, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -93,7 +93,7 @@ pub const ESTABLISHMENT_TIMEOUT_PER_HOP: u64 = 6;
 /// An encrypted link session.
 pub struct Link {
     /// Unique 16-byte link identifier.
-    pub link_id: [u8; TRUNCATED_HASH_LEN],
+    pub link_id: LinkId,
     /// Current state.
     pub state: LinkState,
     /// Our role in this link.
@@ -122,7 +122,7 @@ pub struct Link {
     /// Stale timeout = keepalive × 2.
     pub stale_time: u64,
     /// Destination hash this link is associated with.
-    pub destination_hash: [u8; TRUNCATED_HASH_LEN],
+    pub destination_hash: DestHash,
     /// MTU signalling bytes (3 bytes: MTU + encryption mode).
     /// Included in LINKREQUEST and LRPROOF for protocol completeness.
     pub signalling: [u8; LINK_MTU_SIZE],
@@ -135,7 +135,7 @@ pub struct Link {
 /// Identity revealed by a remote peer via LINKIDENTIFY.
 pub struct IdentifiedPeer {
     pub_key: [u8; 64],
-    hash: [u8; TRUNCATED_HASH_LEN],
+    hash: IdentityHash,
 }
 
 impl Link {
@@ -151,7 +151,7 @@ impl Link {
     /// - `rng` — cryptographic RNG
     /// - `now` — current monotonic time
     pub fn from_request<R: RngCore + CryptoRng>(
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         request_payload: &[u8],
         rng: &mut R,
         now: u64,
@@ -182,7 +182,7 @@ impl Link {
         let shared = our_secret.diffie_hellman(&peer_pub);
 
         // HKDF-SHA256(ikm=shared, salt=link_id, info=b"", length=64)
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(&link_id), shared.as_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(link_id.as_ref()), shared.as_bytes());
         let mut derived = [0u8; 64];
         hk.expand(b"", &mut derived)
             .map_err(|_| rete_core::Error::CryptoError)?;
@@ -209,7 +209,7 @@ impl Link {
             last_outbound: now,
             keepalive_interval: KEEPALIVE_INTERVAL_SECS,
             stale_time: STALE_TIMEOUT_SECS,
-            destination_hash: [0u8; TRUNCATED_HASH_LEN],
+            destination_hash: DestHash::ZERO,
             signalling: peer_signalling,
             channel: None,
             identified: None,
@@ -233,7 +233,7 @@ impl Link {
     ) -> Result<[u8; 96 + LINK_MTU_SIZE], rete_core::Error> {
         // Build signed data: link_id || our_x25519_pub || owner_ed25519_pub || signalling
         let mut signed_data = [0u8; 80 + LINK_MTU_SIZE]; // 16 + 32 + 32 + 3
-        signed_data[..16].copy_from_slice(&self.link_id);
+        signed_data[..16].copy_from_slice(self.link_id.as_ref());
         signed_data[16..48].copy_from_slice(&self.our_x25519_pub);
         signed_data[48..80].copy_from_slice(owner_identity.ed25519_pub());
         signed_data[80..80 + LINK_MTU_SIZE].copy_from_slice(&self.signalling);
@@ -256,7 +256,7 @@ impl Link {
     /// The 3 signalling bytes encode MTU and encryption mode, matching Python's
     /// `Link.LINK_MTU_SIZE` format.
     pub fn new_initiator<R: RngCore + CryptoRng>(
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         our_ed25519_pub: &[u8; 32],
         rng: &mut R,
         now: u64,
@@ -277,7 +277,7 @@ impl Link {
         payload[64..64 + LINK_MTU_SIZE].copy_from_slice(&sig_bytes);
 
         let link = Link {
-            link_id: [0u8; TRUNCATED_HASH_LEN], // will be computed after send
+            link_id: LinkId::ZERO, // will be computed after send
             state: LinkState::Pending,
             role: LinkRole::Initiator,
             token: None,
@@ -301,7 +301,7 @@ impl Link {
     }
 
     /// Set the link_id (called after sending the LINKREQUEST and computing the hash).
-    pub fn set_link_id(&mut self, link_id: [u8; TRUNCATED_HASH_LEN]) {
+    pub fn set_link_id(&mut self, link_id: LinkId) {
         self.link_id = link_id;
         self.state = LinkState::Handshake;
     }
@@ -338,7 +338,7 @@ impl Link {
         // Python includes signalling_bytes in the signed data when present (Link.py:373).
         let mut signed_data = [0u8; 83]; // max: 16+32+32+3
         let signed_len = 80 + signalling.len();
-        signed_data[..16].copy_from_slice(&self.link_id);
+        signed_data[..16].copy_from_slice(self.link_id.as_ref());
         signed_data[16..48].copy_from_slice(&responder_x25519_pub);
         signed_data[48..80].copy_from_slice(dest_identity.ed25519_pub());
         signed_data[80..signed_len].copy_from_slice(signalling);
@@ -351,7 +351,7 @@ impl Link {
         let shared = our_secret.diffie_hellman(&peer_pub);
 
         // HKDF-SHA256(ikm=shared, salt=link_id, info=b"", length=64)
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(&self.link_id), shared.as_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(self.link_id.as_ref()), shared.as_bytes());
         let mut derived = [0u8; 64];
         hk.expand(b"", &mut derived)
             .map_err(|_| rete_core::Error::CryptoError)?;
@@ -433,11 +433,11 @@ impl Link {
         let digest = Sha256::digest(&pub_key);
         let mut hash = [0u8; TRUNCATED_HASH_LEN];
         hash.copy_from_slice(&digest[..TRUNCATED_HASH_LEN]);
-        self.identified = Some(IdentifiedPeer { pub_key, hash });
+        self.identified = Some(IdentifiedPeer { pub_key, hash: IdentityHash::from(hash) });
     }
 
     /// Identity hash of the peer, if they have sent LINKIDENTIFY.
-    pub fn identified_identity_hash(&self) -> Option<&[u8; TRUNCATED_HASH_LEN]> {
+    pub fn identified_identity_hash(&self) -> Option<&IdentityHash> {
         self.identified.as_ref().map(|p| &p.hash)
     }
 
@@ -472,7 +472,7 @@ impl Link {
     /// The payload should be the encrypted link_id (16 bytes after decryption).
     pub fn handle_close(&mut self, decrypted_payload: &[u8]) -> bool {
         if decrypted_payload.len() >= TRUNCATED_HASH_LEN
-            && decrypted_payload[..TRUNCATED_HASH_LEN] == self.link_id
+            && decrypted_payload[..TRUNCATED_HASH_LEN] == *self.link_id.as_bytes()
         {
             self.state = LinkState::Closed;
             true
@@ -487,7 +487,7 @@ impl Link {
         rng: &mut R,
         out: &mut [u8],
     ) -> Result<usize, rete_core::Error> {
-        self.encrypt(&self.link_id, rng, out)
+        self.encrypt(self.link_id.as_ref(), rng, out)
     }
 
     /// Whether a keepalive should be sent proactively.
@@ -622,7 +622,7 @@ pub fn decode_mtu(sig: &[u8; LINK_MTU_SIZE]) -> u32 {
 ///
 /// # Errors
 /// Returns an error if the raw bytes cannot be parsed as a valid packet.
-pub fn compute_link_id(raw: &[u8]) -> Result<[u8; TRUNCATED_HASH_LEN], rete_core::Error> {
+pub fn compute_link_id(raw: &[u8]) -> Result<LinkId, rete_core::Error> {
     let pkt = rete_core::Packet::parse(raw)?;
     let mut hashable_buf = [0u8; rete_core::MTU];
     let hashable_len = pkt.write_hashable_part(&mut hashable_buf)?;
@@ -638,7 +638,7 @@ pub fn compute_link_id(raw: &[u8]) -> Result<[u8; TRUNCATED_HASH_LEN], rete_core
     let digest = Sha256::digest(&hashable_buf[..effective_len]);
     let mut link_id = [0u8; TRUNCATED_HASH_LEN];
     link_id.copy_from_slice(&digest[..TRUNCATED_HASH_LEN]);
-    Ok(link_id)
+    Ok(LinkId::from(link_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn link_id_computation() {
         // Build a LINKREQUEST
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let x25519_pub = [0xBBu8; 32];
         let ed25519_pub = [0xCCu8; 32];
         let mut payload = [0u8; 64];
@@ -663,14 +663,14 @@ mod tests {
         let n = PacketBuilder::new(&mut buf)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&payload)
             .build()
             .unwrap();
 
         let link_id = compute_link_id(&buf[..n]).unwrap();
-        assert_eq!(link_id.len(), 16);
+        assert_eq!(link_id.as_ref().len(), 16);
 
         // Same input → same link_id
         let link_id2 = compute_link_id(&buf[..n]).unwrap();
@@ -686,7 +686,7 @@ mod tests {
         payload[..32].copy_from_slice(&x25519_pub);
         payload[32..].copy_from_slice(&ed25519_pub);
 
-        let link_id = [0xAAu8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
 
         assert_eq!(link.state, LinkState::Handshake);
@@ -709,7 +709,7 @@ mod tests {
         payload[..32].copy_from_slice(initiator_pub.as_bytes());
         payload[32..].copy_from_slice(&ed25519_pub);
 
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
 
         // Responder creates link
         let link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
@@ -717,7 +717,7 @@ mod tests {
         // Initiator derives same key
         let shared =
             initiator_secret.diffie_hellman(&x25519_dalek::PublicKey::from(link.our_x25519_pub));
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(&link_id), shared.as_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(link_id.as_ref()), shared.as_bytes());
         let mut derived = [0u8; 64];
         hk.expand(b"", &mut derived).unwrap();
         let initiator_token = Token::new(&derived).unwrap();
@@ -747,11 +747,11 @@ mod tests {
 
         // 67-byte payload: x25519[32] || ed25519[32] || signalling[3]
         let identity = Identity::from_seed(b"peer-for-proof-test").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let (_peer_link, request_payload) =
             Link::new_initiator(dest_hash, identity.ed25519_pub(), &mut rng, 100);
 
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let link = Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
 
         let proof = link.build_proof(&owner).unwrap();
@@ -762,7 +762,7 @@ mod tests {
         let responder_x25519_pub = &proof[64..96];
         let signalling = &proof[96..99];
         let mut signed_data = [0u8; 83];
-        signed_data[..16].copy_from_slice(&link_id);
+        signed_data[..16].copy_from_slice(link_id.as_ref());
         signed_data[16..48].copy_from_slice(responder_x25519_pub);
         signed_data[48..80].copy_from_slice(owner.ed25519_pub());
         signed_data[80..83].copy_from_slice(signalling);
@@ -774,7 +774,7 @@ mod tests {
     fn link_encrypt_decrypt_round_trip() {
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64]; // dummy LINKREQUEST payload
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
 
         let link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
 
@@ -790,7 +790,7 @@ mod tests {
     fn full_handshake_both_sides() {
         let mut rng = rand_core::OsRng;
         let responder_identity = Identity::from_seed(b"responder-full").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         // Initiator creates link
         let initiator_identity = Identity::from_seed(b"initiator-full").unwrap();
@@ -802,7 +802,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&request_payload)
             .build()
@@ -842,7 +842,7 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let responder_identity = Identity::from_seed(b"responder-bad-sig").unwrap();
         let wrong_identity = Identity::from_seed(b"wrong-identity").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         let initiator_identity = Identity::from_seed(b"initiator-bad-sig").unwrap();
         let (mut initiator_link, request_payload) =
@@ -852,7 +852,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&request_payload)
             .build()
@@ -875,7 +875,7 @@ mod tests {
     fn initiate_link_creates_pending() {
         let mut rng = rand_core::OsRng;
         let identity = Identity::from_seed(b"initiator-pending").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         let (link, payload) = Link::new_initiator(dest_hash, identity.ed25519_pub(), &mut rng, 100);
 
@@ -889,7 +889,7 @@ mod tests {
     fn link_stale_detection() {
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
         link.activate(100);
 
@@ -910,7 +910,7 @@ mod tests {
     fn keepalive_request_response() {
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
         link.activate(100);
 
@@ -927,7 +927,7 @@ mod tests {
     fn linkclose_tears_down() {
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
         link.activate(100);
 
@@ -946,7 +946,7 @@ mod tests {
     fn linkclose_wrong_id_rejected() {
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
         link.activate(100);
 
@@ -961,7 +961,7 @@ mod tests {
         // handle_keepalive on a non-active (Pending) link should still work.
         let mut rng = rand_core::OsRng;
         let identity = Identity::from_seed(b"keepalive-pending").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         let (mut link, _payload) =
             Link::new_initiator(dest_hash, identity.ed25519_pub(), &mut rng, 100);
@@ -984,7 +984,7 @@ mod tests {
         // close() twice should not panic, state should be Closed.
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
         link.activate(100);
 
@@ -1001,7 +1001,7 @@ mod tests {
     fn test_linkrequest_with_oversized_payload() {
         // LINKREQUEST with payload > 64 bytes (MTU signalling).
         // compute_link_id should still work — it strips the extra bytes.
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
         let x25519_pub = [0xBBu8; 32];
         let ed25519_pub = [0xCCu8; 32];
 
@@ -1015,7 +1015,7 @@ mod tests {
         let n = PacketBuilder::new(&mut buf)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&payload)
             .build()
@@ -1023,14 +1023,14 @@ mod tests {
 
         // compute_link_id should not fail
         let link_id = compute_link_id(&buf[..n]).unwrap();
-        assert_eq!(link_id.len(), 16);
+        assert_eq!(link_id.as_ref().len(), 16);
 
         // Also compute with standard 64-byte payload for comparison
         let mut buf2 = [0u8; MTU];
         let n2 = PacketBuilder::new(&mut buf2)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&payload[..64])
             .build()
@@ -1053,7 +1053,7 @@ mod tests {
         // RTT=0.05s (loopback) → keepalive ≈ 10s, stale ≈ 20s
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
 
         link.update_keepalive(0.05);
@@ -1068,7 +1068,7 @@ mod tests {
         // RTT=2.0s → keepalive = 360 (clamped to max), stale = 720
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
 
         link.update_keepalive(2.0);
@@ -1082,7 +1082,7 @@ mod tests {
         // RTT=0.5s → keepalive ≈ 102, stale ≈ 205
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
 
         link.update_keepalive(0.5);
@@ -1096,7 +1096,7 @@ mod tests {
         // RTT=0.001s → keepalive = 5 (clamped to min)
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
 
         link.update_keepalive(0.001);
@@ -1110,7 +1110,7 @@ mod tests {
         // RTT=0.0 → should not change defaults
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
 
         let orig_ka = link.keepalive_interval;
@@ -1125,7 +1125,7 @@ mod tests {
         // After update_keepalive(0.05), stale triggers at ~10s not 360s
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
         link.update_keepalive(0.05);
         link.activate(100);
@@ -1148,7 +1148,7 @@ mod tests {
         // After update_keepalive(0.05), needs_keepalive triggers at ~5s not 180s
         let mut rng = rand_core::OsRng;
         let payload = [0xBBu8; 64];
-        let link_id = [0x11u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x11u8; TRUNCATED_HASH_LEN]);
         let mut link = Link::from_request(link_id, &payload, &mut rng, 100).unwrap();
         link.update_keepalive(0.05);
         link.activate(100);
@@ -1167,7 +1167,7 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let responder_identity = Identity::from_seed(b"responder-data").unwrap();
         let initiator_identity = Identity::from_seed(b"initiator-data").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         let (mut initiator, request_payload) =
             Link::new_initiator(dest_hash, initiator_identity.ed25519_pub(), &mut rng, 100);
@@ -1176,7 +1176,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&request_payload)
             .build()
@@ -1226,7 +1226,7 @@ mod tests {
     fn initiator_payload_includes_signalling() {
         let mut rng = rand_core::OsRng;
         let identity = Identity::from_seed(b"signalling-test").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         let (_link, payload) =
             Link::new_initiator(dest_hash, identity.ed25519_pub(), &mut rng, 100);
@@ -1242,13 +1242,13 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let owner = Identity::from_seed(b"proof-83-test-owner").unwrap();
         let peer_id = Identity::from_seed(b"proof-83-test-peer").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         // Build initiator payload (67 bytes with signalling)
         let (_peer_link, request_payload) =
             Link::new_initiator(dest_hash, peer_id.ed25519_pub(), &mut rng, 100);
 
-        let link_id = [0x22u8; TRUNCATED_HASH_LEN];
+        let link_id = LinkId::from([0x22u8; TRUNCATED_HASH_LEN]);
         let link = Link::from_request(link_id, &request_payload, &mut rng, 100).unwrap();
 
         let proof = link.build_proof(&owner).unwrap();
@@ -1259,7 +1259,7 @@ mod tests {
         let signalling = &proof[96..99];
 
         let mut signed_data = [0u8; 83];
-        signed_data[..16].copy_from_slice(&link_id);
+        signed_data[..16].copy_from_slice(link_id.as_ref());
         signed_data[16..48].copy_from_slice(resp_x25519_pub);
         signed_data[48..80].copy_from_slice(owner.ed25519_pub());
         signed_data[80..83].copy_from_slice(signalling);
@@ -1277,7 +1277,7 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let responder_identity = Identity::from_seed(b"compat-responder").unwrap();
         let initiator_identity = Identity::from_seed(b"compat-initiator").unwrap();
-        let dest_hash = [0xAAu8; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
         let (mut initiator_link, request_payload) =
             Link::new_initiator(dest_hash, initiator_identity.ed25519_pub(), &mut rng, 100);
@@ -1286,7 +1286,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&request_payload)
             .build()
@@ -1300,7 +1300,7 @@ mod tests {
 
         // Manually build 96-byte proof (old format, no signalling in signed data)
         let mut signed_data_80 = [0u8; 80];
-        signed_data_80[..16].copy_from_slice(&link_id);
+        signed_data_80[..16].copy_from_slice(link_id.as_ref());
         signed_data_80[16..48].copy_from_slice(&responder_link.our_x25519_pub);
         signed_data_80[48..80].copy_from_slice(responder_identity.ed25519_pub());
         let sig = responder_identity.sign(&signed_data_80).unwrap();

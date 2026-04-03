@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, TRUNCATED_HASH_LEN};
 
 /// Metadata for a stored message (kept in-memory index).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub struct FileMessageStore {
     /// message_hash (as [u8;32]) -> metadata
     index: HashMap<[u8; 32], MessageMeta>,
     /// dest_hash -> list of message_hashes
-    by_dest: HashMap<[u8; TRUNCATED_HASH_LEN], Vec<[u8; 32]>>,
+    by_dest: HashMap<DestHash, Vec<[u8; 32]>>,
 }
 
 impl FileMessageStore {
@@ -81,7 +81,7 @@ impl FileMessageStore {
 
         for (hex_hash, meta) in raw {
             let hash = hex_to_array::<32>(&hex_hash)?;
-            let dest = hex_to_array::<16>(&meta.dest)?;
+            let dest = DestHash::from(hex_to_array::<16>(&meta.dest)?);
 
             self.by_dest.entry(dest).or_default().push(hash);
             self.index.insert(hash, meta);
@@ -141,7 +141,7 @@ impl FileMessageStore {
                 timestamp,
             };
 
-            self.by_dest.entry(dest).or_default().push(hash);
+            self.by_dest.entry(DestHash::from(dest)).or_default().push(hash);
             self.index.insert(hash, meta);
         }
 
@@ -173,7 +173,7 @@ impl FileMessageStore {
 impl MessageStore for FileMessageStore {
     fn store(
         &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         message_hash: [u8; 32],
         data: &[u8],
         timestamp: u64,
@@ -209,7 +209,7 @@ impl MessageStore for FileMessageStore {
         self.index.contains_key(message_hash)
     }
 
-    fn hashes_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Vec<[u8; 32]> {
+    fn hashes_for(&self, dest_hash: &DestHash) -> Vec<[u8; 32]> {
         self.by_dest.get(dest_hash).cloned().unwrap_or_default()
     }
 
@@ -222,6 +222,7 @@ impl MessageStore for FileMessageStore {
         if let Some(meta) = self.index.remove(message_hash) {
             // Remove from by_dest index
             if let Ok(dest) = hex_to_array::<16>(&meta.dest) {
+                let dest = DestHash::from(dest);
                 if let Some(hashes) = self.by_dest.get_mut(&dest) {
                     hashes.retain(|h| h != message_hash);
                     if hashes.is_empty() {
@@ -262,6 +263,7 @@ impl MessageStore for FileMessageStore {
             // Remove from index
             if let Some(meta) = self.index.remove(hash) {
                 if let Ok(dest) = hex_to_array::<16>(&meta.dest) {
+                    let dest = DestHash::from(dest);
                     if let Some(hashes) = self.by_dest.get_mut(&dest) {
                         hashes.retain(|h| h != hash);
                         if hashes.is_empty() {
@@ -279,7 +281,7 @@ impl MessageStore for FileMessageStore {
         count
     }
 
-    fn destinations_with_messages(&self) -> Vec<[u8; TRUNCATED_HASH_LEN]> {
+    fn destinations_with_messages(&self) -> Vec<DestHash> {
         self.by_dest.keys().copied().collect()
     }
 
@@ -287,7 +289,7 @@ impl MessageStore for FileMessageStore {
         self.index.len()
     }
 
-    fn count_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> usize {
+    fn count_for(&self, dest_hash: &DestHash) -> usize {
         self.by_dest.get(dest_hash).map_or(0, |v| v.len())
     }
 
@@ -315,7 +317,7 @@ impl Default for AnyMessageStore {
 impl MessageStore for AnyMessageStore {
     fn store(
         &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         message_hash: [u8; 32],
         data: &[u8],
         timestamp: u64,
@@ -331,7 +333,7 @@ impl MessageStore for AnyMessageStore {
             Self::File(s) => s.has_message(hash),
         }
     }
-    fn hashes_for(&self, dest: &[u8; TRUNCATED_HASH_LEN]) -> Vec<[u8; 32]> {
+    fn hashes_for(&self, dest: &DestHash) -> Vec<[u8; 32]> {
         match self {
             Self::InMemory(s) => s.hashes_for(dest),
             Self::File(s) => s.hashes_for(dest),
@@ -355,7 +357,7 @@ impl MessageStore for AnyMessageStore {
             Self::File(s) => s.prune(now, max_age_secs),
         }
     }
-    fn destinations_with_messages(&self) -> Vec<[u8; TRUNCATED_HASH_LEN]> {
+    fn destinations_with_messages(&self) -> Vec<DestHash> {
         match self {
             Self::InMemory(s) => s.destinations_with_messages(),
             Self::File(s) => s.destinations_with_messages(),
@@ -367,7 +369,7 @@ impl MessageStore for AnyMessageStore {
             Self::File(s) => s.message_count(),
         }
     }
-    fn count_for(&self, dest: &[u8; TRUNCATED_HASH_LEN]) -> usize {
+    fn count_for(&self, dest: &DestHash) -> usize {
         match self {
             Self::InMemory(s) => s.count_for(dest),
             Self::File(s) => s.count_for(dest),
@@ -414,7 +416,7 @@ mod tests {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
         let data = &[1u8, 2, 3, 4, 5];
-        assert!(store.store([0x01; 16], [0x02; 32], data, 1000));
+        assert!(store.store([0x01; 16].into(), [0x02; 32], data, 1000));
         assert_eq!(store.get_data(&[0x02; 32]), Some(vec![1, 2, 3, 4, 5]));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -423,8 +425,8 @@ mod tests {
     fn test_dedup() {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
-        assert!(store.store([0x01; 16], [0x02; 32], &[1, 2, 3], 1000));
-        assert!(!store.store([0x01; 16], [0x02; 32], &[1, 2, 3], 1001));
+        assert!(store.store([0x01; 16].into(), [0x02; 32], &[1, 2, 3], 1000));
+        assert!(!store.store([0x01; 16].into(), [0x02; 32], &[1, 2, 3], 1001));
         assert_eq!(store.message_count(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -434,7 +436,7 @@ mod tests {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
         assert!(!store.has_message(&[0x02; 32]));
-        store.store([0x01; 16], [0x02; 32], &[1], 1000);
+        store.store([0x01; 16].into(), [0x02; 32], &[1], 1000);
         assert!(store.has_message(&[0x02; 32]));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -443,10 +445,10 @@ mod tests {
     fn test_hashes_for() {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
-        let dest = [0x01; 16];
+        let dest = DestHash::from([0x01; 16]);
         store.store(dest, [0xAA; 32], &[1], 1000);
         store.store(dest, [0xBB; 32], &[2], 1001);
-        store.store([0x02; 16], [0xCC; 32], &[3], 1002);
+        store.store([0x02; 16].into(), [0xCC; 32], &[3], 1002);
         let hashes = store.hashes_for(&dest);
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains(&[0xAA; 32]));
@@ -458,11 +460,11 @@ mod tests {
     fn test_mark_delivered() {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
-        store.store([0x01; 16], [0x02; 32], &[1, 2, 3], 1000);
+        store.store([0x01; 16].into(), [0x02; 32], &[1, 2, 3], 1000);
         assert!(store.mark_delivered(&[0x02; 32]));
         assert_eq!(store.message_count(), 0);
         assert!(!store.has_message(&[0x02; 32]));
-        assert!(store.hashes_for(&[0x01; 16]).is_empty());
+        assert!(store.hashes_for(&DestHash::from([0x01; 16])).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -470,7 +472,7 @@ mod tests {
     fn test_prune() {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
-        let dest = [0x01; 16];
+        let dest = DestHash::from([0x01; 16]);
         store.store(dest, [0x01; 32], &[1], 1000);
         store.store(dest, [0x02; 32], &[2], 2000);
         store.store(dest, [0x03; 32], &[3], 3000);
@@ -486,8 +488,8 @@ mod tests {
     fn test_destinations_with_messages() {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
-        store.store([0x01; 16], [0x01; 32], &[1], 1000);
-        store.store([0x02; 16], [0x02; 32], &[2], 1000);
+        store.store([0x01; 16].into(), [0x01; 32], &[1], 1000);
+        store.store([0x02; 16].into(), [0x02; 32], &[2], 1000);
         let dests = store.destinations_with_messages();
         assert_eq!(dests.len(), 2);
         let _ = fs::remove_dir_all(&dir);
@@ -497,8 +499,8 @@ mod tests {
     fn test_all_message_hashes() {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
-        store.store([0x01; 16], [0xAA; 32], &[1], 1000);
-        store.store([0x02; 16], [0xBB; 32], &[2], 1000);
+        store.store([0x01; 16].into(), [0xAA; 32], &[1], 1000);
+        store.store([0x02; 16].into(), [0xBB; 32], &[2], 1000);
         let hashes = store.all_message_hashes();
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains(&[0xAA; 32]));
@@ -510,7 +512,7 @@ mod tests {
     fn test_count_for() {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
-        let dest = [0x01; 16];
+        let dest = DestHash::from([0x01; 16]);
         assert_eq!(store.count_for(&dest), 0);
         store.store(dest, [0xAA; 32], &[1], 1000);
         store.store(dest, [0xBB; 32], &[2], 1001);
@@ -529,8 +531,8 @@ mod tests {
         // Store messages, then drop
         {
             let mut store = FileMessageStore::open(dir.clone()).unwrap();
-            store.store([0x01; 16], [0xAA; 32], &[10, 20, 30], 1000);
-            store.store([0x01; 16], [0xBB; 32], &[40, 50], 2000);
+            store.store([0x01; 16].into(), [0xAA; 32], &[10, 20, 30], 1000);
+            store.store([0x01; 16].into(), [0xBB; 32], &[40, 50], 2000);
         }
 
         // Reopen — messages should still be there
@@ -541,7 +543,7 @@ mod tests {
         assert_eq!(store.get_data(&[0xAA; 32]), Some(vec![10, 20, 30]));
         assert_eq!(store.get_data(&[0xBB; 32]), Some(vec![40, 50]));
 
-        let hashes = store.hashes_for(&[0x01; 16]);
+        let hashes = store.hashes_for(&DestHash::from([0x01; 16]));
         assert_eq!(hashes.len(), 2);
 
         let _ = fs::remove_dir_all(&dir);
@@ -550,12 +552,13 @@ mod tests {
     #[test]
     fn test_rebuilds_index_from_files() {
         let dir = temp_dir();
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
+        let dest_bytes: [u8; 16] = dest.into();
 
         // Build data that starts with dest_hash (like real LXMF messages)
-        let mut data1 = Vec::from(dest);
+        let mut data1 = Vec::from(dest_bytes);
         data1.extend_from_slice(&[1, 2, 3]);
-        let mut data2 = Vec::from(dest);
+        let mut data2 = Vec::from(dest_bytes);
         data2.extend_from_slice(&[4, 5, 6]);
 
         // Store messages
@@ -587,7 +590,7 @@ mod tests {
         let dir = temp_dir();
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
         let hash = [0xAA; 32];
-        store.store([0x01; 16], hash, &[1, 2, 3], 1000);
+        store.store([0x01; 16].into(), hash, &[1, 2, 3], 1000);
 
         let file_path = dir.join(hex::encode(hash));
         assert!(file_path.exists());
@@ -604,8 +607,8 @@ mod tests {
         let mut store = FileMessageStore::open(dir.clone()).unwrap();
         let old_hash = [0x01; 32];
         let new_hash = [0x02; 32];
-        store.store([0x01; 16], old_hash, &[1], 1000);
-        store.store([0x01; 16], new_hash, &[2], 5000);
+        store.store([0x01; 16].into(), old_hash, &[1], 1000);
+        store.store([0x01; 16].into(), new_hash, &[2], 5000);
 
         store.prune(6000, 2000);
 
@@ -622,8 +625,8 @@ mod tests {
 
         {
             let mut store = FileMessageStore::open(dir.clone()).unwrap();
-            store.store([0x01; 16], [0xAA; 32], &[1], 1000);
-            store.store([0x01; 16], [0xBB; 32], &[2], 2000);
+            store.store([0x01; 16].into(), [0xAA; 32], &[1], 1000);
+            store.store([0x01; 16].into(), [0xBB; 32], &[2], 2000);
             store.mark_delivered(&[0xAA; 32]);
         }
 

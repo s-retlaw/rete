@@ -24,7 +24,7 @@ fn build_header1_data(dest_hash: &[u8; TRUNCATED_HASH_LEN], payload: &[u8]) -> V
     let n = PacketBuilder::new(&mut buf)
         .packet_type(PacketType::Data)
         .dest_type(DestType::Single)
-        .destination_hash(dest_hash)
+        .destination_hash(dest_hash.as_ref())
         .context(0x00)
         .payload(payload)
         .build()
@@ -43,8 +43,8 @@ fn build_header2_data(
         .packet_type(PacketType::Data)
         .dest_type(DestType::Single)
         .transport_type(TRANSPORT_TYPE_TRANSPORT)
-        .transport_id(transport_id)
-        .destination_hash(dest_hash)
+        .transport_id(transport_id.as_ref())
+        .destination_hash(dest_hash.as_ref())
         .context(0x00)
         .payload(payload)
         .build()
@@ -126,13 +126,13 @@ fn forward_excludes_source_interface() {
                 node.core.enable_transport();
 
                 let local_hash = node.core.identity.hash();
-                let dest = [0xCC; TRUNCATED_HASH_LEN];
-                let next_hop = [0xDD; TRUNCATED_HASH_LEN];
+                let dest = rete_core::DestHash::from([0xCC; TRUNCATED_HASH_LEN]);
+                let next_hop = rete_core::IdentityHash::from([0xDD; TRUNCATED_HASH_LEN]);
 
                 let path = rete_transport::Path::via_repeater(next_hop, 3, 100);
                 node.core.transport.insert_path(dest, path);
 
-                let data = build_header2_data(&local_hash, &dest, b"forward test");
+                let data = build_header2_data(local_hash.as_bytes(), dest.as_bytes(), b"forward test");
                 let inbound = vec![InboundMsg { iface_idx: 0, data }];
 
                 let outbound = run_multi_with_inbound(&mut node, 2, inbound).await;
@@ -207,7 +207,7 @@ fn local_data_not_forwarded() {
                 let mut node = make_node(b"multi-iface-3");
                 let node_dest = *node.core.dest_hash();
 
-                let data = build_header1_data(&node_dest, b"local data");
+                let data = build_header1_data(node_dest.as_bytes(), b"local data");
                 let inbound = vec![InboundMsg { iface_idx: 0, data }];
 
                 let outbound = run_multi_with_inbound(&mut node, 2, inbound).await;
@@ -242,14 +242,14 @@ fn proof_routed_to_correct_interface() {
                 node.core.enable_transport();
 
                 let local_hash = node.core.identity.hash();
-                let dest = [0xCC; TRUNCATED_HASH_LEN];
-                let next_hop = [0xDD; TRUNCATED_HASH_LEN];
+                let dest = rete_core::DestHash::from([0xCC; TRUNCATED_HASH_LEN]);
+                let next_hop = rete_core::IdentityHash::from([0xDD; TRUNCATED_HASH_LEN]);
 
                 let path = rete_transport::Path::via_repeater(next_hop, 3, 100);
                 node.core.transport.insert_path(dest, path);
 
                 // Forward a DATA on iface 1 to create reverse entry
-                let data = build_header2_data(&local_hash, &dest, b"proof routing test");
+                let data = build_header2_data(local_hash.as_bytes(), dest.as_bytes(), b"proof routing test");
                 let pkt_hash = Packet::parse(&data).unwrap().compute_hash();
 
                 let inbound_data = vec![InboundMsg { iface_idx: 1, data }];
@@ -262,7 +262,7 @@ fn proof_routed_to_correct_interface() {
                 let proof_len = PacketBuilder::new(&mut proof_buf)
                     .packet_type(PacketType::Proof)
                     .dest_type(DestType::Single)
-                    .destination_hash(&trunc)
+                    .destination_hash(trunc.as_ref())
                     .context(0x00)
                     .payload(b"proof")
                     .build()

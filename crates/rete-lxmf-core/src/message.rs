@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rete_core::msgpack::{self, MsgpackError};
-use rete_core::Identity;
+use rete_core::{DestHash, Identity};
 use sha2::{Digest, Sha256};
 
 /// Errors from LXMF message packing, unpacking, and verification.
@@ -109,9 +109,9 @@ pub const LINK_MDU_DEFAULT: usize = 431;
 #[derive(Debug)]
 pub struct LXMessage {
     /// Destination hash (16 bytes).
-    pub destination_hash: [u8; 16],
-    /// Source hash (16 bytes).
-    pub source_hash: [u8; 16],
+    pub destination_hash: DestHash,
+    /// Source hash (16 bytes) — the sender's destination hash.
+    pub source_hash: DestHash,
     /// Message timestamp as a UNIX epoch float.
     pub timestamp: f64,
     /// Message title (bytes).
@@ -139,8 +139,8 @@ impl LXMessage {
     /// Signing matches Python LXMF: `sign(hashed_part + SHA256(hashed_part))`
     /// where `hashed_part = dest_hash || source_hash || msgpack_payload`.
     pub fn new(
-        destination_hash: [u8; 16],
-        source_hash: [u8; 16],
+        destination_hash: DestHash,
+        source_hash: DestHash,
         source_identity: &Identity,
         title: &[u8],
         content: &[u8],
@@ -150,7 +150,7 @@ impl LXMessage {
         // Build msgpack payload
         let msgpack_payload = encode_msgpack_payload(timestamp, title, content, &fields);
 
-        let sign_data = build_sign_data(&destination_hash, &source_hash, &msgpack_payload);
+        let sign_data = build_sign_data(destination_hash.as_bytes(), source_hash.as_bytes(), &msgpack_payload);
 
         let signature = source_identity
             .sign(&sign_data)
@@ -184,8 +184,8 @@ impl LXMessage {
             self.stamp.as_ref(),
         );
         let mut out = Vec::with_capacity(96 + msgpack_payload.len());
-        out.extend_from_slice(&self.destination_hash);
-        out.extend_from_slice(&self.source_hash);
+        out.extend_from_slice(self.destination_hash.as_ref());
+        out.extend_from_slice(self.source_hash.as_ref());
         out.extend_from_slice(&self.signature);
         out.extend_from_slice(&msgpack_payload);
         out
@@ -203,13 +203,15 @@ impl LXMessage {
             return Err(LxmfMessageError::TooShort);
         }
 
-        let mut destination_hash = [0u8; 16];
-        let mut source_hash = [0u8; 16];
+        let mut dest_bytes = [0u8; 16];
+        let mut src_bytes = [0u8; 16];
         let mut signature = [0u8; 64];
 
-        destination_hash.copy_from_slice(&data[..16]);
-        source_hash.copy_from_slice(&data[16..32]);
+        dest_bytes.copy_from_slice(&data[..16]);
+        src_bytes.copy_from_slice(&data[16..32]);
         signature.copy_from_slice(&data[32..96]);
+        let destination_hash = DestHash::from(dest_bytes);
+        let source_hash = DestHash::from(src_bytes);
         let msgpack_payload = &data[96..];
 
         // Parse msgpack payload (extracts stamp if present)
@@ -222,7 +224,7 @@ impl LXMessage {
             let payload_for_signing =
                 encode_msgpack_payload(timestamp, &title, &content, &fields);
             let sign_data =
-                build_sign_data(&destination_hash, &source_hash, &payload_for_signing);
+                build_sign_data(destination_hash.as_bytes(), source_hash.as_bytes(), &payload_for_signing);
             identity
                 .verify(&sign_data, &signature)
                 .map_err(|_| LxmfMessageError::InvalidSignature)?;
@@ -267,8 +269,8 @@ impl LXMessage {
     pub fn message_id(&self) -> [u8; 32] {
         let payload = encode_msgpack_payload(self.timestamp, &self.title, &self.content, &self.fields);
         let mut hasher = Sha256::new();
-        hasher.update(&self.destination_hash);
-        hasher.update(&self.source_hash);
+        hasher.update(self.destination_hash.as_ref());
+        hasher.update(self.source_hash.as_ref());
         hasher.update(&payload);
         hasher.finalize().into()
     }
@@ -332,7 +334,7 @@ impl LXMessage {
         let ct_len = recipient.encrypt(plaintext, rng, &mut ct_buf).ok()?;
 
         let mut paper_packed = Vec::with_capacity(16 + ct_len);
-        paper_packed.extend_from_slice(&self.destination_hash);
+        paper_packed.extend_from_slice(self.destination_hash.as_ref());
         paper_packed.extend_from_slice(&ct_buf[..ct_len]);
 
         if paper_packed.len() > PAPER_MDU {
@@ -351,7 +353,7 @@ impl LXMessage {
     /// Returns `(destination_hash, encrypted_payload)` — the caller must
     /// decrypt the payload using their identity's private key and then
     /// call `LXMessage::unpack` on the decrypted data.
-    pub fn from_uri(uri: &str) -> Option<([u8; 16], Vec<u8>)> {
+    pub fn from_uri(uri: &str) -> Option<(DestHash, Vec<u8>)> {
         let encoded = uri.strip_prefix(URI_PREFIX)?;
         let data = base64url_decode(encoded)?;
 
@@ -359,11 +361,11 @@ impl LXMessage {
             return None;
         }
 
-        let mut dest_hash = [0u8; 16];
-        dest_hash.copy_from_slice(&data[..16]);
+        let mut dest_bytes = [0u8; 16];
+        dest_bytes.copy_from_slice(&data[..16]);
         let encrypted = data[16..].to_vec();
 
-        Some((dest_hash, encrypted))
+        Some((DestHash::from(dest_bytes), encrypted))
     }
 }
 
@@ -571,10 +573,15 @@ mod tests {
     use alloc::vec;
     use rete_core::Identity;
 
+    /// Convert an IdentityHash to DestHash for test use (same underlying bytes).
+    fn identity_to_dest(ih: rete_core::IdentityHash) -> DestHash {
+        DestHash::from_slice(ih.as_ref())
+    }
+
     fn make_test_message() -> (LXMessage, Identity) {
         let source = Identity::from_seed(b"lxmf-source-test").unwrap();
-        let source_hash = source.hash();
-        let dest_hash = [0xAA; 16];
+        let source_hash = identity_to_dest(source.hash());
+        let dest_hash = DestHash::from([0xAA; 16]);
         let timestamp = 1700000000.0_f64;
 
         let msg = LXMessage::new(
@@ -631,14 +638,14 @@ mod tests {
     #[test]
     fn test_lxmf_with_fields() {
         let source = Identity::from_seed(b"lxmf-fields-test").unwrap();
-        let source_hash = source.hash();
+        let source_hash = identity_to_dest(source.hash());
 
         let mut fields = BTreeMap::new();
         fields.insert(FIELD_FILE_ATTACHMENTS, b"attachment data".to_vec());
         fields.insert(FIELD_IMAGE, b"image data".to_vec());
 
         let msg = LXMessage::new(
-            [0xBB; 16],
+            DestHash::from([0xBB; 16]),
             source_hash,
             &source,
             b"With Fields",
@@ -662,11 +669,11 @@ mod tests {
     #[test]
     fn test_lxmf_fits_in_packet() {
         let source = Identity::from_seed(b"lxmf-size-test").unwrap();
-        let source_hash = source.hash();
+        let source_hash = identity_to_dest(source.hash());
 
         // Small message should fit
         let small = LXMessage::new(
-            [0xCC; 16],
+            DestHash::from([0xCC; 16]),
             source_hash,
             &source,
             b"Hi",
@@ -680,7 +687,7 @@ mod tests {
         // Large message should not fit
         let big_content = vec![0xAA; 500];
         let big = LXMessage::new(
-            [0xCC; 16],
+            DestHash::from([0xCC; 16]),
             source_hash,
             &source,
             b"Big",
@@ -695,10 +702,10 @@ mod tests {
     #[test]
     fn test_lxmf_empty_content() {
         let source = Identity::from_seed(b"lxmf-empty-test").unwrap();
-        let source_hash = source.hash();
+        let source_hash = identity_to_dest(source.hash());
 
         let msg = LXMessage::new(
-            [0xDD; 16],
+            DestHash::from([0xDD; 16]),
             source_hash,
             &source,
             b"Title Only",
@@ -741,7 +748,7 @@ mod tests {
 
         let msg = LXMessage::new(
             dest_hash,
-            identity.hash(),
+            identity_to_dest(identity.hash()),
             &identity,
             b"Hello",
             b"Paper world!",

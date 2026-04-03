@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
-use rete_core::{MTU, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, MTU};
 use rete_transport::{PendingAnnounce, Transport};
 
 use super::{NodeCore, OutboundPacket};
@@ -61,7 +61,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// identity with that destination's app_name/aspects, and queues it.
     pub fn queue_announce_for<R: RngCore + CryptoRng>(
         &mut self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
         app_data: Option<&[u8]>,
         rng: &mut R,
         now: u64,

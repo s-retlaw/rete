@@ -45,6 +45,7 @@
 //!   plaintext  = PKCS7_unpad(AES-256-CBC-decrypt(enc_key, iv, aes_body))
 //! ```
 
+use crate::hash_types::{DestHash, IdentityHash};
 use crate::token::{Token, TOKEN_OVERHEAD};
 use crate::{Error, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
@@ -62,7 +63,7 @@ pub struct Identity {
     /// Ed25519 verifying key (32 bytes).
     pub(crate) ed25519_pub: [u8; 32],
     /// Precomputed identity hash (SHA-256(pub_key)[0:16]).
-    cached_hash: [u8; TRUNCATED_HASH_LEN],
+    cached_hash: IdentityHash,
 }
 
 /// Compute identity hash from a 64-byte combined public key.
@@ -70,16 +71,16 @@ pub struct Identity {
 /// `identity_hash = SHA-256(pub_key)[0:16]`
 ///
 /// Format: `pub_key = X25519_pub[0:32] || Ed25519_pub[32:64]`
-pub fn identity_hash(pub_key: &[u8; 64]) -> [u8; TRUNCATED_HASH_LEN] {
+pub fn identity_hash(pub_key: &[u8; 64]) -> IdentityHash {
     let digest = Sha256::digest(pub_key);
     let mut out = [0u8; TRUNCATED_HASH_LEN];
     out.copy_from_slice(&digest[..TRUNCATED_HASH_LEN]);
-    out
+    IdentityHash::new(out)
 }
 
 impl Identity {
     /// Compute identity hash from raw public key halves.
-    fn compute_hash(x25519_pub: &[u8; 32], ed25519_pub: &[u8; 32]) -> [u8; TRUNCATED_HASH_LEN] {
+    fn compute_hash(x25519_pub: &[u8; 32], ed25519_pub: &[u8; 32]) -> IdentityHash {
         let mut pub_key = [0u8; 64];
         pub_key[..32].copy_from_slice(x25519_pub);
         pub_key[32..].copy_from_slice(ed25519_pub);
@@ -192,7 +193,7 @@ impl Identity {
     /// Returns the precomputed 16-byte identity hash.
     ///
     /// `identity_hash = SHA-256(pub_key)[0:16]`
-    pub fn hash(&self) -> [u8; TRUNCATED_HASH_LEN] {
+    pub fn hash(&self) -> IdentityHash {
         self.cached_hash
     }
 
@@ -279,7 +280,7 @@ impl Identity {
 
         // 3. HKDF → 64 bytes (salt = identity hash, info = empty)
         let salt = self.hash();
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(salt.as_ref()), shared.as_bytes());
         let mut derived = [0u8; 64];
         hk.expand(b"", &mut derived)
             .map_err(|_| Error::CryptoError)?;
@@ -324,7 +325,7 @@ impl Identity {
         let shared = ephemeral_secret.diffie_hellman(&target_pub);
 
         let salt = self.hash();
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(salt.as_ref()), shared.as_bytes());
         let mut derived = [0u8; 64];
         hk.expand(b"", &mut derived)
             .map_err(|_| Error::CryptoError)?;
@@ -360,7 +361,7 @@ impl Identity {
 
         // 2. HKDF → 64 bytes (salt = identity hash, info = empty)
         let salt = self.hash();
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(salt.as_ref()), shared.as_bytes());
         let mut derived = [0u8; 64];
         hk.expand(b"", &mut derived)
             .map_err(|_| Error::CryptoError)?;
@@ -400,7 +401,7 @@ impl Identity {
             let secret = x25519_dalek::StaticSecret::from(*ratchet_prv);
             let shared = secret.diffie_hellman(&ephemeral_pub);
 
-            let hk = hkdf::Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+            let hk = hkdf::Hkdf::<Sha256>::new(Some(salt.as_ref()), shared.as_bytes());
             let mut derived = [0u8; 64];
             if hk.expand(b"", &mut derived).is_err() {
                 continue;
@@ -467,8 +468,8 @@ pub fn ratchet_id(ratchet_pub: &[u8; 32]) -> [u8; NAME_HASH_LEN] {
 /// ```
 pub fn destination_hashes(
     expanded_name: &str,
-    identity_hash: Option<&[u8; TRUNCATED_HASH_LEN]>,
-) -> ([u8; TRUNCATED_HASH_LEN], [u8; NAME_HASH_LEN]) {
+    identity_hash: Option<&IdentityHash>,
+) -> (DestHash, [u8; NAME_HASH_LEN]) {
     let name_digest = Sha256::digest(expanded_name.as_bytes());
     let mut name_hash = [0u8; NAME_HASH_LEN];
     name_hash.copy_from_slice(&name_digest[..NAME_HASH_LEN]);
@@ -476,11 +477,11 @@ pub fn destination_hashes(
     let mut hasher = Sha256::new();
     hasher.update(&name_hash);
     if let Some(id) = identity_hash {
-        hasher.update(id.as_slice());
+        hasher.update(id.as_ref());
     }
-    let dest_hash: [u8; TRUNCATED_HASH_LEN] =
-        hasher.finalize()[..TRUNCATED_HASH_LEN].try_into().unwrap();
-    (dest_hash, name_hash)
+    let mut dest = [0u8; TRUNCATED_HASH_LEN];
+    dest.copy_from_slice(&hasher.finalize()[..TRUNCATED_HASH_LEN]);
+    (DestHash::new(dest), name_hash)
 }
 
 /// Convenience wrapper — returns only the 16-byte destination hash.
@@ -488,8 +489,8 @@ pub fn destination_hashes(
 /// Delegates to [`destination_hashes`].
 pub fn destination_hash(
     expanded_name: &str,
-    identity_hash: Option<&[u8; TRUNCATED_HASH_LEN]>,
-) -> [u8; TRUNCATED_HASH_LEN] {
+    identity_hash: Option<&IdentityHash>,
+) -> DestHash {
     destination_hashes(expanded_name, identity_hash).0
 }
 
@@ -574,9 +575,10 @@ mod tests {
     #[test]
     fn destination_hash_plain() {
         // destination_hash_vectors[6]: broadcast, no identity
-        // From vectors.json — verify length and stability
-        let h = destination_hash("broadcast", None);
-        assert_eq!(h.len(), 16);
+        // Verify the computation is stable
+        let h1 = destination_hash("broadcast", None);
+        let h2 = destination_hash("broadcast", None);
+        assert_eq!(h1, h2);
     }
 
     #[test]
@@ -584,25 +586,24 @@ mod tests {
         // destination_hash_vectors[0]: alice, testapp.aspect1
         // The exact expected value comes from vectors.json
         // Verify the computation is stable (same inputs → same output)
-        let fake_id_hash = [
+        let fake_id_hash = IdentityHash::new([
             0xfdu8, 0x9f, 0x12, 0x1e, 0x29, 0x3b, 0xf4, 0xa4, 0x15, 0xdd, 0x74, 0x36, 0x6f, 0xf7,
             0x5f, 0x69,
-        ];
+        ]);
         let mut name_buf = [0u8; 32];
         let expanded = expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
         let h1 = destination_hash(expanded, Some(&fake_id_hash));
         let h2 = destination_hash(expanded, Some(&fake_id_hash));
         assert_eq!(h1, h2, "destination hash must be deterministic");
-        assert_eq!(h1.len(), 16);
     }
 
     #[test]
     fn destination_hashes_with_identity() {
         // destination_hash_vectors[0]: alice, testapp.aspect1
-        let id_hash = [
+        let id_hash = IdentityHash::new([
             0xfdu8, 0x9f, 0x12, 0x1e, 0x29, 0x3b, 0xf4, 0xa4, 0x15, 0xdd, 0x74, 0x36, 0x6f,
             0xf7, 0x5f, 0x69,
-        ];
+        ]);
         let mut name_buf = [0u8; 32];
         let expanded = expand_name("testapp", &["aspect1"], &mut name_buf).unwrap();
         let (dest_hash, name_hash) = destination_hashes(expanded, Some(&id_hash));
@@ -624,7 +625,6 @@ mod tests {
     fn destination_hashes_plain() {
         // PLAIN destination — no identity hash
         let (dest_hash, name_hash) = destination_hashes("broadcast", None);
-        assert_eq!(dest_hash.len(), 16);
         assert_eq!(name_hash.len(), 10);
 
         // Must match destination_hash() for the same input

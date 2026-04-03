@@ -25,6 +25,7 @@
 extern crate alloc;
 
 pub mod error;
+pub mod hash_types;
 pub mod hdlc;
 pub mod identity;
 pub mod ifac;
@@ -33,6 +34,7 @@ pub mod packet;
 pub mod token;
 
 pub use error::Error;
+pub use hash_types::{DestHash, IdentityHash, LinkId, PathHash, RequestId};
 pub use identity::{
     destination_hash, destination_hashes, expand_name, generate_ratchet, identity_hash, ratchet_id,
     Identity,

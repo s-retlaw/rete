@@ -12,7 +12,7 @@ categories.workspace = true
 std = []
 hosted = ["dep:hashbrown"]
 relay-debug = ["std"]
-serde = ["dep:serde"]
+serde = ["dep:serde", "rete-core/serde"]
 
 [dependencies]
 rete-core     = { workspace = true, features = ["alloc"] }

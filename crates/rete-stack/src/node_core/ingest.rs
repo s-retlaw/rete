@@ -5,7 +5,8 @@ use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    DestType, Identity, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN,
+    DestType, Identity, LinkId, PacketBuilder, PacketType, PathHash, RequestId, MTU,
+    TRUNCATED_HASH_LEN,
 };
 use rete_transport::{IngestResult, PATH_REQUEST_DEST};
 
@@ -506,7 +507,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                         if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
                             .packet_type(PacketType::Proof)
                             .dest_type(DestType::Link)
-                            .destination_hash(&link_id)
+                            .destination_hash(link_id.as_ref())
                             .context(rete_core::CONTEXT_RESOURCE_PRF)
                             .payload(&proof)
                             .build()
@@ -731,7 +732,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 let result = PacketBuilder::new(&mut buf)
                     .packet_type(PacketType::Data)
                     .dest_type(DestType::Plain)
-                    .destination_hash(&PATH_REQUEST_DEST)
+                    .destination_hash(PATH_REQUEST_DEST.as_ref())
                     .context(rete_core::CONTEXT_NONE)
                     .payload(&payload)
                     .build();
@@ -767,9 +768,9 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Returns outbound response packets (empty if no handler or no response).
     fn dispatch_request_handler<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
-        request_id: &[u8; TRUNCATED_HASH_LEN],
-        path_hash: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
+        request_id: &RequestId,
+        path_hash: &PathHash,
         data: &[u8],
         requested_at: f64,
         rng: &mut R,

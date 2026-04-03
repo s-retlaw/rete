@@ -1,7 +1,7 @@
 //! Link initiation, channel/stream send, close, and identify.
 
 use rand_core::{CryptoRng, RngCore};
-use rete_core::{MTU, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, LinkId, MTU};
 use rete_transport::SendError;
 
 use crate::NodeEvent;
@@ -14,10 +14,10 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Returns the outbound LINKREQUEST packet and the link_id on success.
     pub fn initiate_link<R: RngCore + CryptoRng>(
         &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         now: u64,
         rng: &mut R,
-    ) -> Result<(OutboundPacket, [u8; TRUNCATED_HASH_LEN]), SendError> {
+    ) -> Result<(OutboundPacket, LinkId), SendError> {
         let (raw, link_id) = self
             .transport
             .initiate_link(dest_hash, &self.identity, rng, now)?;
@@ -30,7 +30,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// the link is not active or the channel window is full.
     pub fn send_channel_message<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         message_type: u16,
         payload: &[u8],
         now: u64,
@@ -48,7 +48,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// `MSG_TYPE_STREAM`. Uses stack buffer to avoid intermediate heap allocations.
     pub fn send_stream_data<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         stream_id: u16,
         data: &[u8],
         eof: bool,
@@ -73,7 +73,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// fire on *receiving* a LINKCLOSE from the remote side).
     pub fn close_link<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         rng: &mut R,
     ) -> (Option<OutboundPacket>, Option<NodeEvent>) {
         let pkt = self.transport.build_linkclose_packet(link_id, rng).ok();
@@ -92,7 +92,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Matches Python `Link.identify()`.
     pub fn link_identify<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         rng: &mut R,
     ) -> Result<OutboundPacket, SendError> {
         // Build identify payload: pub_key[64] || Ed25519_sig[64]

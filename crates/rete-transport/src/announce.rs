@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use rete_core::{NAME_HASH_LEN, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, IdentityHash, NAME_HASH_LEN, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
 
 /// Minimum announce payload without ratchet: pub_key(64) + name_hash(10) + random_hash(10) + signature(64) = 148.
@@ -19,7 +19,7 @@ pub const RATCHET_KEY_LEN: usize = 32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnounceInfo<'a> {
     /// 16-byte identity hash (SHA-256(pub_key)[0:16]).
-    pub identity_hash: [u8; TRUNCATED_HASH_LEN],
+    pub identity_hash: IdentityHash,
     /// 64-byte combined public key (X25519[32] || Ed25519[32]).
     pub pub_key: &'a [u8],
     /// 10-byte name hash.
@@ -87,13 +87,12 @@ pub fn validate_announce<'a>(
 
     // Compute identity hash from public key
     let id_digest = Sha256::digest(pub_key);
-    let mut identity_hash = [0u8; TRUNCATED_HASH_LEN];
-    identity_hash.copy_from_slice(&id_digest[..TRUNCATED_HASH_LEN]);
+    let identity_hash = IdentityHash::from_slice(&id_digest[..TRUNCATED_HASH_LEN]);
 
     // Recompute destination hash: SHA-256(name_hash || identity_hash)[0:16]
     let mut hasher = Sha256::new();
     hasher.update(name_hash);
-    hasher.update(identity_hash);
+    hasher.update(identity_hash.as_ref());
     let computed_dest: [u8; TRUNCATED_HASH_LEN] =
         hasher.finalize()[..TRUNCATED_HASH_LEN].try_into().unwrap();
 
@@ -167,7 +166,7 @@ impl core::fmt::Display for AnnounceError {
 #[derive(Debug, Clone)]
 pub struct PendingAnnounce {
     /// Destination hash this announce is for.
-    pub dest_hash: [u8; TRUNCATED_HASH_LEN],
+    pub dest_hash: DestHash,
     /// Complete raw packet bytes (header + payload).
     pub raw: Vec<u8>,
     /// Number of times transmitted so far (retries).
@@ -204,7 +203,7 @@ mod tests {
 
         let info = validate_announce(&dest_hash, &payload, false).unwrap();
         assert_eq!(
-            info.identity_hash,
+            info.identity_hash.as_ref(),
             unhex("fd9f121e293bf4a415dd74366ff75f69").as_slice()
         );
         assert!(info.app_data.is_none());
@@ -226,7 +225,7 @@ mod tests {
 
         let info = validate_announce(&dest_hash, &payload, false).unwrap();
         assert_eq!(
-            info.identity_hash,
+            info.identity_hash.as_ref(),
             unhex("236d5c3f7d7a9ca0388ca355cb71080b").as_slice()
         );
     }

@@ -11,7 +11,7 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, IdentityHash, LinkId, PathHash, RequestId, TRUNCATED_HASH_LEN};
 
 /// Physical layer interface — implemented by all transport adapters.
 ///
@@ -128,9 +128,9 @@ pub enum NodeEvent {
     /// A valid announce was received.
     AnnounceReceived {
         /// Destination hash of the announcing identity.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Identity hash of the announcer.
-        identity_hash: [u8; TRUNCATED_HASH_LEN],
+        identity_hash: IdentityHash,
         /// Hop count at time of receipt.
         hops: u8,
         /// Application data from the announce (owned copy).
@@ -139,7 +139,7 @@ pub enum NodeEvent {
     /// A data packet addressed to one of our destinations was received.
     DataReceived {
         /// Destination hash the packet was addressed to.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Payload data (owned copy).
         payload: alloc::vec::Vec<u8>,
     },
@@ -150,13 +150,13 @@ pub enum NodeEvent {
     },
     /// A link was established.
     LinkEstablished {
-        /// The link_id (16 bytes).
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        /// The link_id.
+        link_id: LinkId,
     },
     /// Decrypted data received on an active link.
     LinkData {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Decrypted payload data.
         data: alloc::vec::Vec<u8>,
         /// Context byte.
@@ -165,48 +165,48 @@ pub enum NodeEvent {
     /// Channel messages received on a link.
     ChannelMessages {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Delivered messages: (message_type, payload).
         messages: alloc::vec::Vec<(u16, alloc::vec::Vec<u8>)>,
     },
     /// A link.request() was received on a link.
     RequestReceived {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
-        /// The request_id (truncated packet hash for single-packet requests).
-        request_id: [u8; TRUNCATED_HASH_LEN],
-        /// The path_hash (SHA-256(path)[..16]).
-        path_hash: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
+        /// The request_id.
+        request_id: RequestId,
+        /// The path_hash.
+        path_hash: PathHash,
         /// The request data payload.
         data: alloc::vec::Vec<u8>,
     },
     /// A link.response() was received on a link.
     ResponseReceived {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// The request_id this response is for.
-        request_id: [u8; TRUNCATED_HASH_LEN],
+        request_id: RequestId,
         /// The response data payload.
         data: alloc::vec::Vec<u8>,
     },
     /// A link was closed.
     LinkClosed {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
     },
     /// The remote peer identified themselves on a link (LINKIDENTIFY).
     LinkIdentified {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
-        /// The 16-byte identity hash of the remote peer.
-        identity_hash: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
+        /// The identity hash of the remote peer.
+        identity_hash: IdentityHash,
         /// The 64-byte public key of the remote peer.
         public_key: [u8; 64],
     },
     /// A resource was offered on a link.
     ResourceOffered {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
         /// Total size of the resource.
@@ -215,7 +215,7 @@ pub enum NodeEvent {
     /// Resource transfer progress.
     ResourceProgress {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
         /// Parts received so far.
@@ -226,7 +226,7 @@ pub enum NodeEvent {
     /// Resource transfer completed.
     ResourceComplete {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
         /// The assembled data.
@@ -235,32 +235,32 @@ pub enum NodeEvent {
     /// Resource transfer failed.
     ResourceFailed {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
     /// A resource we sent was rejected by the receiver.
     ResourceRejected {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Resource hash (truncated to 16 bytes).
         resource_hash: [u8; TRUNCATED_HASH_LEN],
     },
     /// A pending request failed (timeout, link closed, resource failed, etc.).
     RequestFailed {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// The request_id.
-        request_id: [u8; TRUNCATED_HASH_LEN],
+        request_id: RequestId,
         /// Why the request failed.
         reason: RequestFailReason,
     },
     /// Progress on receiving a response-as-resource for a pending request.
     RequestProgress {
         /// The link_id.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// The request_id.
-        request_id: [u8; TRUNCATED_HASH_LEN],
+        request_id: RequestId,
         /// Parts received so far.
         current: usize,
         /// Total parts expected.

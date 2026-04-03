@@ -9,6 +9,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use rete_core::IdentityHash;
 
 /// Abstraction for ratchet key lifecycle and storage.
 ///
@@ -17,10 +18,10 @@ use alloc::vec::Vec;
 /// share the same ratchet.
 pub trait RatchetStore: Send {
     /// Store a ratchet public key received in a peer's announce.
-    fn store_peer_ratchet(&mut self, identity_hash: &[u8; 16], ratchet_pub: [u8; 32]);
+    fn store_peer_ratchet(&mut self, identity_hash: &IdentityHash, ratchet_pub: [u8; 32]);
 
     /// Recall the latest ratchet public key for a peer identity.
-    fn recall_peer_ratchet(&self, identity_hash: &[u8; 16]) -> Option<[u8; 32]>;
+    fn recall_peer_ratchet(&self, identity_hash: &IdentityHash) -> Option<[u8; 32]>;
 
     /// Set the local ratchet keypair. The previous current key (if any) is
     /// pushed to the "previous" list for in-flight decryption.
@@ -43,10 +44,10 @@ pub trait RatchetStore: Send {
 
     /// Mark a peer identity as requiring ratchet encryption.
     /// When enforced, non-ratcheted packets from this identity are rejected.
-    fn set_ratchet_enforced(&mut self, identity_hash: &[u8; 16], enforced: bool);
+    fn set_ratchet_enforced(&mut self, identity_hash: &IdentityHash, enforced: bool);
 
     /// Query whether ratchet is enforced for a peer identity.
-    fn is_ratchet_enforced(&self, identity_hash: &[u8; 16]) -> bool;
+    fn is_ratchet_enforced(&self, identity_hash: &IdentityHash) -> bool;
 }
 
 /// In-memory ratchet store using `BTreeMap`.
@@ -54,13 +55,13 @@ pub trait RatchetStore: Send {
 /// Suitable for both hosted and MCU targets (requires `alloc` only).
 /// Previous ratchet private keys are bounded to prevent unbounded growth.
 pub struct InMemoryRatchetStore {
-    peer_ratchets: BTreeMap<[u8; 16], [u8; 32]>,
+    peer_ratchets: BTreeMap<IdentityHash, [u8; 32]>,
     current_priv: Option<[u8; 32]>,
     current_pub: Option<[u8; 32]>,
     /// Most recent first. Bounded by `max_previous`.
     previous_privs: Vec<[u8; 32]>,
     max_previous: usize,
-    enforced: BTreeMap<[u8; 16], bool>,
+    enforced: BTreeMap<IdentityHash, bool>,
 }
 
 impl InMemoryRatchetStore {
@@ -87,11 +88,11 @@ impl Default for InMemoryRatchetStore {
 }
 
 impl RatchetStore for InMemoryRatchetStore {
-    fn store_peer_ratchet(&mut self, identity_hash: &[u8; 16], ratchet_pub: [u8; 32]) {
+    fn store_peer_ratchet(&mut self, identity_hash: &IdentityHash, ratchet_pub: [u8; 32]) {
         self.peer_ratchets.insert(*identity_hash, ratchet_pub);
     }
 
-    fn recall_peer_ratchet(&self, identity_hash: &[u8; 16]) -> Option<[u8; 32]> {
+    fn recall_peer_ratchet(&self, identity_hash: &IdentityHash) -> Option<[u8; 32]> {
         self.peer_ratchets.get(identity_hash).copied()
     }
 
@@ -122,7 +123,7 @@ impl RatchetStore for InMemoryRatchetStore {
         &self.previous_privs
     }
 
-    fn set_ratchet_enforced(&mut self, identity_hash: &[u8; 16], enforced: bool) {
+    fn set_ratchet_enforced(&mut self, identity_hash: &IdentityHash, enforced: bool) {
         if enforced {
             self.enforced.insert(*identity_hash, true);
         } else {
@@ -130,7 +131,7 @@ impl RatchetStore for InMemoryRatchetStore {
         }
     }
 
-    fn is_ratchet_enforced(&self, identity_hash: &[u8; 16]) -> bool {
+    fn is_ratchet_enforced(&self, identity_hash: &IdentityHash) -> bool {
         self.enforced.get(identity_hash).copied().unwrap_or(false)
     }
 }
@@ -142,7 +143,7 @@ mod tests {
     #[test]
     fn test_store_and_recall_peer_ratchet() {
         let mut store = InMemoryRatchetStore::default();
-        let id = [0xAA; 16];
+        let id = IdentityHash::from([0xAA; 16]);
         let ratchet = [0xBB; 32];
 
         assert!(store.recall_peer_ratchet(&id).is_none());
@@ -193,7 +194,7 @@ mod tests {
     #[test]
     fn test_enforcement() {
         let mut store = InMemoryRatchetStore::default();
-        let id = [0xDD; 16];
+        let id = IdentityHash::from([0xDD; 16]);
 
         assert!(!store.is_ratchet_enforced(&id));
         store.set_ratchet_enforced(&id, true);

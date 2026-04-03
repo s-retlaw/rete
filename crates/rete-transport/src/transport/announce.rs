@@ -4,8 +4,8 @@ use crate::announce::{validate_announce, PendingAnnounce};
 use crate::path::Path;
 use crate::storage::{StorageDeque, StorageMap};
 use rete_core::{
-    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, NAME_HASH_LEN,
-    TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
+    DestHash, DestType, HeaderType, Identity, IdentityHash, Packet, PacketBuilder, PacketType,
+    NAME_HASH_LEN, TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
 };
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -40,8 +40,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         iface: u8,
     ) -> IngestResult<'a> {
         // Self-announce filtering
-        let mut dh_check = [0u8; TRUNCATED_HASH_LEN];
-        dh_check.copy_from_slice(pkt.destination_hash);
+        let dh_check = DestHash::from_slice(pkt.destination_hash);
         if self.is_local_destination(&dh_check) {
             return IngestResult::Duplicate;
         }
@@ -57,14 +56,11 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                 if self.announce_dedup.check_and_insert(&replay_hash) {
                     // Track local rebroadcasts: if we have this announce
                     // pending, note that we heard it echoed back.
-                    let mut dh_dup = [0u8; TRUNCATED_HASH_LEN];
-                    dh_dup.copy_from_slice(pkt.destination_hash);
-                    self.note_local_rebroadcast(&dh_dup, pkt.hops);
+                    self.note_local_rebroadcast(&dh_check, pkt.hops);
                     self.stats.packets_dropped_dedup += 1;
                     return IngestResult::Duplicate;
                 }
-                let mut dh = [0u8; TRUNCATED_HASH_LEN];
-                dh.copy_from_slice(pkt.destination_hash);
+                let dh = dh_check;
 
                 // Announce rate limiting
                 let rate_blocked = {
@@ -119,9 +115,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                 if should_update {
                     let mut path = match pkt.transport_id {
                         Some(tid) => {
-                            let mut via = [0u8; TRUNCATED_HASH_LEN];
-                            via.copy_from_slice(tid);
-                            Path::via_repeater(via, pkt.hops, now)
+                            Path::via_repeater(IdentityHash::from_slice(tid), pkt.hops, now)
                         }
                         None => Path {
                             hops: pkt.hops,
@@ -147,7 +141,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                             .packet_type(pkt.packet_type)
                             .dest_type(pkt.dest_type)
                             .hops(pkt.hops)
-                            .transport_id(&local_id)
+                            .transport_id(local_id.as_ref())
                             .destination_hash(pkt.destination_hash)
                             .context(pkt.context)
                             .payload(pkt.payload)
@@ -204,8 +198,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         if payload.len() < TRUNCATED_HASH_LEN {
             return IngestResult::Invalid;
         }
-        let mut requested = [0u8; TRUNCATED_HASH_LEN];
-        requested.copy_from_slice(&payload[..TRUNCATED_HASH_LEN]);
+        let requested = DestHash::from_slice(&payload[..TRUNCATED_HASH_LEN]);
 
         // Path request throttling: minimum interval between requests for same dest
         if let Some(&last_time) = self.path_request_times.get(&requested) {
@@ -245,7 +238,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         if self.local_identity_hash.is_some() {
             // Dedup: check if we've recently seen this exact path request
             let mut pr_key = [0u8; 32];
-            pr_key[..TRUNCATED_HASH_LEN].copy_from_slice(&requested);
+            pr_key[..TRUNCATED_HASH_LEN].copy_from_slice(requested.as_ref());
             // Include tag bytes in dedup if present
             if payload.len() > TRUNCATED_HASH_LEN {
                 let tag_end = core::cmp::min(payload.len(), 32);
@@ -273,14 +266,14 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     ///
     /// Sends a DATA packet addressed to `PATH_REQUEST_DEST` (PLAIN) with
     /// `dest_hash` as the payload.
-    pub fn build_path_request(dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> alloc::vec::Vec<u8> {
+    pub fn build_path_request(dest_hash: &DestHash) -> alloc::vec::Vec<u8> {
         let mut buf = [0u8; rete_core::MTU];
         let n = PacketBuilder::new(&mut buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Plain)
-            .destination_hash(&PATH_REQUEST_DEST)
+            .destination_hash(PATH_REQUEST_DEST.as_ref())
             .context(0x00)
-            .payload(dest_hash)
+            .payload(dest_hash.as_ref())
             .build()
             .expect("path request packet should always build");
         buf[..n].to_vec()
@@ -318,7 +311,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         let pub_key = identity.public_key();
         let mut signed_data = [0u8; rete_core::MTU];
         let mut pos = 0;
-        signed_data[pos..pos + TRUNCATED_HASH_LEN].copy_from_slice(&dest_hash);
+        signed_data[pos..pos + TRUNCATED_HASH_LEN].copy_from_slice(dest_hash.as_ref());
         pos += TRUNCATED_HASH_LEN;
         signed_data[pos..pos + 64].copy_from_slice(&pub_key);
         pos += 64;
@@ -364,7 +357,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
             .packet_type(PacketType::Announce)
             .dest_type(DestType::Single)
             .context_flag(ratchet_pub.is_some())
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&payload[..ppos])
             .build()?;
@@ -418,7 +411,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Called when we hear a duplicate announce — tracks local rebroadcasts
     /// and suppresses retransmission if the announce has been locally rebroadcast
     /// enough times (LOCAL_REBROADCASTS_MAX).
-    pub fn note_local_rebroadcast(&mut self, dest_hash: &[u8; TRUNCATED_HASH_LEN], heard_hops: u8) {
+    pub fn note_local_rebroadcast(&mut self, dest_hash: &DestHash, heard_hops: u8) {
         for ann in self.announces.iter_mut() {
             if ann.dest_hash == *dest_hash {
                 // Same hop count means a peer rebroadcast at our level

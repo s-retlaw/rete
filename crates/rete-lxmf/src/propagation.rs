@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::vec::Vec;
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, TRUNCATED_HASH_LEN};
 
 // ---------------------------------------------------------------------------
 // MessageStore trait + InMemoryMessageStore
@@ -24,7 +24,7 @@ pub trait MessageStore {
     /// false if it was already present (dedup by message_hash).
     fn store(
         &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         message_hash: [u8; 32],
         data: &[u8],
         timestamp: u64,
@@ -34,7 +34,7 @@ pub trait MessageStore {
     fn has_message(&self, message_hash: &[u8; 32]) -> bool;
 
     /// Get message hashes for a destination (no data loaded).
-    fn hashes_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Vec<[u8; 32]>;
+    fn hashes_for(&self, dest_hash: &DestHash) -> Vec<[u8; 32]>;
 
     /// Load message data by hash. Returns owned bytes.
     fn get_data(&self, message_hash: &[u8; 32]) -> Option<Vec<u8>>;
@@ -47,13 +47,13 @@ pub trait MessageStore {
     fn prune(&mut self, now: u64, max_age_secs: u64) -> usize;
 
     /// Return all destination hashes that have pending messages.
-    fn destinations_with_messages(&self) -> Vec<[u8; TRUNCATED_HASH_LEN]>;
+    fn destinations_with_messages(&self) -> Vec<DestHash>;
 
     /// Count of all stored messages.
     fn message_count(&self) -> usize;
 
     /// Count messages for a specific destination.
-    fn count_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> usize;
+    fn count_for(&self, dest_hash: &DestHash) -> usize;
 
     /// Return all stored message hashes (needed for building sync offers).
     fn all_message_hashes(&self) -> Vec<[u8; 32]>;
@@ -62,7 +62,7 @@ pub trait MessageStore {
 /// A stored LXMF message (internal to InMemoryMessageStore).
 #[derive(Debug, Clone)]
 struct StoredMessage {
-    dest_hash: [u8; TRUNCATED_HASH_LEN],
+    dest_hash: DestHash,
     data: Vec<u8>,
     timestamp: u64,
 }
@@ -76,7 +76,7 @@ pub struct InMemoryMessageStore {
     /// Messages indexed by message_hash for dedup.
     messages: HashMap<[u8; 32], StoredMessage>,
     /// Index: dest_hash -> set of message_hashes.
-    by_dest: HashMap<[u8; TRUNCATED_HASH_LEN], Vec<[u8; 32]>>,
+    by_dest: HashMap<DestHash, Vec<[u8; 32]>>,
 }
 
 impl InMemoryMessageStore {
@@ -89,7 +89,7 @@ impl InMemoryMessageStore {
 impl MessageStore for InMemoryMessageStore {
     fn store(
         &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         message_hash: [u8; 32],
         data: &[u8],
         timestamp: u64,
@@ -116,7 +116,7 @@ impl MessageStore for InMemoryMessageStore {
         self.messages.contains_key(message_hash)
     }
 
-    fn hashes_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Vec<[u8; 32]> {
+    fn hashes_for(&self, dest_hash: &DestHash) -> Vec<[u8; 32]> {
         self.by_dest.get(dest_hash).cloned().unwrap_or_default()
     }
 
@@ -153,7 +153,7 @@ impl MessageStore for InMemoryMessageStore {
         count
     }
 
-    fn destinations_with_messages(&self) -> Vec<[u8; TRUNCATED_HASH_LEN]> {
+    fn destinations_with_messages(&self) -> Vec<DestHash> {
         self.by_dest.keys().copied().collect()
     }
 
@@ -161,7 +161,7 @@ impl MessageStore for InMemoryMessageStore {
         self.messages.len()
     }
 
-    fn count_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> usize {
+    fn count_for(&self, dest_hash: &DestHash) -> usize {
         self.by_dest.get(dest_hash).map_or(0, |v| v.len())
     }
 
@@ -196,13 +196,14 @@ impl<S: MessageStore> PropagationNode<S> {
         &mut self,
         data: &[u8],
         now: u64,
-    ) -> Option<([u8; TRUNCATED_HASH_LEN], [u8; 32])> {
+    ) -> Option<(DestHash, [u8; 32])> {
         if data.len() < 96 {
             return None; // Too short to be a valid LXMF message
         }
 
-        let mut dest_hash = [0u8; TRUNCATED_HASH_LEN];
-        dest_hash.copy_from_slice(&data[..16]);
+        let mut dest_bytes = [0u8; TRUNCATED_HASH_LEN];
+        dest_bytes.copy_from_slice(&data[..16]);
+        let dest_hash = DestHash::from(dest_bytes);
 
         let message_hash: [u8; 32] = Sha256::digest(data).into();
 
@@ -219,7 +220,7 @@ impl<S: MessageStore> PropagationNode<S> {
     }
 
     /// Get message hashes for a destination (no data loaded).
-    pub fn hashes_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Vec<[u8; 32]> {
+    pub fn hashes_for(&self, dest_hash: &DestHash) -> Vec<[u8; 32]> {
         self.store.hashes_for(dest_hash)
     }
 
@@ -237,17 +238,17 @@ impl<S: MessageStore> PropagationNode<S> {
     ///
     /// Used when an announce is received — if we have messages for the
     /// announcing destination, we should forward them.
-    pub fn has_messages_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+    pub fn has_messages_for(&self, dest_hash: &DestHash) -> bool {
         self.store.count_for(dest_hash) > 0
     }
 
     /// Count messages for a destination.
-    pub fn count_for(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> usize {
+    pub fn count_for(&self, dest_hash: &DestHash) -> usize {
         self.store.count_for(dest_hash)
     }
 
     /// Get all destination hashes that have pending messages.
-    pub fn destinations_with_messages(&self) -> Vec<[u8; TRUNCATED_HASH_LEN]> {
+    pub fn destinations_with_messages(&self) -> Vec<DestHash> {
         self.store.destinations_with_messages()
     }
 
@@ -301,7 +302,7 @@ mod tests {
     fn test_store_accepts_borrowed_slice() {
         let mut store = InMemoryMessageStore::new();
         let bytes = [1u8, 2, 3, 4, 5];
-        assert!(store.store([0x01; 16], [0x02; 32], &bytes, 1000));
+        assert!(store.store(DestHash::from([0x01; 16]), [0x02; 32], &bytes, 1000));
         assert_eq!(store.get_data(&[0x02; 32]), Some(vec![1, 2, 3, 4, 5]));
     }
 
@@ -311,10 +312,10 @@ mod tests {
         let dest = [0x01; 16];
         let hash = [0x02; 32];
 
-        assert!(store.store(dest, hash, &[1, 2, 3], 1000));
+        assert!(store.store(DestHash::from(dest), hash, &[1, 2, 3], 1000));
         assert_eq!(store.message_count(), 1);
 
-        let hashes = store.hashes_for(&dest);
+        let hashes = store.hashes_for(&DestHash::from(dest));
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0], hash);
         assert_eq!(store.get_data(&hash), Some(vec![1, 2, 3]));
@@ -326,8 +327,8 @@ mod tests {
         let dest = [0x01; 16];
         let hash = [0x02; 32];
 
-        assert!(store.store(dest, hash, &[1, 2, 3], 1000));
-        assert!(!store.store(dest, hash, &[1, 2, 3], 1001)); // duplicate
+        assert!(store.store(DestHash::from(dest), hash, &[1, 2, 3], 1000));
+        assert!(!store.store(DestHash::from(dest), hash, &[1, 2, 3], 1001)); // duplicate
         assert_eq!(store.message_count(), 1);
     }
 
@@ -337,10 +338,10 @@ mod tests {
         let dest = [0x01; 16];
         let hash = [0x02; 32];
 
-        store.store(dest, hash, &[1, 2, 3], 1000);
+        store.store(DestHash::from(dest), hash, &[1, 2, 3], 1000);
         assert!(store.mark_delivered(&hash));
         assert_eq!(store.message_count(), 0);
-        assert!(store.hashes_for(&dest).is_empty());
+        assert!(store.hashes_for(&DestHash::from(dest)).is_empty());
     }
 
     #[test]
@@ -348,9 +349,9 @@ mod tests {
         let mut store = InMemoryMessageStore::new();
         let dest = [0x01; 16];
 
-        store.store(dest, [0x01; 32], &[1], 1000);
-        store.store(dest, [0x02; 32], &[2], 2000);
-        store.store(dest, [0x03; 32], &[3], 3000);
+        store.store(DestHash::from(dest), [0x01; 32], &[1], 1000);
+        store.store(DestHash::from(dest), [0x02; 32], &[2], 2000);
+        store.store(DestHash::from(dest), [0x03; 32], &[3], 3000);
 
         // Prune messages older than 1500 seconds from now=4000
         let pruned = store.prune(4000, 1500);
@@ -364,20 +365,20 @@ mod tests {
         let dest1 = [0x01; 16];
         let dest2 = [0x02; 16];
 
-        store.store(dest1, [0x01; 32], &[1], 1000);
-        store.store(dest2, [0x02; 32], &[2], 1000);
+        store.store(DestHash::from(dest1), [0x01; 32], &[1], 1000);
+        store.store(DestHash::from(dest2), [0x02; 32], &[2], 1000);
 
         let dests = store.destinations_with_messages();
         assert_eq!(dests.len(), 2);
-        assert!(dests.contains(&dest1));
-        assert!(dests.contains(&dest2));
+        assert!(dests.contains(&DestHash::from(dest1)));
+        assert!(dests.contains(&DestHash::from(dest2)));
     }
 
     #[test]
     fn test_all_message_hashes_returns_stored() {
         let mut store = InMemoryMessageStore::new();
-        store.store([0x01; 16], [0xAA; 32], &[1], 1000);
-        store.store([0x02; 16], [0xBB; 32], &[2], 1000);
+        store.store(DestHash::from([0x01; 16]), [0xAA; 32], &[1], 1000);
+        store.store(DestHash::from([0x02; 16]), [0xBB; 32], &[2], 1000);
         let hashes = store.all_message_hashes();
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains(&[0xAA; 32]));
@@ -402,7 +403,7 @@ mod tests {
     fn test_has_message_returns_true_for_stored() {
         let mut store = InMemoryMessageStore::new();
         let hash = [0x02; 32];
-        store.store([0x01; 16], hash, &[1, 2, 3], 1000);
+        store.store(DestHash::from([0x01; 16]), hash, &[1, 2, 3], 1000);
         assert!(store.has_message(&hash));
     }
 
@@ -410,7 +411,7 @@ mod tests {
     fn test_has_message_false_after_delivered() {
         let mut store = InMemoryMessageStore::new();
         let hash = [0x02; 32];
-        store.store([0x01; 16], hash, &[1, 2, 3], 1000);
+        store.store(DestHash::from([0x01; 16]), hash, &[1, 2, 3], 1000);
         store.mark_delivered(&hash);
         assert!(!store.has_message(&hash));
     }
@@ -419,7 +420,7 @@ mod tests {
     fn test_has_message_false_after_prune() {
         let mut store = InMemoryMessageStore::new();
         let hash = [0x02; 32];
-        store.store([0x01; 16], hash, &[1, 2, 3], 1000);
+        store.store(DestHash::from([0x01; 16]), hash, &[1, 2, 3], 1000);
         store.prune(5000, 2000); // cutoff = 3000, message at 1000 is pruned
         assert!(!store.has_message(&hash));
     }
@@ -429,17 +430,17 @@ mod tests {
     #[test]
     fn test_hashes_for_empty_dest() {
         let store = InMemoryMessageStore::new();
-        assert!(store.hashes_for(&[0x01; 16]).is_empty());
+        assert!(store.hashes_for(&DestHash::from([0x01; 16])).is_empty());
     }
 
     #[test]
     fn test_hashes_for_returns_all_for_dest() {
         let mut store = InMemoryMessageStore::new();
         let dest = [0x01; 16];
-        store.store(dest, [0xAA; 32], &[1], 1000);
-        store.store(dest, [0xBB; 32], &[2], 1001);
-        store.store([0x02; 16], [0xCC; 32], &[3], 1002); // different dest
-        let hashes = store.hashes_for(&dest);
+        store.store(DestHash::from(dest), [0xAA; 32], &[1], 1000);
+        store.store(DestHash::from(dest), [0xBB; 32], &[2], 1001);
+        store.store(DestHash::from([0x02; 16]), [0xCC; 32], &[3], 1002); // different dest
+        let hashes = store.hashes_for(&DestHash::from(dest));
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains(&[0xAA; 32]));
         assert!(hashes.contains(&[0xBB; 32]));
@@ -449,10 +450,10 @@ mod tests {
     fn test_hashes_for_after_prune() {
         let mut store = InMemoryMessageStore::new();
         let dest = [0x01; 16];
-        store.store(dest, [0xAA; 32], &[1], 1000);
-        store.store(dest, [0xBB; 32], &[2], 5000);
+        store.store(DestHash::from(dest), [0xAA; 32], &[1], 1000);
+        store.store(DestHash::from(dest), [0xBB; 32], &[2], 5000);
         store.prune(6000, 2000);
-        let hashes = store.hashes_for(&dest);
+        let hashes = store.hashes_for(&DestHash::from(dest));
         assert_eq!(hashes.len(), 1);
         assert!(hashes.contains(&[0xBB; 32]));
     }
@@ -462,7 +463,7 @@ mod tests {
     #[test]
     fn test_get_data_returns_owned_vec() {
         let mut store = InMemoryMessageStore::new();
-        store.store([0x01; 16], [0x02; 32], &[1, 2, 3], 1000);
+        store.store(DestHash::from([0x01; 16]), [0x02; 32], &[1, 2, 3], 1000);
         let data: Option<Vec<u8>> = store.get_data(&[0x02; 32]);
         assert_eq!(data, Some(vec![1, 2, 3]));
     }
@@ -497,7 +498,7 @@ mod tests {
         let result = node.deposit(&data, 1000);
         assert!(result.is_some());
         let (dep_dest, _msg_hash) = result.unwrap();
-        assert_eq!(dep_dest, dest);
+        assert_eq!(dep_dest, DestHash::from(dest));
         assert_eq!(node.message_count(), 1);
     }
 
@@ -528,7 +529,7 @@ mod tests {
         let (_, h1) = node.deposit(&data1, 1000).unwrap();
         let (_, h2) = node.deposit(&data2, 1001).unwrap();
 
-        let hashes = node.hashes_for(&dest);
+        let hashes = node.hashes_for(&DestHash::from(dest));
         assert_eq!(hashes.len(), 2);
         assert!(hashes.contains(&h1));
         assert!(hashes.contains(&h2));
@@ -554,10 +555,10 @@ mod tests {
         let dest = [0x42; 16];
         let other = [0x99; 16];
 
-        assert!(!node.has_messages_for(&dest));
+        assert!(!node.has_messages_for(&DestHash::from(dest)));
         node.deposit(&make_fake_lxmf_data(dest, 0xAA), 1000);
-        assert!(node.has_messages_for(&dest));
-        assert!(!node.has_messages_for(&other));
+        assert!(node.has_messages_for(&DestHash::from(dest)));
+        assert!(!node.has_messages_for(&DestHash::from(other)));
     }
 
     #[test]
@@ -569,7 +570,7 @@ mod tests {
         let (_, msg_hash) = node.deposit(&data, 1000).unwrap();
         assert!(node.mark_delivered(&msg_hash));
         assert_eq!(node.message_count(), 0);
-        assert!(!node.has_messages_for(&dest));
+        assert!(!node.has_messages_for(&DestHash::from(dest)));
     }
 
     #[test]

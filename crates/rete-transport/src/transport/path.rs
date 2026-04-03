@@ -3,18 +3,18 @@
 use crate::path::Path;
 use crate::snapshot;
 use crate::storage::StorageMap;
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::DestHash;
 
 use super::Transport;
 
 impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Look up a learned path to `dest`.
-    pub fn get_path(&self, dest: &[u8; TRUNCATED_HASH_LEN]) -> Option<&Path> {
+    pub fn get_path(&self, dest: &DestHash) -> Option<&Path> {
         self.paths.get(dest)
     }
 
     /// Update `last_accessed` on a path (call when the path is used for routing).
-    pub fn touch_path(&mut self, dest: &[u8; TRUNCATED_HASH_LEN], now: u64) {
+    pub fn touch_path(&mut self, dest: &DestHash, now: u64) {
         if let Some(p) = self.paths.get_mut(dest) {
             p.last_accessed = now;
         }
@@ -22,7 +22,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
 
     /// Store a learned path.  If the table is full, evicts the
     /// least-recently-used entry first.  Always succeeds.
-    pub fn insert_path(&mut self, dest: [u8; TRUNCATED_HASH_LEN], path: Path) -> bool {
+    pub fn insert_path(&mut self, dest: DestHash, path: Path) -> bool {
         match self.paths.insert(dest, path) {
             Ok(_) => true,
             Err((dest, path)) => {
@@ -43,7 +43,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     }
 
     /// Remove a path entry (expiry or explicit reset).
-    pub fn remove_path(&mut self, dest: &[u8; TRUNCATED_HASH_LEN]) {
+    pub fn remove_path(&mut self, dest: &DestHash) {
         self.paths.remove(dest);
     }
 
@@ -71,21 +71,21 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     ///
     /// Used by `register_peer_with_announce` to cache a synthetic announce so
     /// that `cached_announces()` includes it for new-interface flush.
-    pub fn store_announce_raw(&mut self, dest: &[u8; TRUNCATED_HASH_LEN], raw: &[u8]) {
+    pub fn store_announce_raw(&mut self, dest: &DestHash, raw: &[u8]) {
         if let Some(path) = self.paths.get_mut(dest) {
             path.announce_raw = Some(raw.to_vec());
         }
     }
 
     /// Look up a previously announced identity's public key by destination hash.
-    pub fn recall_identity(&self, dest: &[u8; TRUNCATED_HASH_LEN]) -> Option<&[u8; 64]> {
+    pub fn recall_identity(&self, dest: &DestHash) -> Option<&[u8; 64]> {
         self.known_identities.get(dest)
     }
 
     /// Pre-register a peer's identity and path (for use with deterministic seeds).
     pub fn register_identity(
         &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         pub_key: [u8; 64],
         now: u64,
     ) {
@@ -96,7 +96,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Store a known identity.  If the table is full, evicts the entry
     /// whose matching path has the oldest `last_accessed` (or `0` for
     /// identities with no corresponding path — evicted first).
-    pub(super) fn insert_identity(&mut self, dest_hash: [u8; TRUNCATED_HASH_LEN], pub_key: [u8; 64]) {
+    pub(super) fn insert_identity(&mut self, dest_hash: DestHash, pub_key: [u8; 64]) {
         match self.known_identities.insert(dest_hash, pub_key) {
             Ok(_) => {}
             Err((dest_hash, pub_key)) => {

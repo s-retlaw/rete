@@ -1,6 +1,6 @@
 //! Delivery proofs and receipts.
 
-use rete_core::{DestType, Identity, PacketBuilder, PacketType, TRUNCATED_HASH_LEN};
+use rete_core::{DestType, Identity, LinkId, PacketBuilder, PacketType, TRUNCATED_HASH_LEN};
 
 use super::Transport;
 
@@ -33,7 +33,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         identity: &Identity,
         packet_hash: &[u8; 32],
         dest_type: DestType,
-        destination_hash: &[u8; TRUNCATED_HASH_LEN],
+        destination_hash: &[u8; TRUNCATED_HASH_LEN],  // truncated packet hash, NOT DestHash
     ) -> Option<alloc::vec::Vec<u8>> {
         let signature = identity.sign(packet_hash).ok()?;
         let mut payload = [0u8; 96];
@@ -71,8 +71,9 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     pub fn build_link_proof_packet(
         identity: &Identity,
         packet_hash: &[u8; 32],
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
     ) -> Option<alloc::vec::Vec<u8>> {
-        Self::build_proof_inner(identity, packet_hash, DestType::Link, link_id)
+        let link_id_bytes: [u8; TRUNCATED_HASH_LEN] = (*link_id).into();
+        Self::build_proof_inner(identity, packet_hash, DestType::Link, &link_id_bytes)
     }
 }

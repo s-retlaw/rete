@@ -11,7 +11,7 @@ use crate::link::Link;
 use crate::receipt::PacketReceipt;
 use crate::transport::{AnnounceRateEntry, ChannelReceipt, LinkTableEntry, ReverseEntry};
 use crate::path::Path;
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, LinkId, TRUNCATED_HASH_LEN};
 
 // ---------------------------------------------------------------------------
 // Collection traits
@@ -76,18 +76,20 @@ pub trait StorageDeque<V>: Default {
 /// Each associated type corresponds to a logical table in the transport layer.
 /// Grouped by capacity role: PATH (high cap), LINK (medium), deques, and sets.
 pub trait TransportStorage: Default {
-    // --- PATH-capacity maps ---
-    type PathMap: StorageMap<[u8; TRUNCATED_HASH_LEN], Path>;
-    type IdentityMap: StorageMap<[u8; TRUNCATED_HASH_LEN], [u8; 64]>;
+    // --- PATH-capacity maps (keyed by DestHash) ---
+    type PathMap: StorageMap<DestHash, Path>;
+    type IdentityMap: StorageMap<DestHash, [u8; 64]>;
+    type AnnounceRateMap: StorageMap<DestHash, AnnounceRateEntry>;
+    type PathRequestTimeMap: StorageMap<DestHash, u64>;
+
+    // --- PATH-capacity maps (keyed by truncated packet hash) ---
     type ReverseMap: StorageMap<[u8; TRUNCATED_HASH_LEN], ReverseEntry>;
     type ReceiptMap: StorageMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt>;
-    type AnnounceRateMap: StorageMap<[u8; TRUNCATED_HASH_LEN], AnnounceRateEntry>;
-    type PathRequestTimeMap: StorageMap<[u8; TRUNCATED_HASH_LEN], u64>;
 
     // --- LINK-capacity maps ---
-    type LinkMap: StorageMap<[u8; TRUNCATED_HASH_LEN], Link>;
+    type LinkMap: StorageMap<LinkId, Link>;
     type ChannelReceiptMap: StorageMap<[u8; TRUNCATED_HASH_LEN], ChannelReceipt>;
-    type LinkTableMap: StorageMap<[u8; TRUNCATED_HASH_LEN], LinkTableEntry>;
+    type LinkTableMap: StorageMap<LinkId, LinkTableEntry>;
 
     // --- Deques ---
     type AnnounceDeque: StorageDeque<PendingAnnounce>;
@@ -126,16 +128,17 @@ impl<const P: usize, const A: usize, const D: usize, const L: usize> Default
 impl<const P: usize, const A: usize, const D: usize, const L: usize> TransportStorage
     for HeaplessStorage<P, A, D, L>
 {
-    type PathMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], Path, P>;
-    type IdentityMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], [u8; 64], P>;
+    type PathMap = FnvIndexMap<DestHash, Path, P>;
+    type IdentityMap = FnvIndexMap<DestHash, [u8; 64], P>;
+    type AnnounceRateMap = FnvIndexMap<DestHash, AnnounceRateEntry, P>;
+    type PathRequestTimeMap = FnvIndexMap<DestHash, u64, P>;
+
     type ReverseMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ReverseEntry, P>;
     type ReceiptMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], PacketReceipt, P>;
-    type AnnounceRateMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], AnnounceRateEntry, P>;
-    type PathRequestTimeMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], u64, P>;
 
-    type LinkMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], Link, L>;
+    type LinkMap = FnvIndexMap<LinkId, Link, L>;
     type ChannelReceiptMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], ChannelReceipt, L>;
-    type LinkTableMap = FnvIndexMap<[u8; TRUNCATED_HASH_LEN], LinkTableEntry, L>;
+    type LinkTableMap = FnvIndexMap<LinkId, LinkTableEntry, L>;
 
     type AnnounceDeque = heapless::Deque<PendingAnnounce, A>;
     type DedupDeque = heapless::Deque<[u8; 32], D>;

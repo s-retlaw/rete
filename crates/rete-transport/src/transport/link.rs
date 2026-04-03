@@ -4,22 +4,23 @@ use crate::link::{compute_link_id, Link};
 use crate::storage::StorageMap;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    DestType, Identity, PacketBuilder, PacketType, CONTEXT_CHANNEL, CONTEXT_KEEPALIVE,
-    CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, CONTEXT_REQUEST, CONTEXT_RESOURCE,
-    CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF,
-    CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ, CONTEXT_RESPONSE, Packet, TRUNCATED_HASH_LEN,
+    DestHash, DestType, Identity, LinkId, PacketBuilder, PacketType, CONTEXT_CHANNEL,
+    CONTEXT_KEEPALIVE, CONTEXT_LINKCLOSE, CONTEXT_LRPROOF, CONTEXT_LRRTT, CONTEXT_REQUEST,
+    CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV, CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL,
+    CONTEXT_RESOURCE_PRF, CONTEXT_RESOURCE_RCL, CONTEXT_RESOURCE_REQ, CONTEXT_RESPONSE, Packet,
+    TRUNCATED_HASH_LEN,
 };
 
 use super::{ChannelReceipt, IngestResult, SendError, Transport};
 
 impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Look up an active link by link_id.
-    pub fn get_link(&self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> Option<&Link> {
+    pub fn get_link(&self, link_id: &LinkId) -> Option<&Link> {
         self.links.get(link_id)
     }
 
     /// Look up an active link mutably by link_id.
-    pub fn get_link_mut(&mut self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> Option<&mut Link> {
+    pub fn get_link_mut(&mut self, link_id: &LinkId) -> Option<&mut Link> {
         self.links.get_mut(link_id)
     }
 
@@ -42,11 +43,11 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Returns the raw LINKREQUEST packet and the link_id.
     pub fn initiate_link<R: RngCore + CryptoRng>(
         &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         identity: &Identity,
         rng: &mut R,
         now: u64,
-    ) -> Result<(alloc::vec::Vec<u8>, [u8; TRUNCATED_HASH_LEN]), SendError> {
+    ) -> Result<(alloc::vec::Vec<u8>, LinkId), SendError> {
         let (mut link, request_payload) =
             Link::new_initiator(dest_hash, identity.ed25519_pub(), rng, now);
 
@@ -63,10 +64,10 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::LinkRequest)
             .dest_type(DestType::Single)
-            .destination_hash(&dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&request_payload)
-            .via(via.as_ref())
+            .via(via.as_ref().map(|v| v.as_bytes()))
             .build()
             .map_err(SendError::PacketBuild)?;
 
@@ -85,7 +86,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Build an encrypted DATA packet for a link.
     pub fn build_link_data_packet<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         plaintext: &[u8],
         context: u8,
         rng: &mut R,
@@ -100,7 +101,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Build an LRRTT measurement packet for a link (initiator sends after proof).
     pub fn build_lrrtt_packet<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         rtt_bytes: &[u8],
         rng: &mut R,
     ) -> Result<alloc::vec::Vec<u8>, SendError> {
@@ -114,7 +115,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// to a Stale link can revive it when the peer receives it and responds.
     pub fn build_keepalive_packet<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         request: bool,
         rng: &mut R,
     ) -> Result<alloc::vec::Vec<u8>, SendError> {
@@ -129,7 +130,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Encrypt plaintext and build a link DATA packet. Shared by all link packet builders.
     pub(super) fn build_link_packet<R: RngCore + CryptoRng>(
         link: &Link,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         plaintext: &[u8],
         context: u8,
         rng: &mut R,
@@ -142,7 +143,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
-            .destination_hash(link_id)
+            .destination_hash(link_id.as_ref())
             .context(context)
             .payload(&ct_buf[..ct_len])
             .build()
@@ -153,7 +154,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Build a LINKCLOSE packet and remove the link.
     pub fn build_linkclose_packet<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         rng: &mut R,
     ) -> Result<alloc::vec::Vec<u8>, SendError> {
         let link = self.links.get(link_id).ok_or(SendError::LinkNotFound)?;
@@ -166,7 +167,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
-            .destination_hash(link_id)
+            .destination_hash(link_id.as_ref())
             .context(CONTEXT_LINKCLOSE)
             .payload(&close_buf[..close_len])
             .build()
@@ -179,7 +180,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     pub(super) fn handle_link_request<'a, R: RngCore + CryptoRng>(
         &mut self,
         raw: &'a [u8],
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
         payload: &[u8],
         now: u64,
         rng: &mut R,
@@ -220,7 +221,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         let proof_len = match PacketBuilder::new(&mut proof_buf)
             .packet_type(PacketType::Proof)
             .dest_type(DestType::Link)
-            .destination_hash(&link_id)
+            .destination_hash(link_id.as_ref())
             .context(CONTEXT_LRPROOF)
             .payload(&proof_payload)
             .build()
@@ -246,7 +247,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     pub(super) fn validate_lrproof_relay(
         &self,
         proof_payload: &[u8],
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         dest_identity: &Identity,
     ) -> bool {
         use crate::link::LINK_MTU_SIZE;
@@ -267,7 +268,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         // Reconstruct signed_data: link_id || responder_x25519_pub || ed25519_pub [|| signalling]
         let signed_len = 80 + signalling.len();
         let mut signed_data = [0u8; 83]; // max: 16+32+32+3
-        signed_data[..16].copy_from_slice(link_id);
+        signed_data[..16].copy_from_slice(link_id.as_ref());
         signed_data[16..48].copy_from_slice(responder_x25519_pub);
         signed_data[48..80].copy_from_slice(dest_identity.ed25519_pub());
         signed_data[80..signed_len].copy_from_slice(signalling);
@@ -279,7 +280,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
 
     pub(super) fn handle_lrproof<'a>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         proof_payload: &[u8],
         now: u64,
     ) -> IngestResult<'a> {
@@ -327,7 +328,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
 
     pub(super) fn handle_link_data<'a, R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         context: u8,
         ciphertext: &[u8],
         now: u64,
@@ -474,11 +475,9 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                         // Python RNS uses the packet's truncated hash as request_id
                         // for single-packet requests (Link.py: RequestReceipt uses
                         // packet_receipt.truncated_hash). This is SHA-256(hashable)[..16].
-                        let mut req_id = [0u8; TRUNCATED_HASH_LEN];
-                        req_id.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
                         IngestResult::RequestReceived {
                             link_id: *link_id,
-                            request_id: req_id,
+                            request_id: rete_core::RequestId::from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]),
                             path_hash: rq_path_hash,
                             data,
                             requested_at: ts,
@@ -527,7 +526,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// channel window is full.
     pub fn send_channel_message<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         message_type: u16,
         payload: &[u8],
         now: u64,
@@ -580,9 +579,9 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         rng: &mut R,
     ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
         let mut packets = alloc::vec::Vec::new();
-        let mut teardown_links = alloc::vec::Vec::<[u8; TRUNCATED_HASH_LEN]>::new();
+        let mut teardown_links = alloc::vec::Vec::<LinkId>::new();
 
-        let mut link_ids = alloc::vec::Vec::<[u8; TRUNCATED_HASH_LEN]>::new();
+        let mut link_ids = alloc::vec::Vec::<LinkId>::new();
         for (lid, l) in self.links.iter() {
             if l.channel.is_some() && l.is_active() {
                 link_ids.push(*lid);
@@ -634,7 +633,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         now: u64,
         rng: &mut R,
     ) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
-        let mut need_ka = alloc::vec::Vec::<[u8; TRUNCATED_HASH_LEN]>::new();
+        let mut need_ka = alloc::vec::Vec::<LinkId>::new();
         for (lid, link) in self.links.iter() {
             if link.needs_keepalive(now) {
                 need_ka.push(*lid);

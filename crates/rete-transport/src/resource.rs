@@ -17,6 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::msgpack::{self, MsgpackError};
+use rete_core::LinkId;
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
@@ -261,7 +262,7 @@ pub struct Resource {
     /// Whether this side is the sender.
     pub is_sender: bool,
     /// Link identifier this resource is associated with.
-    pub link_id: [u8; 16],
+    pub link_id: LinkId,
     /// Full 32-byte SHA-256 hash of (data || random_hash).
     pub resource_hash: [u8; 32],
     /// 4-byte random hash for uniqueness.
@@ -348,7 +349,7 @@ impl Resource {
     /// per hashmap segment (74 for radio, ~1994 for TCP).
     pub fn new_outbound<R: RngCore + CryptoRng>(
         data: &[u8],
-        link_id: [u8; 16],
+        link_id: LinkId,
         mdu: usize,
         original_size: usize,
         link_mdu: usize,
@@ -704,7 +705,7 @@ impl Resource {
     ///
     /// Parses a msgpack dictionary with keys:
     /// "t", "d", "n", "h", "r", "o", "i", "l", "q", "f", "m"
-    pub fn from_advertisement(adv_payload: &[u8], link_id: [u8; 16]) -> Result<Self, ResourceError> {
+    pub fn from_advertisement(adv_payload: &[u8], link_id: LinkId) -> Result<Self, ResourceError> {
         let mut pos = 0;
 
         let map_len = msgpack::read_map_len(adv_payload, &mut pos)?;
@@ -1128,7 +1129,7 @@ mod tests {
         let data = vec![0xAA; 1000];
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let res = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let res = Resource::new_outbound(&data, LinkId::from([0x11; 16]), mdu, data.len(), mdu, &mut rng);
         assert_eq!(res.total_segments, 3); // ceil(1000/431)
         assert_eq!(res.total_size, 1000);
         assert_eq!(res.state, ResourceState::Queued);
@@ -1138,7 +1139,7 @@ mod tests {
     fn test_resource_hash_computation() {
         let data = b"hello resource";
         let mut rng = rand::thread_rng();
-        let res = Resource::new_outbound(data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let res = Resource::new_outbound(data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         // Verify hash = SHA-256(data || random_hash)
         let mut hasher = Sha256::new();
         hasher.update(data);
@@ -1151,7 +1152,7 @@ mod tests {
     fn test_part_hash_computation() {
         let data = vec![0xBB; 100];
         let mut rng = rand::thread_rng();
-        let res = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let res = Resource::new_outbound(&data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         // Single part — hash should be SHA-256(data || random_hash)[0:4]
         let mut hasher = Sha256::new();
         hasher.update(&data);
@@ -1164,9 +1165,9 @@ mod tests {
     fn test_advertisement_msgpack_round_trip() {
         let data = vec![0xCC; 500];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
-        let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         assert_eq!(receiver.total_size, 500);
         assert_eq!(receiver.total_segments, 2); // ceil(500/431)
         assert_eq!(receiver.resource_hash, sender.resource_hash);
@@ -1177,7 +1178,7 @@ mod tests {
     fn test_advertisement_is_msgpack_dict() {
         let data = vec![0xDD; 200];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
         // First byte should be a fixmap header (0x80 | n)
         assert_eq!(
@@ -1194,7 +1195,7 @@ mod tests {
         let data = vec![0xDD; 2000];
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), mdu, data.len(), mdu, &mut rng);
         let _adv = sender.build_advertisement();
         // hashmap_cursor should be min(hashmap_max_len, total_segments)
         let expected_cursor = hashmap_max_len(mdu).min(sender.total_segments);
@@ -1205,9 +1206,9 @@ mod tests {
     fn test_request_wire_format() {
         let data = vec![0xEE; 100]; // single part
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         let req = receiver.build_request();
         // For single part, all hashes known from advertisement => status=0x00 (not exhausted)
         // Format: status[1] + resource_hash[32] + hashes[N*4]
@@ -1222,9 +1223,9 @@ mod tests {
     fn test_proof_format() {
         let data = vec![0xFF; 100];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         // Feed the single part
         receiver.receive_part(&data);
         let assembled = receiver.concat_parts().unwrap();
@@ -1242,9 +1243,9 @@ mod tests {
         // After successful request handling, window should grow
         let data = vec![0xAA; 2000];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         let initial_window = receiver.window;
         // Simulate receiving all parts in current window
         receiver.window += 1;
@@ -1255,7 +1256,7 @@ mod tests {
     fn test_cancel_transitions_to_failed() {
         let data = vec![0xBB; 100];
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         sender.handle_cancel();
         assert_eq!(sender.state, ResourceState::Failed);
     }
@@ -1265,13 +1266,13 @@ mod tests {
         // Full sender -> receiver cycle for small data (1 segment)
         let data = b"small transfer data";
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let mut sender = Resource::new_outbound(data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
 
         // Step 1: Build advertisement
         let adv = sender.build_advertisement();
 
         // Step 2: Receiver parses advertisement
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
 
         // Step 3: Receiver builds request
         let req = receiver.build_request();
@@ -1324,7 +1325,7 @@ mod tests {
     fn test_empty_data_resource() {
         let data = b"";
         let mut rng = rand::thread_rng();
-        let res = Resource::new_outbound(data, [0x11; 16], 431, data.len(), 431, &mut rng);
+        let res = Resource::new_outbound(data, LinkId::from([0x11; 16]), 431, data.len(), 431, &mut rng);
         assert_eq!(res.total_segments, 0);
         assert_eq!(res.total_size, 0);
     }
@@ -1335,11 +1336,11 @@ mod tests {
         let data = vec![0xAA; 80 * 431]; // 80 segments
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), mdu, data.len(), mdu, &mut rng);
         assert_eq!(sender.total_segments, 80);
         let adv = sender.build_advertisement();
         assert_eq!(sender.hashmap_cursor, 74); // hashmap_max_len(431)
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
 
         // Build a hashmap update from sender (segment 1: hashes 74-79)
         let hmu = sender
@@ -1360,11 +1361,11 @@ mod tests {
         let data = vec![0x42; 2000]; // ceil(2000/431) = 5 segments
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), mdu, data.len(), mdu, &mut rng);
         assert_eq!(sender.total_segments, 5);
 
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         assert_eq!(receiver.total_segments, 5);
         // All 5 hashes included (min(hashmap_max_len=74, 5) = 5)
         assert_eq!(receiver.hashmap_cursor, 5);
@@ -1404,11 +1405,11 @@ mod tests {
         let data: Vec<u8> = (0..80 * 431).map(|i| (i % 256) as u8).collect();
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), mdu, data.len(), mdu, &mut rng);
         assert_eq!(sender.total_segments, 80);
 
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         // First 74 hashes in advertisement
         assert_eq!(receiver.hashmap_cursor, 74);
         assert!(receiver.needs_hashmap_update());
@@ -1482,7 +1483,7 @@ mod tests {
             .map(|i| u8::from_str_radix(&adv_hex[i..i + 2], 16).unwrap())
             .collect();
 
-        let mut receiver = Resource::from_advertisement(&adv_bytes, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv_bytes, LinkId::from([0x11; 16])).unwrap();
         assert_eq!(receiver.total_size, 144);
         assert_eq!(receiver.total_segments, 1);
         assert_eq!(receiver.random_hash, [0xAA, 0xBB, 0xCC, 0xDD]);
@@ -1523,7 +1524,7 @@ mod tests {
         assert_eq!(encrypted.len(), 160);
 
         // Parse advertisement
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         assert_eq!(receiver.total_size, 160);
         assert_eq!(receiver.total_segments, 1);
         assert_eq!(receiver.random_hash, [0xDE, 0xAD, 0xBE, 0xEF]);
@@ -1560,11 +1561,11 @@ mod tests {
         let data: Vec<u8> = (0..seg_count * tcp_mdu).map(|i| (i % 256) as u8).collect();
         let mut rng = rand::thread_rng();
         let mut sender =
-            Resource::new_outbound(&data, [0x11; 16], tcp_mdu, data.len(), tcp_mdu, &mut rng);
+            Resource::new_outbound(&data, LinkId::from([0x11; 16]), tcp_mdu, data.len(), tcp_mdu, &mut rng);
         assert_eq!(sender.total_segments, seg_count);
 
         let adv = sender.build_advertisement();
-        let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
 
         // CRITICAL: receiver's hashmap_max_len must match sender's
         assert_eq!(
@@ -1586,11 +1587,11 @@ mod tests {
         let data: Vec<u8> = (0..seg_count * tcp_mdu).map(|i| (i % 256) as u8).collect();
         let mut rng = rand::thread_rng();
         let mut sender =
-            Resource::new_outbound(&data, [0x11; 16], tcp_mdu, data.len(), tcp_mdu, &mut rng);
+            Resource::new_outbound(&data, LinkId::from([0x11; 16]), tcp_mdu, data.len(), tcp_mdu, &mut rng);
         assert_eq!(sender.total_segments, seg_count);
 
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         assert_eq!(receiver.hashmap_cursor, sender_hml); // first 1994 hashes
 
         // Build HMU from sender (segment_index=1, hashes 1994..2094)
@@ -1630,7 +1631,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut sender = Resource::new_outbound(
             &segment_data,
-            [0x11; 16],
+            LinkId::from([0x11; 16]),
             mdu,
             full_data_size,
             mdu,
@@ -1641,7 +1642,7 @@ mod tests {
 
         let adv = sender.build_advertisement();
         // Parse the advertisement and check the "d" field
-        let receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
         assert_eq!(
             receiver.original_size,
             full_data_size,
@@ -1658,9 +1659,9 @@ mod tests {
         let data = vec![0x42; 2000]; // 5 segments at MDU=431
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(&data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let mut sender = Resource::new_outbound(&data, LinkId::from([0x11; 16]), mdu, data.len(), mdu, &mut rng);
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
 
         // Get parts via handle_request
         let req = receiver.build_request();
@@ -1691,9 +1692,9 @@ mod tests {
     fn make_delivered_pair(data: &[u8]) -> (Resource, Resource) {
         let mdu = 431;
         let mut rng = rand::thread_rng();
-        let mut sender = Resource::new_outbound(data, [0x11; 16], mdu, data.len(), mdu, &mut rng);
+        let mut sender = Resource::new_outbound(data, LinkId::from([0x11; 16]), mdu, data.len(), mdu, &mut rng);
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
 
         let req = receiver.build_request();
         let result = sender.handle_request(&req);
@@ -1756,7 +1757,7 @@ mod tests {
 
         // Create resource from the "encrypted" data (what actually gets segmented)
         let mut sender =
-            Resource::new_outbound(fake_encrypted, [0x11; 16], mdu, plaintext.len(), mdu, &mut rng);
+            Resource::new_outbound(fake_encrypted, LinkId::from([0x11; 16]), mdu, plaintext.len(), mdu, &mut rng);
 
         // Override resource_hash to be over plaintext (like override_resource_hash does)
         let mut hasher = Sha256::new();
@@ -1765,7 +1766,7 @@ mod tests {
         sender.resource_hash = hasher.finalize().into();
 
         let adv = sender.build_advertisement();
-        let mut receiver = Resource::from_advertisement(&adv, [0x11; 16]).unwrap();
+        let mut receiver = Resource::from_advertisement(&adv, LinkId::from([0x11; 16])).unwrap();
 
         // Deliver the "encrypted" parts
         let req = receiver.build_request();
@@ -1795,7 +1796,7 @@ mod tests {
 
     #[test]
     fn test_from_advertisement_empty() {
-        let result = Resource::from_advertisement(&[], [0x11; 16]);
+        let result = Resource::from_advertisement(&[], LinkId::from([0x11; 16]));
         assert!(matches!(result, Err(ResourceError::Msgpack(_))));
     }
 
@@ -1808,7 +1809,7 @@ mod tests {
         msgpack::write_uint(&mut buf, 1);
 
         assert!(matches!(
-            Resource::from_advertisement(&buf, [0x11; 16]),
+            Resource::from_advertisement(&buf, LinkId::from([0x11; 16])),
             Err(ResourceError::MissingField(AdvertisementField::TransferSize))
         ));
     }
@@ -1821,7 +1822,7 @@ mod tests {
         msgpack::write_bin(&mut buf, &[0xAA; 16]); // should be 32 bytes
 
         assert!(matches!(
-            Resource::from_advertisement(&buf, [0x11; 16]),
+            Resource::from_advertisement(&buf, LinkId::from([0x11; 16])),
             Err(ResourceError::InvalidFieldLen(AdvertisementField::ResourceHash))
         ));
     }
@@ -1834,7 +1835,7 @@ mod tests {
         msgpack::write_bin(&mut buf, &[0xBB; 16]); // should be 4 bytes
 
         assert!(matches!(
-            Resource::from_advertisement(&buf, [0x11; 16]),
+            Resource::from_advertisement(&buf, LinkId::from([0x11; 16])),
             Err(ResourceError::InvalidFieldLen(AdvertisementField::RandomHash))
         ));
     }
@@ -1856,7 +1857,7 @@ mod tests {
         msgpack::write_bin(&mut buf, &[0xCC; 4]);
 
         assert!(matches!(
-            Resource::from_advertisement(&buf, [0x11; 16]),
+            Resource::from_advertisement(&buf, LinkId::from([0x11; 16])),
             Err(ResourceError::ImplausibleSegmentCount)
         ));
     }

@@ -1,6 +1,6 @@
 //! Opportunistic & direct message send/receive.
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, LinkId};
 use rete_stack::{NodeCore, OutboundPacket};
 
 use crate::propagation::MessageStore;
@@ -53,7 +53,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// the dest_hash back to the payload, then unpacks.
     pub fn try_parse_lxmf(
         &self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
         payload: &[u8],
     ) -> Option<LXMessage> {
         if *dest_hash != self.delivery_dest_hash {
@@ -61,7 +61,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         }
         // Reconstruct full packed message: dest_hash[16] || payload
         let mut full = Vec::with_capacity(16 + payload.len());
-        full.extend_from_slice(dest_hash);
+        full.extend_from_slice(dest_hash.as_ref());
         full.extend_from_slice(payload);
         LXMessage::unpack(&full, None).ok()
     }
@@ -81,7 +81,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     pub fn send_direct<R, TS: rete_transport::TransportStorage>(
         &self,
         core: &mut NodeCore<TS>,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         msg: &LXMessage,
         rng: &mut R,
     ) -> Option<OutboundPacket>

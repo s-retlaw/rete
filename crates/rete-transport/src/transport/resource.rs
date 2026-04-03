@@ -5,7 +5,7 @@ use crate::resource::Resource;
 use crate::storage::StorageMap;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
-    DestType, PacketBuilder, PacketType, CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV,
+    DestType, LinkId, PacketBuilder, PacketType, CONTEXT_RESOURCE, CONTEXT_RESOURCE_ADV,
     CONTEXT_RESOURCE_HMU, CONTEXT_RESOURCE_ICL, CONTEXT_RESOURCE_PRF, CONTEXT_RESOURCE_RCL,
     CONTEXT_RESOURCE_REQ, TRUNCATED_HASH_LEN,
 };
@@ -42,7 +42,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Returns the advertisement payload as raw packet bytes.
     pub fn start_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         data: &[u8],
         original_data: &[u8],
         compressed: bool,
@@ -70,7 +70,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Request/response payloads are expected to be well under that limit.
     pub fn start_resource_flagged<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         data: &[u8],
         original_data: &[u8],
         compressed: bool,
@@ -93,7 +93,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Start a single (non-split) resource transfer.
     fn start_single_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         data: &[u8],
         original_data: &[u8],
         compressed: bool,
@@ -117,7 +117,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// and queues remaining segments for later (advertised on proof receipt).
     fn start_split_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         original_data: &[u8],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
@@ -162,7 +162,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Prepend 4 random bytes and encrypt data via link Token.
     fn prepend_and_encrypt<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         data: &[u8],
         rng: &mut R,
     ) -> Option<(alloc::vec::Vec<u8>, usize)> {
@@ -223,7 +223,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
 
     fn prepare_and_advertise_segment<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         send_data: &[u8],
         original_data: &[u8],
         compressed: bool,
@@ -244,7 +244,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
 
     fn prepare_and_advertise_segment_ex<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         send_data: &[u8],
         original_data: &[u8],
         compressed: bool,
@@ -295,7 +295,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Encrypt an advertisement payload and build the RESOURCE_ADV packet.
     fn encrypt_and_build_adv<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         adv: &[u8],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
@@ -311,7 +311,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
-            .destination_hash(link_id)
+            .destination_hash(link_id.as_ref())
             .context(CONTEXT_RESOURCE_ADV)
             .payload(&adv_ct_buf[..adv_ct_len])
             .build()
@@ -324,7 +324,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Returns the advertisement packet to send, or None if no more segments.
     pub(super) fn advertise_next_split_segment<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         original_hash: &[u8; 32],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
@@ -380,7 +380,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Returns the encrypted RESOURCE_REQ packet.
     pub fn accept_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         resource_hash: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
@@ -401,7 +401,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// containing the full 32-byte resource hash (Python expects this).
     pub fn reject_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         resource_hash: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
@@ -420,7 +420,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Build an encrypted RESOURCE_RCL packet containing the full 32-byte resource hash.
     fn build_resource_rcl_packet<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         resource_hash: &[u8; 32],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
@@ -435,7 +435,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// with current < total) to request the next batch.
     pub fn build_followup_request<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         resource_hash: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
@@ -457,7 +457,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Encrypt a RESOURCE_REQ payload via a link and build the packet.
     fn build_resource_req_packet<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         req_payload: &[u8],
         rng: &mut R,
     ) -> Option<alloc::vec::Vec<u8>> {
@@ -469,7 +469,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Link)
-            .destination_hash(link_id)
+            .destination_hash(link_id.as_ref())
             .context(CONTEXT_RESOURCE_REQ)
             .payload(&ct_buf[..ct_len])
             .build()
@@ -480,7 +480,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
 
     pub(super) fn handle_resource_data<'a, R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         context: u8,
         decrypted: &[u8],
         now: u64,
@@ -584,7 +584,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                     if let Ok(pkt_len) = PacketBuilder::new(&mut pkt_buf)
                         .packet_type(PacketType::Data)
                         .dest_type(DestType::Link)
-                        .destination_hash(link_id)
+                        .destination_hash(link_id.as_ref())
                         .context(CONTEXT_RESOURCE)
                         .payload(&part_data)
                         .build()
@@ -755,7 +755,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         }
         // Also send link-encrypted HMU for sender resources with unsent hashes.
         // Collect payloads first to avoid borrow conflict between resources and links.
-        let mut hmu_items: alloc::vec::Vec<([u8; TRUNCATED_HASH_LEN], alloc::vec::Vec<u8>)> =
+        let mut hmu_items: alloc::vec::Vec<(LinkId, alloc::vec::Vec<u8>)> =
             alloc::vec::Vec::new();
         for res in &mut self.resources {
             if res.is_sender && res.needs_hashmap_update() {
@@ -783,7 +783,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Get a resource by its truncated hash and link.
     pub fn get_resource(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         resource_hash: &[u8; TRUNCATED_HASH_LEN],
     ) -> Option<&Resource> {
         self.resources.iter().find(|r| {
@@ -794,7 +794,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
     /// Get a mutable resource by its truncated hash and link.
     pub fn get_resource_mut(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         resource_hash: &[u8; TRUNCATED_HASH_LEN],
     ) -> Option<&mut Resource> {
         self.resources.iter_mut().find(|r| {

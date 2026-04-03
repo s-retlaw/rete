@@ -1,6 +1,6 @@
 //! Sprint 4: Path request handling tests.
 
-use rete_core::{Identity, MTU, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, IdentityHash, Identity, MTU, TRUNCATED_HASH_LEN};
 use rete_transport::{IngestResult, Transport, PATH_REQUEST_DEST};
 
 /// Small transport suitable for tests.
@@ -10,7 +10,7 @@ type TestTransport = Transport<rete_transport::HeaplessStorage<64, 16, 128, 4>>;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_path_request(requested_dest: &[u8; TRUNCATED_HASH_LEN]) -> Vec<u8> {
+fn build_path_request(requested_dest: &DestHash) -> Vec<u8> {
     TestTransport::build_path_request(requested_dest)
 }
 
@@ -31,7 +31,7 @@ fn path_request_dest_hash_matches_python() {
 #[test]
 fn path_request_known_dest_queues_announce() {
     let mut t = TestTransport::new();
-    t.set_local_identity([0x11; TRUNCATED_HASH_LEN]); // enable transport mode
+    t.set_local_identity(IdentityHash::from([0x11; TRUNCATED_HASH_LEN])); // enable transport mode
 
     // Create an announcer and ingest their announce (to populate path + cached announce)
     let announcer = Identity::from_seed(b"path-req-announcer").unwrap();
@@ -81,11 +81,11 @@ fn path_request_known_dest_queues_announce() {
 #[test]
 fn path_request_unknown_dest_no_response() {
     let mut t = TestTransport::new();
-    t.set_local_identity([0x11; TRUNCATED_HASH_LEN]);
+    t.set_local_identity(IdentityHash::from([0x11; TRUNCATED_HASH_LEN]));
 
     let identity = Identity::from_seed(b"test-identity").unwrap();
     let mut rng = rand::thread_rng();
-    let unknown = [0xFF; TRUNCATED_HASH_LEN];
+    let unknown = DestHash::from([0xFF; TRUNCATED_HASH_LEN]);
     let mut req = build_path_request(&unknown);
     let _ = t.ingest(&mut req, 1000, &mut rng, &identity);
 
@@ -105,7 +105,7 @@ fn path_request_ignored_without_transport() {
 
     // Path request on a non-transport node is dropped (PATH_REQUEST_DEST
     // is not a local destination and there's no path to forward to).
-    let requested = [0xAA; TRUNCATED_HASH_LEN];
+    let requested = DestHash::from([0xAA; TRUNCATED_HASH_LEN]);
     let mut req = build_path_request(&requested);
     match t.ingest(&mut req, 1000, &mut rng, &identity) {
         IngestResult::Invalid => {} // non-transport nodes drop path requests

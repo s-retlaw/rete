@@ -1,6 +1,6 @@
 //! Peer registry + peer sync state machine.
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, IdentityHash, LinkId, PathHash};
 use rete_stack::{NodeCore, OutboundPacket};
 
 use crate::peer::{LxmPeer, SyncStrategy};
@@ -23,8 +23,8 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// the peer limit has been reached.
     pub fn peer(
         &mut self,
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        identity_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
+        identity_hash: IdentityHash,
     ) -> bool {
         if self.peers.contains_key(&dest_hash) {
             return false;
@@ -39,7 +39,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Remove a peer from the registry.
-    pub fn unpeer(&mut self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+    pub fn unpeer(&mut self, dest_hash: &DestHash) -> bool {
         self.peers.remove(dest_hash).is_some()
     }
 
@@ -49,7 +49,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Check if a destination is peered.
-    pub fn is_peered(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+    pub fn is_peered(&self, dest_hash: &DestHash) -> bool {
         self.peers.contains_key(dest_hash)
     }
 
@@ -60,12 +60,12 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Get a reference to a peer by dest hash.
-    pub fn get_peer(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&LxmPeer> {
+    pub fn get_peer(&self, dest_hash: &DestHash) -> Option<&LxmPeer> {
         self.peers.get(dest_hash)
     }
 
     /// Get a mutable reference to a peer by dest hash.
-    pub fn get_peer_mut(&mut self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&mut LxmPeer> {
+    pub fn get_peer_mut(&mut self, dest_hash: &DestHash) -> Option<&mut LxmPeer> {
         self.peers.get_mut(dest_hash)
     }
 
@@ -74,7 +74,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     // -----------------------------------------------------------------------
 
     /// Path hash for the peer offer request path.
-    pub fn offer_path_hash() -> [u8; TRUNCATED_HASH_LEN] {
+    pub fn offer_path_hash() -> PathHash {
         rete_transport::request::path_hash(OFFER_PATH)
     }
 
@@ -97,7 +97,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         let mut packets = Vec::new();
 
         // Collect peers that need sync (can't borrow mutably during iteration)
-        let peers_to_sync: Vec<[u8; TRUNCATED_HASH_LEN]> = self
+        let peers_to_sync: Vec<DestHash> = self
             .peers
             .iter()
             .filter(|(_, p)| p.needs_sync(now))
@@ -128,7 +128,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
@@ -211,7 +211,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         response_data: &[u8],
         core: &mut NodeCore<TS>,
         rng: &mut R,
@@ -305,7 +305,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         core: &mut NodeCore<TS>,
         rng: &mut R,
         now: u64,
@@ -355,7 +355,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// or a list of the hashes we want.
     pub fn handle_offer_request(
         &self,
-        path_hash: &[u8; TRUNCATED_HASH_LEN],
+        path_hash: &PathHash,
         data: &[u8],
     ) -> Option<Vec<u8>> {
         if *path_hash != Self::offer_path_hash() {
@@ -395,7 +395,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         &mut self,
         data: &[u8],
         now: u64,
-    ) -> Vec<([u8; TRUNCATED_HASH_LEN], [u8; 32])> {
+    ) -> Vec<(DestHash, [u8; 32])> {
         let prop = match &mut self.propagation {
             Some(p) => p,
             None => return Vec::new(),
@@ -414,8 +414,8 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Clean up sync jobs for a link that was closed.
-    pub fn cleanup_sync_jobs_for_link(&mut self, link_id: &[u8; TRUNCATED_HASH_LEN]) {
-        let removed: Vec<[u8; TRUNCATED_HASH_LEN]> = self
+    pub fn cleanup_sync_jobs_for_link(&mut self, link_id: &LinkId) {
+        let removed: Vec<DestHash> = self
             .pending_syncs
             .iter()
             .filter(|s| s.link_id() == link_id)
@@ -432,7 +432,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Check if a sync job exists for the given link_id.
-    pub fn has_sync_job_for_link(&self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> bool {
+    pub fn has_sync_job_for_link(&self, link_id: &LinkId) -> bool {
         self.pending_syncs.iter().any(|s| s.link_id() == link_id)
     }
 }

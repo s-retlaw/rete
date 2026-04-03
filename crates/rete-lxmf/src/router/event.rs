@@ -1,6 +1,6 @@
 //! Event dispatch — handle_event and handle_event_mut.
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, TRUNCATED_HASH_LEN};
 use rete_stack::NodeEvent;
 
 use crate::peer::{LxmPeer, SyncStrategy};
@@ -108,14 +108,14 @@ impl<S: MessageStore> LxmfRouter<S> {
             {
                 if let Some(result) = self.handle_propagation_request(&path_hash, data) {
                     // Extract the dest_hash from data
-                    let mut dest_hash = [0u8; TRUNCATED_HASH_LEN];
+                    let mut dest_bytes = [0u8; TRUNCATED_HASH_LEN];
                     if data.len() >= TRUNCATED_HASH_LEN {
-                        dest_hash.copy_from_slice(&data[..TRUNCATED_HASH_LEN]);
+                        dest_bytes.copy_from_slice(&data[..TRUNCATED_HASH_LEN]);
                     }
                     return LxmfEvent::PropagationRetrievalRequest {
                         link_id,
                         request_id,
-                        dest_hash,
+                        dest_hash: DestHash::from(dest_bytes),
                         result,
                     };
                 }

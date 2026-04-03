@@ -21,7 +21,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use rete_core::msgpack::{self, MsgpackError};
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{PathHash, RequestId, TRUNCATED_HASH_LEN};
 use sha2::{Digest, Sha256};
 
 /// Length of a path hash (truncated SHA-256, same as `Identity.truncated_hash` in Python RNS).
@@ -53,22 +53,22 @@ impl From<MsgpackError> for RequestError {
 }
 
 /// Compute path hash: `SHA-256(path.as_bytes())[..16]`.
-pub fn path_hash(path: &str) -> [u8; PATH_HASH_LEN] {
+pub fn path_hash(path: &str) -> PathHash {
     let digest = Sha256::digest(path.as_bytes());
     let mut out = [0u8; PATH_HASH_LEN];
     out.copy_from_slice(&digest[..PATH_HASH_LEN]);
-    out
+    PathHash::from(out)
 }
 
 /// Compute request_id from packed request bytes: `SHA-256(packed)[..16]`.
 ///
 /// Note: This is only correct for resource-based (multi-packet) requests.
 /// For single-packet requests, Python RNS uses the packet's truncated hash instead.
-pub fn request_id(packed_request: &[u8]) -> [u8; REQUEST_ID_LEN] {
+pub fn request_id(packed_request: &[u8]) -> RequestId {
     let digest = Sha256::digest(packed_request);
     let mut out = [0u8; REQUEST_ID_LEN];
     out.copy_from_slice(&digest[..REQUEST_ID_LEN]);
-    out
+    RequestId::from(out)
 }
 
 /// Build a packed request: `msgpack([timestamp_f64, path_hash_bytes, data_bytes])`.
@@ -85,7 +85,7 @@ pub fn build_request(path: &str, data: &[u8], now_secs_f64: f64) -> Vec<u8> {
     msgpack::write_float64(&mut buf, now_secs_f64);
 
     // path_hash as bin8 (always 16 bytes)
-    msgpack::write_bin(&mut buf, &ph);
+    msgpack::write_bin(&mut buf, ph.as_ref());
 
     // data as bin
     msgpack::write_bin(&mut buf, data);
@@ -94,7 +94,7 @@ pub fn build_request(path: &str, data: &[u8], now_secs_f64: f64) -> Vec<u8> {
 }
 
 /// Parse a packed request, returning `(timestamp_f64, path_hash, data)`.
-pub fn parse_request(packed: &[u8]) -> Result<(f64, [u8; PATH_HASH_LEN], Vec<u8>), RequestError> {
+pub fn parse_request(packed: &[u8]) -> Result<(f64, PathHash, Vec<u8>), RequestError> {
     let mut pos = 0;
 
     // Read fixarray(3) header
@@ -117,18 +117,18 @@ pub fn parse_request(packed: &[u8]) -> Result<(f64, [u8; PATH_HASH_LEN], Vec<u8>
     // Read data (bin)
     let data = msgpack::read_bin_or_str(packed, &mut pos)?.to_vec();
 
-    Ok((timestamp, ph, data))
+    Ok((timestamp, PathHash::from(ph), data))
 }
 
 /// Build a packed response: `msgpack([request_id_bytes, response_data_bytes])`.
-pub fn build_response(req_id: &[u8; REQUEST_ID_LEN], data: &[u8]) -> Vec<u8> {
+pub fn build_response(req_id: &RequestId, data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1 + 12 + 3 + data.len());
 
     // fixarray(2)
     buf.push(0x92);
 
     // request_id as bin8 (always 16 bytes)
-    msgpack::write_bin(&mut buf, req_id);
+    msgpack::write_bin(&mut buf, req_id.as_ref());
 
     // response data as bin
     msgpack::write_bin(&mut buf, data);
@@ -137,7 +137,7 @@ pub fn build_response(req_id: &[u8; REQUEST_ID_LEN], data: &[u8]) -> Vec<u8> {
 }
 
 /// Parse a packed response, returning `(request_id, data)`.
-pub fn parse_response(packed: &[u8]) -> Result<([u8; REQUEST_ID_LEN], Vec<u8>), RequestError> {
+pub fn parse_response(packed: &[u8]) -> Result<(RequestId, Vec<u8>), RequestError> {
     let mut pos = 0;
 
     // Read fixarray(2) header
@@ -157,7 +157,7 @@ pub fn parse_response(packed: &[u8]) -> Result<([u8; REQUEST_ID_LEN], Vec<u8>), 
     // Read data (bin)
     let data = msgpack::read_bin_or_str(packed, &mut pos)?.to_vec();
 
-    Ok((rid, data))
+    Ok((RequestId::from(rid), data))
 }
 
 // ---------------------------------------------------------------------------
@@ -177,11 +177,11 @@ mod tests {
         // SHA-256("lxmf.delivery") truncated to 10 bytes — verify deterministic
         let ph2 = path_hash("lxmf.delivery");
         assert_eq!(ph, ph2);
-        assert_eq!(ph.len(), PATH_HASH_LEN);
+        assert_eq!(ph.as_ref().len(), PATH_HASH_LEN);
 
         // Verify it's actually SHA-256 truncated
         let digest = Sha256::digest("lxmf.delivery".as_bytes());
-        assert_eq!(&ph[..], &digest[..PATH_HASH_LEN]);
+        assert_eq!(ph.as_ref(), &digest[..PATH_HASH_LEN]);
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod tests {
         let id1 = request_id(&packed);
         let id2 = request_id(&packed);
         assert_eq!(id1, id2);
-        assert_eq!(id1.len(), REQUEST_ID_LEN);
+        assert_eq!(id1.as_ref().len(), REQUEST_ID_LEN);
 
         // Different input produces different id
         let packed2 = build_request("test.echo", b"data2", 1700000000.0);
@@ -214,10 +214,10 @@ mod tests {
 
     #[test]
     fn test_build_parse_response_roundtrip() {
-        let req_id = [
+        let req_id = RequestId::from([
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
             0x0F, 0x10,
-        ];
+        ]);
         let resp_data = b"response payload";
 
         let packed = build_response(&req_id, resp_data);
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_response_with_empty_data() {
-        let req_id: [u8; REQUEST_ID_LEN] = [0xAA; REQUEST_ID_LEN];
+        let req_id = RequestId::from([0xAA; REQUEST_ID_LEN]);
         let packed = build_response(&req_id, &[]);
         let (parsed_rid, parsed_data) = parse_response(&packed).unwrap();
 
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn test_path_hash_different_paths() {
+    fn path_hash_different_paths() {
         let ph1 = path_hash("lxmf.delivery");
         let ph2 = path_hash("lxmf.propagation");
         assert_ne!(ph1, ph2);

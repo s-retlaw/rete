@@ -1,7 +1,7 @@
 //! Validate all rete-core identity/crypto functions against the Python-generated
 //! test vectors in tests/interop/vectors.json.
 
-use rete_core::{destination_hash, destination_hashes, expand_name, Identity};
+use rete_core::{destination_hash, destination_hashes, expand_name, Identity, IdentityHash};
 use serde_json::Value;
 
 /// Load the test vectors JSON.
@@ -104,7 +104,7 @@ fn destination_hash_vectors() {
             Some(h) => {
                 let bytes = unhex(h);
                 let arr: [u8; 16] = bytes.try_into().unwrap();
-                Some(arr)
+                Some(IdentityHash::new(arr))
             }
             None => None,
         };

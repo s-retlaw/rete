@@ -17,7 +17,7 @@ pub(crate) mod tickets;
 
 use std::collections::HashMap;
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, IdentityHash, LinkId, RequestId};
 use rete_stack::{NodeCore, NodeEvent, OutboundPacket};
 
 use crate::peer::LxmPeer;
@@ -37,14 +37,14 @@ pub enum LxmfEvent {
     /// An LXMF peer announced (extracted display_name from app_data).
     PeerAnnounced {
         /// Destination hash of the LXMF peer.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Display name from announce app_data (if parseable).
         display_name: Option<Vec<u8>>,
     },
     /// A message was deposited into the propagation store.
     PropagationDeposit {
         /// Destination hash the message is addressed to.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// SHA-256 hash of the deposited message.
         message_hash: [u8; 32],
     },
@@ -52,32 +52,32 @@ pub enum LxmfEvent {
     /// messages in the propagation store.
     PropagationForward {
         /// Destination hash that announced.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Number of messages pending for this destination.
         count: usize,
     },
     /// A retrieval request was received on the propagation destination.
     PropagationRetrievalRequest {
         /// The link_id the request came on.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// The request_id to respond to.
-        request_id: [u8; TRUNCATED_HASH_LEN],
+        request_id: RequestId,
         /// The destination hash being retrieved.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Retrieval result (response data + messages to send).
         result: PropagationRetrievalResult,
     },
     /// A propagation peer was discovered via announce.
     PeerDiscovered {
         /// Destination hash of the discovered peer.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Identity hash of the discovered peer.
-        identity_hash: [u8; TRUNCATED_HASH_LEN],
+        identity_hash: IdentityHash,
     },
     /// Peer sync completed successfully.
     PeerSyncComplete {
         /// Destination hash of the peer.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
         /// Number of messages sent to the peer.
         messages_sent: usize,
     },
@@ -85,9 +85,9 @@ pub enum LxmfEvent {
     /// The application should send the response via `core.send_response()`.
     PeerOfferReceived {
         /// Link the request came on.
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         /// Request ID to respond to.
-        request_id: [u8; TRUNCATED_HASH_LEN],
+        request_id: RequestId,
         /// Response data to send back (msgpack: false/true/[hashes]).
         response_data: Vec<u8>,
     },
@@ -96,19 +96,19 @@ pub enum LxmfEvent {
         /// SHA-256 hash of the delivered message.
         message_hash: [u8; 32],
         /// Destination hash of the recipient.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
     },
     /// An outbound message failed after max delivery attempts.
     MessageFailed {
         /// SHA-256 hash of the failed message.
         message_hash: [u8; 32],
         /// Destination hash of the intended recipient.
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
     },
     /// An inbound message was rejected due to invalid stamp.
     MessageRejectedStamp {
         /// Source hash of the rejected sender.
-        source_hash: [u8; TRUNCATED_HASH_LEN],
+        source_hash: DestHash,
         /// SHA-256 hash of the rejected message.
         message_hash: [u8; 32],
     },
@@ -134,13 +134,13 @@ pub struct PropagationRetrievalResult {
 pub(super) enum ForwardJob {
     /// Link being established to the destination.
     Linking {
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
+        link_id: LinkId,
     },
     /// Sending stored messages one at a time via Resource.
     Sending {
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
+        link_id: LinkId,
         message_hashes: Vec<[u8; 32]>,
         idx: usize,
     },
@@ -155,7 +155,7 @@ pub(super) enum ForwardJob {
 pub(super) enum RetrievalJob {
     /// Sending stored messages one at a time via Resource.
     Sending {
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        link_id: LinkId,
         message_hashes: Vec<[u8; 32]>,
         idx: usize,
     },
@@ -170,25 +170,25 @@ pub(super) enum RetrievalJob {
 pub(super) enum SyncJob {
     /// Establishing link to peer's propagation destination.
     Linking {
-        peer_dest: [u8; TRUNCATED_HASH_LEN],
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        peer_dest: DestHash,
+        link_id: LinkId,
     },
     /// Offer request sent, awaiting response.
     OfferSent {
-        peer_dest: [u8; TRUNCATED_HASH_LEN],
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        peer_dest: DestHash,
+        link_id: LinkId,
         offered_hashes: Vec<[u8; 32]>,
     },
     /// Transferring messages via resource.
     Transferring {
-        peer_dest: [u8; TRUNCATED_HASH_LEN],
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        peer_dest: DestHash,
+        link_id: LinkId,
         offered_hashes: Vec<[u8; 32]>,
     },
 }
 
 impl SyncJob {
-    pub(super) fn link_id(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+    pub(super) fn link_id(&self) -> &LinkId {
         match self {
             SyncJob::Linking { link_id, .. }
             | SyncJob::OfferSent { link_id, .. }
@@ -196,7 +196,7 @@ impl SyncJob {
         }
     }
 
-    pub(super) fn peer_dest(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+    pub(super) fn peer_dest(&self) -> &DestHash {
         match self {
             SyncJob::Linking { peer_dest, .. }
             | SyncJob::OfferSent { peer_dest, .. }
@@ -217,13 +217,13 @@ pub(super) const OFFER_PATH: &str = "/lxmf/peering/offer";
 /// `&mut NodeCore` as parameter to avoid lifetime issues.
 pub struct LxmfRouter<S: MessageStore = InMemoryMessageStore> {
     /// The `lxmf.delivery` destination hash registered with NodeCore.
-    pub(super) delivery_dest_hash: [u8; TRUNCATED_HASH_LEN],
+    pub(super) delivery_dest_hash: DestHash,
     /// Display name advertised in LXMF announces.
     pub(super) display_name: Option<Vec<u8>>,
     /// Propagation node (store-and-forward), if enabled.
     pub(super) propagation: Option<PropagationNode<S>>,
     /// The `lxmf.propagation` destination hash, if propagation is enabled.
-    pub(super) propagation_dest_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
+    pub(super) propagation_dest_hash: Option<DestHash>,
     /// Active propagation forward jobs (push delivery on announce).
     pub(super) pending_forwards: Vec<ForwardJob>,
     /// Active propagation retrieval jobs (pull delivery on request).
@@ -231,7 +231,7 @@ pub struct LxmfRouter<S: MessageStore = InMemoryMessageStore> {
     /// Active peer sync jobs.
     pub(super) pending_syncs: Vec<SyncJob>,
     /// Peer registry: dest_hash → LxmPeer.
-    pub(super) peers: HashMap<[u8; TRUNCATED_HASH_LEN], LxmPeer>,
+    pub(super) peers: HashMap<DestHash, LxmPeer>,
     /// Auto-discover peers from propagation announces.
     pub(super) autopeer: bool,
     /// Maximum hops for auto-peering (default 4).
@@ -243,7 +243,7 @@ pub struct LxmfRouter<S: MessageStore = InMemoryMessageStore> {
     /// Active outbound direct delivery jobs.
     pub(super) outbound_direct_jobs: Vec<outbound::OutboundDirectJob>,
     /// Outbound stamp cost cache: dest_hash → (timestamp_secs, cost).
-    pub(super) outbound_stamp_costs: HashMap<[u8; TRUNCATED_HASH_LEN], (u64, u8)>,
+    pub(super) outbound_stamp_costs: HashMap<DestHash, (u64, u8)>,
     /// Our inbound stamp cost (advertised in announces, enforced on receipt).
     pub(super) inbound_stamp_cost: Option<u8>,
     /// Whether to enforce stamps on inbound messages (default: false).
@@ -310,7 +310,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     }
 
     /// Returns the `lxmf.delivery` destination hash.
-    pub fn delivery_dest_hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+    pub fn delivery_dest_hash(&self) -> &DestHash {
         &self.delivery_dest_hash
     }
 
@@ -343,7 +343,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Get the cached stamp cost for a destination (from their announce).
     pub fn get_outbound_stamp_cost(
         &self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
     ) -> Option<u8> {
         self.outbound_stamp_costs.get(dest_hash).map(|&(_, c)| c)
     }
@@ -397,7 +397,7 @@ mod tests {
         unpack_sync_messages,
     };
     use crate::peer::SyncStrategy;
-    use rete_core::Identity;
+    use rete_core::{Identity, PathHash, RequestId};
     use std::collections::BTreeMap;
 
     // Use the concrete type alias for static method calls in tests.
@@ -409,9 +409,9 @@ mod tests {
         TestNodeCore::new(identity, "testapp", &["aspect1"]).unwrap()
     }
 
-    fn make_test_msg(source_seed: &[u8], dest_hash: [u8; 16]) -> (LXMessage, Identity) {
+    fn make_test_msg(source_seed: &[u8], dest_hash: DestHash) -> (LXMessage, Identity) {
         let source = Identity::from_seed(source_seed).unwrap();
-        let source_hash = source.hash();
+        let source_hash = DestHash::from_slice(source.hash().as_ref());
         let msg = LXMessage::new(
             dest_hash,
             source_hash,
@@ -465,8 +465,8 @@ mod tests {
     #[test]
     fn test_pack_for_opportunistic_strips_dest_hash() {
         let source = Identity::from_seed(b"pack-opp-test").unwrap();
-        let source_hash = source.hash();
-        let dest_hash = [0xAA; 16];
+        let source_hash = DestHash::from_slice(source.hash().as_ref());
+        let dest_hash = DestHash::from([0xAA; 16]);
         let msg = LXMessage::new(
             dest_hash,
             source_hash,
@@ -544,7 +544,7 @@ mod tests {
         let router = LxmfRouter::register(&mut core);
 
         // Wrong dest hash
-        let wrong_dest = [0xFF; 16];
+        let wrong_dest = DestHash::from([0xFF; 16]);
         assert!(router.try_parse_lxmf(&wrong_dest, b"garbage").is_none());
 
         // Right dest hash but garbage payload
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_pack_for_direct_keeps_full_message() {
-        let (msg, _) = make_test_msg(b"direct-pack-test", [0xAA; 16]);
+        let (msg, _) = make_test_msg(b"direct-pack-test", DestHash::from([0xAA; 16]));
         let direct = Router::pack_direct(&msg);
         let full = msg.pack();
         assert_eq!(direct, full);
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_lxmf_resource_roundtrip() {
-        let (msg, _) = make_test_msg(b"resource-rt-test", [0xBB; 16]);
+        let (msg, _) = make_test_msg(b"resource-rt-test", DestHash::from([0xBB; 16]));
         let packed = msg.pack();
         let parsed = Router::try_parse_lxmf_resource(&packed).unwrap();
         assert_eq!(parsed.title, b"Hello");
@@ -629,7 +629,7 @@ mod tests {
         let router = LxmfRouter::register(&mut core);
 
         let event = NodeEvent::DataReceived {
-            dest_hash: [0xFF; 16], // not our delivery dest
+            dest_hash: DestHash::from([0xFF; 16]), // not our delivery dest
             payload: b"not lxmf".to_vec(),
         };
 
@@ -645,7 +645,7 @@ mod tests {
         let packed = Router::pack_direct(&msg);
 
         let event = NodeEvent::ResourceComplete {
-            link_id: [0xAA; 16],
+            link_id: LinkId::from([0xAA; 16]),
             resource_hash: [0xBB; 16],
             data: packed,
         };
@@ -665,8 +665,8 @@ mod tests {
         let router = LxmfRouter::register(&mut core);
 
         let event = NodeEvent::AnnounceReceived {
-            dest_hash: [0xCC; 16],
-            identity_hash: [0xDD; 16],
+            dest_hash: DestHash::from([0xCC; 16]),
+            identity_hash: IdentityHash::from([0xDD; 16]),
             hops: 1,
             app_data: None,
         };
@@ -706,7 +706,7 @@ mod tests {
 
         let pkt = rete_core::Packet::parse(&pending[0]).unwrap();
         assert_eq!(pkt.packet_type, rete_core::PacketType::Announce);
-        assert_eq!(pkt.destination_hash, router.delivery_dest_hash());
+        assert_eq!(pkt.destination_hash, router.delivery_dest_hash().as_ref());
     }
 
     // -------------------------------------------------------------------
@@ -815,8 +815,8 @@ mod tests {
         app_data.push(0x00);
 
         let event = NodeEvent::AnnounceReceived {
-            dest_hash: [0xEE; 16],
-            identity_hash: [0xFF; 16],
+            dest_hash: DestHash::from([0xEE; 16]),
+            identity_hash: IdentityHash::from([0xFF; 16]),
             hops: 0,
             app_data: Some(app_data),
         };
@@ -826,7 +826,7 @@ mod tests {
                 dest_hash,
                 display_name,
             } => {
-                assert_eq!(dest_hash, [0xEE; 16]);
+                assert_eq!(dest_hash, DestHash::from([0xEE; 16]));
                 assert_eq!(display_name.unwrap(), b"Bob");
             }
             other => panic!("expected PeerAnnounced, got {:?}", other),
@@ -881,7 +881,7 @@ mod tests {
         router.register_propagation(&mut core);
 
         // Create a valid LXMF message to deposit
-        let (msg, _) = make_test_msg(b"deposit-source", [0x42; 16]);
+        let (msg, _) = make_test_msg(b"deposit-source", DestHash::from([0x42; 16]));
         let packed = msg.pack();
 
         let result = router.propagation_deposit(&packed, 1000);
@@ -891,7 +891,7 @@ mod tests {
                 dest_hash,
                 message_hash,
             } => {
-                assert_eq!(dest_hash, [0x42; 16]);
+                assert_eq!(dest_hash, DestHash::from([0x42; 16]));
                 assert_ne!(message_hash, [0u8; 32]); // should be a real hash
             }
             other => panic!("expected PropagationDeposit, got {:?}", other),
@@ -905,7 +905,7 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg, _) = make_test_msg(b"retrieve-source", dest);
         let packed = msg.pack();
 
@@ -922,7 +922,7 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg, _) = make_test_msg(b"forward-source", dest);
         let packed = msg.pack();
         router.propagation_deposit(&packed, 1000);
@@ -930,7 +930,7 @@ mod tests {
         // Simulate an announce from the destination we have messages for
         let event = NodeEvent::AnnounceReceived {
             dest_hash: dest,
-            identity_hash: [0xAA; 16],
+            identity_hash: IdentityHash::from([0xAA; 16]),
             hops: 0,
             app_data: None,
         };
@@ -950,7 +950,7 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let (msg, _) = make_test_msg(b"dedup-source", [0x42; 16]);
+        let (msg, _) = make_test_msg(b"dedup-source", DestHash::from([0x42; 16]));
         let packed = msg.pack();
 
         assert!(router.propagation_deposit(&packed, 1000).is_some());
@@ -964,8 +964,8 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let (msg1, _) = make_test_msg(b"prune-source-1", [0x42; 16]);
-        let (msg2, _) = make_test_msg(b"prune-source-2", [0x42; 16]);
+        let (msg1, _) = make_test_msg(b"prune-source-1", DestHash::from([0x42; 16]));
+        let (msg2, _) = make_test_msg(b"prune-source-2", DestHash::from([0x42; 16]));
         router.propagation_deposit(&msg1.pack(), 1000);
         router.propagation_deposit(&msg2.pack(), 5000);
 
@@ -984,7 +984,7 @@ mod tests {
         assert!(!router.propagation_enabled());
         assert!(router.propagation_dest_hash().is_none());
         assert!(router.propagation_deposit(&[0u8; 100], 1000).is_none());
-        assert!(router.propagation_hashes_for(&[0x42; 16]).is_empty());
+        assert!(router.propagation_hashes_for(&DestHash::from([0x42; 16])).is_empty());
         assert!(!router.propagation_mark_delivered(&[0u8; 32]));
         assert_eq!(router.prune_propagation(1000, 100), 0);
         assert_eq!(router.propagation_message_count(), 0);
@@ -997,18 +997,18 @@ mod tests {
         router.register_propagation(&mut core);
 
         // Create a valid LXMF message as resource data
-        let (msg, _) = make_test_msg(b"event-mut-source", [0x42; 16]);
+        let (msg, _) = make_test_msg(b"event-mut-source", DestHash::from([0x42; 16]));
         let packed = msg.pack();
 
         let event = NodeEvent::ResourceComplete {
-            link_id: [0xAA; 16],
+            link_id: LinkId::from([0xAA; 16]),
             resource_hash: [0xBB; 16],
             data: packed,
         };
 
         match router.handle_event_mut(event, 1000) {
             LxmfEvent::PropagationDeposit { dest_hash, .. } => {
-                assert_eq!(dest_hash, [0x42; 16]);
+                assert_eq!(dest_hash, DestHash::from([0x42; 16]));
             }
             other => panic!("expected PropagationDeposit, got {:?}", other),
         }
@@ -1023,7 +1023,7 @@ mod tests {
 
         // Resource with non-LXMF data (too short to be LXMF)
         let event = NodeEvent::ResourceComplete {
-            link_id: [0xAA; 16],
+            link_id: LinkId::from([0xAA; 16]),
             resource_hash: [0xBB; 16],
             data: b"not lxmf".to_vec(),
         };
@@ -1067,7 +1067,7 @@ mod tests {
         assert_eq!(pkt.packet_type, rete_core::PacketType::Announce);
         assert_eq!(
             pkt.destination_hash,
-            router.propagation_dest_hash().unwrap()
+            router.propagation_dest_hash().unwrap().as_ref()
         );
     }
 
@@ -1086,7 +1086,7 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg, _) = make_test_msg(b"mark-source", dest);
         let packed = msg.pack();
 
@@ -1111,8 +1111,8 @@ mod tests {
     /// Returns (core, router, dest_hash, message_hash).
     fn setup_forward_scenario(
         seed: &[u8],
-        dest: [u8; 16],
-    ) -> (TestNodeCore, LxmfRouter, [u8; 16], [u8; 32]) {
+        dest: DestHash,
+    ) -> (TestNodeCore, LxmfRouter, DestHash, [u8; 32]) {
         let mut core = make_core(seed);
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
@@ -1130,14 +1130,14 @@ mod tests {
 
     #[test]
     fn test_forward_job_has_no_job_initially() {
-        let (_, router, dest, _) = setup_forward_scenario(b"fwd-no-job", [0x42; 16]);
+        let (_, router, dest, _) = setup_forward_scenario(b"fwd-no-job", DestHash::from([0x42; 16]));
         assert!(!router.has_forward_job_for(&dest));
     }
 
     #[test]
     fn test_forward_job_initiates_link() {
         let (mut core, mut router, _dest, _) =
-            setup_forward_scenario(b"fwd-initiate-link", [0x42; 16]);
+            setup_forward_scenario(b"fwd-initiate-link", DestHash::from([0x42; 16]));
         let mut rng = rand::thread_rng();
 
         // Register a peer for the destination so initiate_link has a path
@@ -1378,7 +1378,7 @@ mod tests {
         router.register_propagation(&mut core);
         let mut rng = rand::thread_rng();
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg, _) = make_test_msg(b"fwd-no-path-msg", dest);
         router.propagation_deposit(&msg.pack(), 1000);
 
@@ -1396,7 +1396,7 @@ mod tests {
         router.register_propagation(&mut core);
         let mut rng = rand::thread_rng();
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         // No messages deposited
         let result = router.start_propagation_forward(&dest, &mut core, &mut rng, 1000);
         assert!(result.is_none(), "should fail without messages");
@@ -1409,12 +1409,12 @@ mod tests {
     #[test]
     fn test_propagation_retrieve_path_hash() {
         let ph = Router::propagation_retrieve_path_hash();
-        assert_eq!(ph.len(), 16);
+        assert_eq!(ph.as_bytes().len(), 16);
 
         // Should be SHA-256("/lxmf/propagation/retrieve")[..16]
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest("/lxmf/propagation/retrieve".as_bytes());
-        assert_eq!(&ph[..], &digest[..16]);
+        assert_eq!(ph.as_ref(), &digest[..16]);
 
         // Should be deterministic
         let ph2 = Router::propagation_retrieve_path_hash();
@@ -1427,14 +1427,14 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg1, _) = make_test_msg(b"ret-msg-1", dest);
         let (msg2, _) = make_test_msg(b"ret-msg-2", dest);
         router.propagation_deposit(&msg1.pack(), 1000);
         router.propagation_deposit(&msg2.pack(), 1001);
 
         let path_hash = Router::propagation_retrieve_path_hash();
-        let result = router.handle_propagation_request(&path_hash, &dest);
+        let result = router.handle_propagation_request(&path_hash, dest.as_ref());
         assert!(result.is_some());
 
         let result = result.unwrap();
@@ -1457,9 +1457,9 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let dest = [0x99; 16]; // no messages for this dest
+        let dest = DestHash::from([0x99; 16]); // no messages for this dest
         let path_hash = Router::propagation_retrieve_path_hash();
-        let result = router.handle_propagation_request(&path_hash, &dest);
+        let result = router.handle_propagation_request(&path_hash, dest.as_ref());
         assert!(result.is_some());
 
         let result = result.unwrap();
@@ -1473,9 +1473,9 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let wrong_path_hash = [0xFF; 16];
-        let dest = [0x42; 16];
-        let result = router.handle_propagation_request(&wrong_path_hash, &dest);
+        let wrong_path_hash = PathHash::from([0xFF; 16]);
+        let dest = DestHash::from([0x42; 16]);
+        let result = router.handle_propagation_request(&wrong_path_hash, dest.as_ref());
         assert!(result.is_none());
     }
 
@@ -1486,8 +1486,8 @@ mod tests {
         // Propagation NOT enabled
 
         let path_hash = Router::propagation_retrieve_path_hash();
-        let dest = [0x42; 16];
-        let result = router.handle_propagation_request(&path_hash, &dest);
+        let dest = DestHash::from([0x42; 16]);
+        let result = router.handle_propagation_request(&path_hash, dest.as_ref());
         assert!(result.is_none());
     }
 
@@ -1510,7 +1510,7 @@ mod tests {
         router.register_propagation(&mut core);
         let mut rng = rand::thread_rng();
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg, _) = make_test_msg(b"ret-rc-msg", dest);
         let packed = msg.pack();
         router.propagation_deposit(&packed, 1000);
@@ -1519,12 +1519,12 @@ mod tests {
         // Get the messages via handle_propagation_request
         let path_hash = Router::propagation_retrieve_path_hash();
         let result = router
-            .handle_propagation_request(&path_hash, &dest)
+            .handle_propagation_request(&path_hash, dest.as_ref())
             .unwrap();
         let message_hashes = result.message_hashes;
 
         // Start retrieval send
-        let link_id = [0xAA; 16];
+        let link_id = LinkId::from([0xAA; 16]);
         let _pkts = router.start_retrieval_send(&link_id, message_hashes, &mut core, &mut rng);
 
         assert!(router.has_retrieval_job_for_link(&link_id));
@@ -1552,7 +1552,7 @@ mod tests {
         router.register_propagation(&mut core);
         let mut rng = rand::thread_rng();
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg1, _) = make_test_msg(b"ret-multi-1", dest);
         let (msg2, _) = make_test_msg(b"ret-multi-2", dest);
         router.propagation_deposit(&msg1.pack(), 1000);
@@ -1561,12 +1561,12 @@ mod tests {
 
         let path_hash = Router::propagation_retrieve_path_hash();
         let result = router
-            .handle_propagation_request(&path_hash, &dest)
+            .handle_propagation_request(&path_hash, dest.as_ref())
             .unwrap();
         let message_hashes = result.message_hashes;
         assert_eq!(message_hashes.len(), 2);
 
-        let link_id = [0xAA; 16];
+        let link_id = LinkId::from([0xAA; 16]);
         let _pkts = router.start_retrieval_send(&link_id, message_hashes, &mut core, &mut rng);
 
         // Complete first resource
@@ -1587,17 +1587,17 @@ mod tests {
         router.register_propagation(&mut core);
         let mut rng = rand::thread_rng();
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg, _) = make_test_msg(b"ret-cleanup-msg", dest);
         router.propagation_deposit(&msg.pack(), 1000);
 
         let path_hash = Router::propagation_retrieve_path_hash();
         let result = router
-            .handle_propagation_request(&path_hash, &dest)
+            .handle_propagation_request(&path_hash, dest.as_ref())
             .unwrap();
         let message_hashes = result.message_hashes;
 
-        let link_id = [0xAA; 16];
+        let link_id = LinkId::from([0xAA; 16]);
         let _pkts = router.start_retrieval_send(&link_id, message_hashes, &mut core, &mut rng);
         assert!(router.has_retrieval_job_for_link(&link_id));
 
@@ -1615,22 +1615,22 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let dest = [0x42; 16];
+        let dest = DestHash::from([0x42; 16]);
         let (msg, _) = make_test_msg(b"ret-event-msg", dest);
         router.propagation_deposit(&msg.pack(), 1000);
 
         let path_hash = Router::propagation_retrieve_path_hash();
-        let request_id = [
+        let request_id = RequestId::from([
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
             0x0F, 0x10,
-        ];
-        let link_id = [0xCC; 16];
+        ]);
+        let link_id = LinkId::from([0xCC; 16]);
 
         let event = NodeEvent::RequestReceived {
             link_id,
             request_id,
             path_hash,
-            data: dest.to_vec(),
+            data: dest.as_ref().to_vec(),
         };
 
         match router.handle_event_mut(event, 1000) {
@@ -1680,8 +1680,8 @@ mod tests {
         let mut core = make_core(b"peer-registry-test");
         let mut router = LxmfRouter::register(&mut core);
 
-        let dest = [0x11; TRUNCATED_HASH_LEN];
-        let identity = [0x22; TRUNCATED_HASH_LEN];
+        let dest = DestHash::from([0x11; 16]);
+        let identity = IdentityHash::from([0x22; 16]);
 
         assert!(!router.is_peered(&dest));
         assert!(router.peer(dest, identity));
@@ -1708,10 +1708,10 @@ mod tests {
         // Set low max for testing
         router.max_peers = 2;
 
-        assert!(router.peer([0x01; 16], [0xA1; 16]));
-        assert!(router.peer([0x02; 16], [0xA2; 16]));
+        assert!(router.peer(DestHash::from([0x01; 16]), IdentityHash::from([0xA1; 16])));
+        assert!(router.peer(DestHash::from([0x02; 16]), IdentityHash::from([0xA2; 16])));
         // Third peer rejected
-        assert!(!router.peer([0x03; 16], [0xA3; 16]));
+        assert!(!router.peer(DestHash::from([0x03; 16]), IdentityHash::from([0xA3; 16])));
         assert_eq!(router.peer_count(), 2);
     }
 
@@ -1746,8 +1746,8 @@ mod tests {
             buf
         };
 
-        let dest = [0x33; TRUNCATED_HASH_LEN];
-        let identity = [0x44; TRUNCATED_HASH_LEN];
+        let dest = DestHash::from([0x33; 16]);
+        let identity = IdentityHash::from([0x44; 16]);
         let event = NodeEvent::AnnounceReceived {
             dest_hash: dest,
             identity_hash: identity,
@@ -1777,8 +1777,8 @@ mod tests {
         };
 
         let event = NodeEvent::AnnounceReceived {
-            dest_hash: [0x55; TRUNCATED_HASH_LEN],
-            identity_hash: [0x66; TRUNCATED_HASH_LEN],
+            dest_hash: DestHash::from([0x55; 16]),
+            identity_hash: IdentityHash::from([0x66; 16]),
             hops: 5, // beyond maxdepth
             app_data: Some(app_data),
         };
@@ -1806,8 +1806,8 @@ mod tests {
         };
 
         let event = NodeEvent::AnnounceReceived {
-            dest_hash: [0x77; TRUNCATED_HASH_LEN],
-            identity_hash: [0x88; TRUNCATED_HASH_LEN],
+            dest_hash: DestHash::from([0x77; 16]),
+            identity_hash: IdentityHash::from([0x88; 16]),
             hops: 1,
             app_data: Some(app_data),
         };
@@ -1833,8 +1833,8 @@ mod tests {
         };
 
         let event = NodeEvent::AnnounceReceived {
-            dest_hash: [0x33; TRUNCATED_HASH_LEN],
-            identity_hash: [0x44; TRUNCATED_HASH_LEN],
+            dest_hash: DestHash::from([0x33; 16]),
+            identity_hash: IdentityHash::from([0x44; 16]),
             hops: 1,
             app_data: Some(app_data),
         };
@@ -1849,8 +1849,8 @@ mod tests {
         let mut core = make_core(b"peer-strategy-test");
         let mut router = LxmfRouter::register(&mut core);
 
-        router.peer([0x11; 16], [0x22; 16]);
-        let peer = router.get_peer(&[0x11; 16]).unwrap();
+        router.peer(DestHash::from([0x11; 16]), IdentityHash::from([0x22; 16]));
+        let peer = router.get_peer(&DestHash::from([0x11; 16])).unwrap();
         assert_eq!(peer.sync_strategy, SyncStrategy::Persistent);
     }
 
@@ -2012,9 +2012,9 @@ mod tests {
         let mut router = LxmfRouter::register(&mut core);
         router.register_propagation(&mut core);
 
-        let peer_dest = [0x11; TRUNCATED_HASH_LEN];
-        let link_id = [0x22; TRUNCATED_HASH_LEN];
-        router.peer(peer_dest, [0x33; TRUNCATED_HASH_LEN]);
+        let peer_dest = DestHash::from([0x11; 16]);
+        let link_id = LinkId::from([0x22; 16]);
+        router.peer(peer_dest, IdentityHash::from([0x33; 16]));
 
         // Simulate an active sync job
         router
@@ -2036,7 +2036,7 @@ mod tests {
         let h1 = Router::offer_path_hash();
         let h2 = Router::offer_path_hash();
         assert_eq!(h1, h2);
-        assert_ne!(h1, [0u8; TRUNCATED_HASH_LEN]);
+        assert_ne!(h1, PathHash::from([0u8; 16]));
     }
 
     fn make_fake_lxmf_data(dest_hash: [u8; 16], content_byte: u8) -> Vec<u8> {

@@ -1,6 +1,6 @@
 //! Destination registration, lookup, and proof strategy management.
 
-use rete_core::{Identity, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, Identity, PathHash};
 
 use crate::destination::{Destination, DestinationType, Direction};
 
@@ -18,7 +18,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         &mut self,
         app_name: &str,
         aspects: &[&str],
-    ) -> Result<[u8; TRUNCATED_HASH_LEN], rete_core::Error> {
+    ) -> Result<DestHash, rete_core::Error> {
         let mut name_buf = [0u8; 128];
         let expanded = rete_core::expand_name(app_name, aspects, &mut name_buf)?;
         let id_hash = self.identity.hash();
@@ -51,7 +51,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         aspects: &[&str],
         dest_type: DestinationType,
         direction: Direction,
-    ) -> Result<[u8; TRUNCATED_HASH_LEN], rete_core::Error> {
+    ) -> Result<DestHash, rete_core::Error> {
         let id_hash = if dest_type == DestinationType::Plain {
             None
         } else {
@@ -76,7 +76,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     }
 
     /// Look up a destination by hash (checks primary first, then additional).
-    pub fn get_destination(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> Option<&Destination> {
+    pub fn get_destination(&self, dest_hash: &DestHash) -> Option<&Destination> {
         if *self.primary_dest.hash() == *dest_hash {
             return Some(&self.primary_dest);
         }
@@ -88,7 +88,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Look up a destination mutably by hash.
     pub fn get_destination_mut(
         &mut self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
     ) -> Option<&mut Destination> {
         if *self.primary_dest.hash() == *dest_hash {
             return Some(&mut self.primary_dest);
@@ -118,8 +118,8 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Look up a request handler scoped to a specific destination.
     pub(super) fn find_request_handler(
         &self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
-        path_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
+        path_hash: &PathHash,
     ) -> Option<&super::RequestHandler> {
         let dest = self.get_destination(dest_hash)?;
         dest.lookup_request_handler(path_hash)

@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::vec::Vec;
 
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, IdentityHash, LinkId};
 
 /// Peer sync state machine states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,9 +41,9 @@ pub const SYNC_BACKOFF_INCREMENT: u64 = 720;
 #[derive(Debug, Clone)]
 pub struct LxmPeer {
     /// Destination hash of the peer.
-    pub dest_hash: [u8; TRUNCATED_HASH_LEN],
+    pub dest_hash: DestHash,
     /// Identity hash of the peer.
-    pub identity_hash: [u8; TRUNCATED_HASH_LEN],
+    pub identity_hash: IdentityHash,
     /// Current state of the peering session.
     pub state: PeerState,
     /// Sync strategy for this peer.
@@ -59,7 +59,7 @@ pub struct LxmPeer {
     /// Sync interval in seconds.
     pub sync_interval: u64,
     /// Link ID if link is established.
-    pub link_id: Option<[u8; TRUNCATED_HASH_LEN]>,
+    pub link_id: Option<LinkId>,
     /// Message hashes we've already synced to this peer.
     pub handled: HashSet<[u8; 32]>,
     /// Additional delay after failed syncs (seconds). Increases by
@@ -72,8 +72,8 @@ pub struct LxmPeer {
 impl LxmPeer {
     /// Create a new peer with default settings.
     pub fn new(
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        identity_hash: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
+        identity_hash: IdentityHash,
     ) -> Self {
         LxmPeer {
             dest_hash,
@@ -106,7 +106,7 @@ impl LxmPeer {
     }
 
     /// Transition state for link established.
-    pub fn link_established(&mut self, link_id: [u8; TRUNCATED_HASH_LEN]) {
+    pub fn link_established(&mut self, link_id: LinkId) {
         self.link_id = Some(link_id);
         self.state = PeerState::LinkReady;
     }
@@ -172,10 +172,10 @@ mod tests {
 
     #[test]
     fn test_peer_state_machine() {
-        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        let mut peer = LxmPeer::new(DestHash::from([0x11; 16]), IdentityHash::from([0x22; 16]));
         assert_eq!(peer.state, PeerState::Idle);
 
-        peer.link_established([0x33; TRUNCATED_HASH_LEN]);
+        peer.link_established(LinkId::from([0x33; 16]));
         assert_eq!(peer.state, PeerState::LinkReady);
 
         peer.offer_sent();
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_peer_needs_sync() {
-        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        let mut peer = LxmPeer::new(DestHash::from([0x11; 16]), IdentityHash::from([0x22; 16]));
         peer.sync_strategy = SyncStrategy::Persistent;
         peer.sync_interval = 60;
         peer.last_sync = 100;
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_sync_backoff_increases_on_failure() {
-        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        let mut peer = LxmPeer::new(DestHash::from([0x11; 16]), IdentityHash::from([0x22; 16]));
         assert_eq!(peer.sync_backoff, 0);
 
         peer.sync_failed();
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_sync_backoff_resets_on_success() {
-        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        let mut peer = LxmPeer::new(DestHash::from([0x11; 16]), IdentityHash::from([0x22; 16]));
         peer.sync_failed();
         peer.sync_failed();
         assert_eq!(peer.sync_backoff, 2 * SYNC_BACKOFF_INCREMENT);
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_needs_sync_respects_backoff() {
-        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        let mut peer = LxmPeer::new(DestHash::from([0x11; 16]), IdentityHash::from([0x22; 16]));
         peer.sync_strategy = SyncStrategy::Persistent;
         peer.sync_interval = 60;
         peer.last_sync = 100;
@@ -247,14 +247,14 @@ mod tests {
 
     #[test]
     fn test_sync_attempted_records_timestamp() {
-        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        let mut peer = LxmPeer::new(DestHash::from([0x11; 16]), IdentityHash::from([0x22; 16]));
         peer.sync_attempted(999);
         assert_eq!(peer.last_sync_attempt, 999);
     }
 
     #[test]
     fn test_handled_tracking() {
-        let mut peer = LxmPeer::new([0x11; TRUNCATED_HASH_LEN], [0x22; TRUNCATED_HASH_LEN]);
+        let mut peer = LxmPeer::new(DestHash::from([0x11; 16]), IdentityHash::from([0x22; 16]));
         let hash1 = [0xAA; 32];
         let hash2 = [0xBB; 32];
 

@@ -1,6 +1,6 @@
 //! LXMF message vector tests — validate pack/unpack against Python reference.
 
-use rete_core::Identity;
+use rete_core::{DestHash, Identity};
 use rete_lxmf::LXMessage;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -25,6 +25,10 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 fn hex_to_16(hex: &str) -> [u8; 16] {
     let bytes = hex_to_bytes(hex);
     bytes.as_slice().try_into().unwrap()
+}
+
+fn hex_to_dest_hash(hex: &str) -> DestHash {
+    DestHash::from(hex_to_16(hex))
 }
 
 /// Get a deterministic test identity matching the Python generator.
@@ -64,8 +68,8 @@ fn test_lxmf_vector_pack_matches_python() {
 
         let source_label = v["source_label"].as_str().unwrap();
         let source = get_identity(source_label);
-        let source_hash = hex_to_16(v["source_hash_hex"].as_str().unwrap());
-        let dest_hash = hex_to_16(v["dest_hash_hex"].as_str().unwrap());
+        let source_hash = hex_to_dest_hash(v["source_hash_hex"].as_str().unwrap());
+        let dest_hash = hex_to_dest_hash(v["dest_hash_hex"].as_str().unwrap());
         let timestamp = v["timestamp"].as_f64().unwrap();
         let title_bytes = hex_to_bytes(v["title_bytes_hex"].as_str().unwrap());
         let content_bytes = hex_to_bytes(v["content_bytes_hex"].as_str().unwrap());
@@ -84,8 +88,8 @@ fn test_lxmf_vector_pack_matches_python() {
 
         // Verify source_hash matches identity
         assert_eq!(
-            source.hash(),
-            source_hash,
+            source.hash().as_bytes(),
+            source_hash.as_bytes(),
             "source_hash mismatch for {desc}"
         );
 

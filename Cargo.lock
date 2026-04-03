@@ -844,6 +844,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "rand_core",
+ "serde",
  "serde_json",
  "sha2",
  "x25519-dalek",

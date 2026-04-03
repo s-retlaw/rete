@@ -1,6 +1,6 @@
 //! Outbound message queue — handle_outbound, process_outbound, delivery receipts.
 
-use rete_core::{Packet, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, LinkId, Packet, TRUNCATED_HASH_LEN};
 use rete_stack::{NodeCore, OutboundPacket};
 
 use crate::message::DeliveryMethod;
@@ -51,20 +51,20 @@ pub(super) struct OutboundEntry {
 pub(super) enum OutboundDirectJob {
     /// Link is being established to the destination.
     Linking {
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
+        link_id: LinkId,
         message_hash: [u8; 32],
     },
     /// Link established, resource being sent.
     Sending {
-        dest_hash: [u8; TRUNCATED_HASH_LEN],
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        dest_hash: DestHash,
+        link_id: LinkId,
         message_hash: [u8; 32],
     },
 }
 
 impl OutboundDirectJob {
-    pub fn link_id(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+    pub fn link_id(&self) -> &LinkId {
         match self {
             Self::Linking { link_id, .. } | Self::Sending { link_id, .. } => link_id,
         }
@@ -78,7 +78,7 @@ impl OutboundDirectJob {
         }
     }
 
-    pub fn dest_hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+    pub fn dest_hash(&self) -> &DestHash {
         match self {
             Self::Linking { dest_hash, .. } | Self::Sending { dest_hash, .. } => dest_hash,
         }
@@ -295,7 +295,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         TS: rete_transport::TransportStorage,
     >(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         core: &mut NodeCore<TS>,
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
@@ -335,7 +335,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Handle resource completion for an outbound direct delivery.
     pub fn advance_outbound_on_resource_complete(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
     ) {
         // Find and remove matching direct job
         if let Some(idx) = self
@@ -358,7 +358,7 @@ impl<S: MessageStore> LxmfRouter<S> {
     /// Clean up outbound direct jobs when a link closes.
     pub fn cleanup_outbound_jobs_for_link(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
     ) {
         // Reset matching outbound entries back to Queued for retry
         let message_hashes: Vec<[u8; 32]> = self
@@ -401,7 +401,7 @@ impl<S: MessageStore> LxmfRouter<S> {
         msgpack::write_array_header(&mut buf, self.outbound_stamp_costs.len());
         for (dh, &(ts, cost)) in &self.outbound_stamp_costs {
             buf.push(0x93); // fixarray(3)
-            msgpack::write_bin(&mut buf, dh);
+            msgpack::write_bin(&mut buf, dh.as_ref());
             msgpack::write_uint(&mut buf, ts);
             msgpack::write_uint(&mut buf, cost as u64);
         }
@@ -423,9 +423,7 @@ impl<S: MessageStore> LxmfRouter<S> {
                         if let Ok(ts) = msgpack::read_uint(data, &mut pos) {
                             if let Ok(cost) = msgpack::read_uint(data, &mut pos) {
                                 if dh_bytes.len() >= TRUNCATED_HASH_LEN {
-                                    let mut dh = [0u8; TRUNCATED_HASH_LEN];
-                                    dh.copy_from_slice(&dh_bytes[..TRUNCATED_HASH_LEN]);
-                                    self.outbound_stamp_costs.insert(dh, (ts, cost as u8));
+                                    self.outbound_stamp_costs.insert(DestHash::from_slice(&dh_bytes[..TRUNCATED_HASH_LEN]), (ts, cost as u8));
                                 }
                             }
                         }
@@ -510,6 +508,7 @@ impl<S: MessageStore> LxmfRouter<S> {
 mod tests {
     use super::*;
     use crate::propagation::InMemoryMessageStore;
+    use rete_core::DestHash;
     use crate::router::codec::parse_lxmf_announce_data;
     use crate::LxmfRouter;
     use rete_core::Identity;
@@ -522,11 +521,11 @@ mod tests {
         TestNodeCore::new(id, "testapp", &["aspect1"]).unwrap()
     }
 
-    fn make_test_msg(dest_hash: [u8; 16]) -> LXMessage {
+    fn make_test_msg(dest_hash: DestHash) -> LXMessage {
         let source = Identity::from_seed(b"outbound-test-source").unwrap();
         LXMessage::new(
             dest_hash,
-            source.hash(),
+            DestHash::from_slice(source.hash().as_ref()),
             &source,
             b"Test",
             b"Hello",
@@ -540,7 +539,7 @@ mod tests {
     fn test_handle_outbound_enqueues() {
         let mut core = make_core(b"outbound-enqueue");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0xAA; 16]);
+        let msg = make_test_msg(DestHash::from([0xAA; 16]));
 
         let hash = router.handle_outbound(msg, 1000, &mut rand::thread_rng());
         assert_eq!(hash.len(), 32);
@@ -553,7 +552,7 @@ mod tests {
     fn test_handle_outbound_returns_message_hash() {
         let mut core = make_core(b"outbound-hash");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0xBB; 16]);
+        let msg = make_test_msg(DestHash::from([0xBB; 16]));
 
         let hash = router.handle_outbound(msg, 1000, &mut rand::thread_rng());
         assert_eq!(hash.len(), 32);
@@ -566,7 +565,7 @@ mod tests {
     fn test_handle_outbound_dedup() {
         let mut core = make_core(b"outbound-dedup");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg1 = make_test_msg([0xCC; 16]);
+        let msg1 = make_test_msg(DestHash::from([0xCC; 16]));
 
         let h1 = router.handle_outbound(msg1, 1000, &mut rand::thread_rng());
         // Try to enqueue a message with the same hash (already in queue)
@@ -585,7 +584,7 @@ mod tests {
         let mut core = make_core(b"outbound-stamp");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
 
-        let dest_hash = [0xDD; 16];
+        let dest_hash = DestHash::from([0xDD; 16]);
         router.outbound_stamp_costs.insert(dest_hash, (1000, 1)); // cost=1
 
         let msg = make_test_msg(dest_hash);
@@ -601,7 +600,7 @@ mod tests {
         let mut core = make_core(b"outbound-ticket");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
 
-        let dest_hash = [0xEE; 16];
+        let dest_hash = DestHash::from([0xEE; 16]);
         router.outbound_stamp_costs.insert(dest_hash, (1000, 8)); // cost=8
         router
             .tickets
@@ -622,7 +621,7 @@ mod tests {
     fn test_process_outbound_skips_before_retry_time() {
         let mut core = make_core(b"outbound-skip");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0xFF; 16]);
+        let msg = make_test_msg(DestHash::from([0xFF; 16]));
 
         router.handle_outbound(msg, 1000, &mut rand::thread_rng());
         // Set next attempt in the future
@@ -641,7 +640,7 @@ mod tests {
     fn test_process_outbound_increments_attempts() {
         let mut core = make_core(b"outbound-attempts");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0x11; 16]);
+        let msg = make_test_msg(DestHash::from([0x11; 16]));
 
         router.handle_outbound(msg, 1000, &mut rand::thread_rng());
         assert_eq!(router.pending_outbound[0].delivery_attempts, 0);
@@ -655,7 +654,7 @@ mod tests {
     fn test_process_outbound_fails_after_max_attempts() {
         let mut core = make_core(b"outbound-maxfail");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0x22; 16]);
+        let msg = make_test_msg(DestHash::from([0x22; 16]));
 
         router.handle_outbound(msg, 0, &mut rand::thread_rng());
         router.pending_outbound[0].delivery_attempts = MAX_DELIVERY_ATTEMPTS;
@@ -675,7 +674,7 @@ mod tests {
     fn test_check_delivery_receipt_matches() {
         let mut core = make_core(b"receipt-match");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0x33; 16]);
+        let msg = make_test_msg(DestHash::from([0x33; 16]));
 
         router.handle_outbound(msg, 1000, &mut rand::thread_rng());
         let pkt_hash = [0x99; 32];
@@ -694,7 +693,7 @@ mod tests {
     fn test_check_delivery_receipt_unknown_hash() {
         let mut core = make_core(b"receipt-unknown");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0x44; 16]);
+        let msg = make_test_msg(DestHash::from([0x44; 16]));
 
         router.handle_outbound(msg, 1000, &mut rand::thread_rng());
         let event = router.check_delivery_receipt(&[0xFF; 32]);
@@ -705,7 +704,7 @@ mod tests {
     fn test_delivered_entry_removed_on_next_process() {
         let mut core = make_core(b"receipt-cleanup");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0x55; 16]);
+        let msg = make_test_msg(DestHash::from([0x55; 16]));
 
         router.handle_outbound(msg, 1000, &mut rand::thread_rng());
         router.pending_outbound[0].state = OutboundState::Delivered;
@@ -721,13 +720,13 @@ mod tests {
     fn test_cleanup_outbound_jobs_for_link() {
         let mut core = make_core(b"outbound-cleanup");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0x66; 16]);
+        let msg = make_test_msg(DestHash::from([0x66; 16]));
 
         let hash = router.handle_outbound(msg, 1000, &mut rand::thread_rng());
-        let link_id = [0x77; 16];
+        let link_id = LinkId::from([0x77; 16]);
 
         router.outbound_direct_jobs.push(OutboundDirectJob::Linking {
-            dest_hash: [0x66; 16],
+            dest_hash: DestHash::from([0x66; 16]),
             link_id,
             message_hash: hash,
         });
@@ -748,7 +747,7 @@ mod tests {
     fn test_outbound_message_includes_ticket() {
         let mut core = make_core(b"outbound-ticket-issue");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
-        let msg = make_test_msg([0x77; 16]);
+        let msg = make_test_msg(DestHash::from([0x77; 16]));
         assert!(!msg.fields.contains_key(&crate::FIELD_TICKET));
 
         router.handle_outbound(msg, 1000, &mut rand::thread_rng());
@@ -760,7 +759,7 @@ mod tests {
             .contains_key(&crate::FIELD_TICKET));
 
         // Ticket should be stored in inbound cache for validation
-        let tickets = router.tickets.get_inbound_tickets(&[0x77; 16], 1000);
+        let tickets = router.tickets.get_inbound_tickets(&DestHash::from([0x77; 16]), 1000);
         assert_eq!(tickets.len(), 1);
     }
 
@@ -769,16 +768,16 @@ mod tests {
         let mut core = make_core(b"export-stamp-costs");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
 
-        router.outbound_stamp_costs.insert([0x11; 16], (1000, 4));
-        router.outbound_stamp_costs.insert([0x22; 16], (2000, 8));
+        router.outbound_stamp_costs.insert(DestHash::from([0x11; 16]), (1000, 4));
+        router.outbound_stamp_costs.insert(DestHash::from([0x22; 16]), (2000, 8));
 
         let exported = router.export_stamp_costs();
 
         let mut router2 = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
         router2.import_stamp_costs(&exported);
 
-        assert_eq!(router2.get_outbound_stamp_cost(&[0x11; 16]), Some(4));
-        assert_eq!(router2.get_outbound_stamp_cost(&[0x22; 16]), Some(8));
+        assert_eq!(router2.get_outbound_stamp_cost(&DestHash::from([0x11; 16])), Some(4));
+        assert_eq!(router2.get_outbound_stamp_cost(&DestHash::from([0x22; 16])), Some(8));
     }
 
     #[test]
@@ -786,8 +785,8 @@ mod tests {
         let mut core = make_core(b"export-tickets");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
 
-        router.tickets.store_inbound([0xAA; 16], [0x12, 0x34], 5000);
-        router.tickets.store_outbound([0xBB; 16], [0x56, 0x78], 6000);
+        router.tickets.store_inbound(DestHash::from([0xAA; 16]), [0x12, 0x34], 5000);
+        router.tickets.store_outbound(DestHash::from([0xBB; 16]), [0x56, 0x78], 6000);
 
         let exported = router.export_tickets();
 
@@ -795,11 +794,11 @@ mod tests {
         router2.import_tickets(&exported);
 
         assert_eq!(
-            router2.tickets.get_inbound_tickets(&[0xAA; 16], 1000),
+            router2.tickets.get_inbound_tickets(&DestHash::from([0xAA; 16]), 1000),
             vec![[0x12, 0x34]]
         );
         assert_eq!(
-            router2.tickets.get_outbound_ticket(&[0xBB; 16], 1000),
+            router2.tickets.get_outbound_ticket(&DestHash::from([0xBB; 16]), 1000),
             Some([0x56, 0x78])
         );
     }
@@ -809,7 +808,7 @@ mod tests {
         let mut core = make_core(b"export-queue");
         let mut router = LxmfRouter::<InMemoryMessageStore>::register(&mut core);
 
-        let msg = make_test_msg([0xCC; 16]);
+        let msg = make_test_msg(DestHash::from([0xCC; 16]));
         router.handle_outbound(msg, 1000, &mut rand::thread_rng());
 
         let exported = router.export_outbound_queue();
@@ -819,8 +818,7 @@ mod tests {
         router2.import_outbound_queue(&exported, 2000);
         assert_eq!(router2.pending_outbound.len(), 1);
         assert_eq!(
-            router2.pending_outbound[0].message.destination_hash,
-            [0xCC; 16]
+            router2.pending_outbound[0].message.destination_hash, DestHash::from([0xCC; 16])
         );
     }
 

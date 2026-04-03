@@ -4,6 +4,7 @@
 //! edge cases (stale, invalid proof, duplicate request, etc.).
 
 use rete_core::{
+    DestHash, LinkId,
     DestType, Identity, Packet, PacketBuilder, PacketType, CONTEXT_KEEPALIVE, CONTEXT_LRPROOF, MTU,
     TRUNCATED_HASH_LEN,
 };
@@ -16,7 +17,7 @@ type TestTransport = Transport<rete_transport::HeaplessStorage<64, 16, 128, 4>>;
 // ---------------------------------------------------------------------------
 
 /// Set up a responder transport with a local destination and identity.
-fn make_responder(seed: &[u8]) -> (TestTransport, Identity, [u8; TRUNCATED_HASH_LEN]) {
+fn make_responder(seed: &[u8]) -> (TestTransport, Identity, DestHash) {
     let identity = Identity::from_seed(seed).unwrap();
     let mut name_buf = [0u8; 128];
     let expanded = rete_core::expand_name("testapp", &["link"], &mut name_buf).unwrap();
@@ -30,7 +31,7 @@ fn make_responder(seed: &[u8]) -> (TestTransport, Identity, [u8; TRUNCATED_HASH_
 
 /// Build a LINKREQUEST packet for a destination.
 fn build_link_request(
-    dest_hash: &[u8; TRUNCATED_HASH_LEN],
+    dest_hash: &DestHash,
     identity: &Identity,
     rng: &mut impl rand_core::CryptoRngCore,
 ) -> Vec<u8> {
@@ -40,7 +41,7 @@ fn build_link_request(
     let n = PacketBuilder::new(&mut buf)
         .packet_type(PacketType::LinkRequest)
         .dest_type(DestType::Single)
-        .destination_hash(dest_hash)
+        .destination_hash(dest_hash.as_ref())
         .context(0x00)
         .payload(&request_payload)
         .build()
@@ -54,7 +55,7 @@ fn full_handshake() -> (
     Identity,
     TestTransport,
     Identity,
-    [u8; TRUNCATED_HASH_LEN],
+    LinkId,
 ) {
     let mut rng = rand::thread_rng();
     let (mut resp_t, resp_id, resp_dest) = make_responder(b"responder-hs");
@@ -133,7 +134,7 @@ fn link_request_local_creates_link() {
     let mut raw = request_pkt;
     match t.ingest(&mut raw, 100, &mut rng, &identity) {
         IngestResult::LinkRequestReceived { link_id, proof_raw } => {
-            assert_eq!(link_id.len(), 16);
+            assert_eq!(link_id.as_ref().len(), 16);
             assert!(!proof_raw.is_empty());
             // Proof should be a parseable packet
             let pkt = Packet::parse(&proof_raw).unwrap();
@@ -152,7 +153,7 @@ fn link_request_non_local_forwards() {
     let mut t = TestTransport::new();
     let identity = Identity::from_seed(b"non-local-node").unwrap();
 
-    let remote_dest = [0xAA; TRUNCATED_HASH_LEN];
+    let remote_dest = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
     let initiator = Identity::from_seed(b"initiator-2").unwrap();
     let request_pkt = build_link_request(&remote_dest, &initiator, &mut rng);
 
@@ -394,7 +395,7 @@ fn link_data_before_active_rejected() {
     let pkt_len = PacketBuilder::new(&mut pkt_buf)
         .packet_type(PacketType::Data)
         .dest_type(DestType::Link)
-        .destination_hash(&link_id)
+        .destination_hash(link_id.as_ref())
         .context(0x00)
         .payload(&ct_buf[..ct_len])
         .build()
@@ -474,7 +475,7 @@ fn channel_data_over_link() {
 fn initiate_link_returns_request() {
     let mut rng = rand::thread_rng();
     let identity = Identity::from_seed(b"initiator-test").unwrap();
-    let dest_hash = [0xAA; TRUNCATED_HASH_LEN];
+    let dest_hash = DestHash::from([0xAAu8; TRUNCATED_HASH_LEN]);
 
     let mut t = TestTransport::new();
     let (pkt, link_id) = t

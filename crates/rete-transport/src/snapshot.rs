@@ -8,7 +8,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use rete_core::TRUNCATED_HASH_LEN;
+use rete_core::{DestHash, IdentityHash};
 
 /// Controls how much state is captured in a snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +29,8 @@ pub enum SnapshotDetail {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PathEntry {
-    pub dest_hash: [u8; TRUNCATED_HASH_LEN],
-    pub via: Option<[u8; TRUNCATED_HASH_LEN]>,
+    pub dest_hash: DestHash,
+    pub via: Option<IdentityHash>,
     pub learned_at: u64,
     pub last_accessed: u64,
     pub last_snr: i8,
@@ -42,7 +42,7 @@ pub struct PathEntry {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IdentityEntry {
-    pub dest_hash: [u8; TRUNCATED_HASH_LEN],
+    pub dest_hash: DestHash,
     #[cfg_attr(feature = "serde", serde(with = "pub_key_serde"))]
     pub pub_key: [u8; 64],
 }

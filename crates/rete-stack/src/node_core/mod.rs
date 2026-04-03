@@ -19,7 +19,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use rand_core::{CryptoRng, RngCore};
-use rete_core::{DestType, Identity, Packet, PacketBuilder, PacketType, MTU, TRUNCATED_HASH_LEN};
+use rete_core::{DestHash, DestType, IdentityHash, Identity, LinkId, Packet, PacketBuilder, PacketType, PathHash, RequestId, MTU, TRUNCATED_HASH_LEN};
 use rete_transport::{SendError, Transport, RECEIPT_TIMEOUT};
 
 use alloc::boxed::Box;
@@ -33,19 +33,19 @@ pub use ratchet::{InMemoryRatchetStore, RatchetStore};
 /// Metadata passed to request handlers about the incoming request.
 pub struct RequestContext<'a> {
     /// Destination hash the request arrived on.
-    pub destination_hash: [u8; TRUNCATED_HASH_LEN],
+    pub destination_hash: DestHash,
     /// The request path string.
     pub path: &'a str,
     /// SHA-256(path)[0:16].
-    pub path_hash: [u8; TRUNCATED_HASH_LEN],
+    pub path_hash: PathHash,
     /// Link ID the request arrived on.
-    pub link_id: [u8; TRUNCATED_HASH_LEN],
+    pub link_id: LinkId,
     /// Request ID (truncated packet hash).
-    pub request_id: [u8; TRUNCATED_HASH_LEN],
+    pub request_id: RequestId,
     /// Timestamp from the wire format (seconds since epoch).
     pub requested_at: f64,
     /// Identity hash of the remote peer, if they sent LINKIDENTIFY.
-    pub remote_identity: Option<[u8; TRUNCATED_HASH_LEN]>,
+    pub remote_identity: Option<IdentityHash>,
 }
 
 /// Request access policy (matches Python ALLOW_NONE/ALL/LIST).
@@ -57,12 +57,12 @@ pub enum RequestPolicy {
     AllowAll,
     /// Allow requests only from the listed identity hashes.
     /// Requires the remote peer to have sent LINKIDENTIFY.
-    AllowList(Vec<[u8; TRUNCATED_HASH_LEN]>),
+    AllowList(Vec<IdentityHash>),
 }
 
 impl RequestPolicy {
     /// Check whether a request from the given identity is allowed.
-    pub fn allows(&self, identity: Option<&[u8; TRUNCATED_HASH_LEN]>) -> bool {
+    pub fn allows(&self, identity: Option<&IdentityHash>) -> bool {
         match self {
             RequestPolicy::AllowNone => false,
             RequestPolicy::AllowAll => true,
@@ -239,7 +239,7 @@ pub struct NodeCore<S: rete_transport::TransportStorage> {
 
 /// Buffer entry for a partially-received split resource.
 pub(super) struct SplitRecvEntry {
-    pub(super) link_id: [u8; TRUNCATED_HASH_LEN],
+    pub(super) link_id: LinkId,
     pub(super) original_hash: [u8; 32],
     /// Accumulated plaintext data from completed segments, in order.
     pub(super) data: Vec<u8>,
@@ -306,7 +306,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     }
 
     /// Returns our destination hash.
-    pub fn dest_hash(&self) -> &[u8; TRUNCATED_HASH_LEN] {
+    pub fn dest_hash(&self) -> &DestHash {
         self.primary_dest.hash()
     }
 
@@ -320,7 +320,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         let hash = self.identity.hash();
         use core::fmt::Write as _;
         let mut identity_hash = alloc::string::String::with_capacity(32);
-        for byte in hash {
+        for byte in hash.as_ref() {
             let _ = write!(identity_hash, "{:02x}", byte);
         }
         NodeStats {
@@ -346,7 +346,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// to the specified destination.
     pub fn register_request_handler(
         &mut self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
         handler: RequestHandler,
     ) -> bool {
         if let Some(dest) = self.get_destination_mut(dest_hash) {
@@ -432,7 +432,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// used for receipt timeout calculation.
     pub fn build_data_packet<R: RngCore + CryptoRng>(
         &mut self,
-        dest_hash: &[u8; TRUNCATED_HASH_LEN],
+        dest_hash: &DestHash,
         plaintext: &[u8],
         rng: &mut R,
         now: u64,
@@ -462,10 +462,10 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
-            .destination_hash(dest_hash)
+            .destination_hash(dest_hash.as_ref())
             .context(0x00)
             .payload(&ct_buf[..ct_len])
-            .via(via.as_ref())
+            .via(via.as_ref().map(|v| v.as_bytes()))
             .build()
             .map_err(SendError::PacketBuild)?;
 
@@ -480,7 +480,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     }
 
     /// Build a path request packet for a destination.
-    pub fn request_path(&self, dest_hash: &[u8; TRUNCATED_HASH_LEN]) -> OutboundPacket {
+    pub fn request_path(&self, dest_hash: &DestHash) -> OutboundPacket {
         let raw = Transport::<S>::build_path_request(dest_hash);
         OutboundPacket::broadcast(raw)
     }
@@ -504,7 +504,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     pub(super) fn link_proof_outbound(
         &self,
         packet_hash: &[u8; 32],
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
     ) -> Option<OutboundPacket> {
         Transport::<S>::build_link_proof_packet(&self.identity, packet_hash, link_id).map(
             |data| OutboundPacket {
@@ -517,7 +517,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Send plain data over an established link.
     pub fn send_link_data<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         data: &[u8],
         rng: &mut R,
     ) -> Result<OutboundPacket, SendError> {
@@ -534,12 +534,12 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// A `PendingRequest` is registered internally and checked for timeout in `handle_tick()`.
     pub fn send_request<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         path: &str,
         data: &[u8],
         now: u64,
         rng: &mut R,
-    ) -> Result<(OutboundPacket, [u8; TRUNCATED_HASH_LEN]), SendError> {
+    ) -> Result<(OutboundPacket, RequestId), SendError> {
         let packed = rete_transport::build_request(path, data, now as f64);
 
         // Check if the packed request fits in a single link packet
@@ -559,8 +559,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         // Python RNS Link.py: RequestReceipt uses packet_receipt.truncated_hash.
         let parsed = rete_core::Packet::parse(&pkt).map_err(SendError::PacketBuild)?;
         let pkt_hash = parsed.compute_hash();
-        let mut req_id = [0u8; TRUNCATED_HASH_LEN];
-        req_id.copy_from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
+        let req_id = RequestId::from_slice(&pkt_hash[..TRUNCATED_HASH_LEN]);
 
         self.register_pending_request(req_id, *link_id, now, None);
 
@@ -570,11 +569,11 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Send a large request as a resource transfer with `is_request=true`.
     fn send_request_as_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         packed: &[u8],
         now: u64,
         rng: &mut R,
-    ) -> Result<(OutboundPacket, [u8; TRUNCATED_HASH_LEN]), SendError> {
+    ) -> Result<(OutboundPacket, RequestId), SendError> {
         let req_id = rete_transport::request_id(packed);
         let (pkt, resource_hash) = self
             .transport
@@ -589,8 +588,8 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Register a pending request for timeout tracking.
     fn register_pending_request(
         &mut self,
-        request_id: [u8; TRUNCATED_HASH_LEN],
-        link_id: [u8; TRUNCATED_HASH_LEN],
+        request_id: RequestId,
+        link_id: LinkId,
         now: u64,
         request_resource_hash: Option<[u8; TRUNCATED_HASH_LEN]>,
     ) {
@@ -615,7 +614,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Returns `None` if the request is not tracked (either unknown or already completed).
     pub fn get_request_status(
         &self,
-        request_id: &[u8; TRUNCATED_HASH_LEN],
+        request_id: &RequestId,
     ) -> Option<request_receipt::RequestStatus> {
         self.pending_requests
             .iter()
@@ -628,8 +627,8 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Returns the outbound packet on success, or `Err` if the link is not active.
     pub fn send_response<R: RngCore + CryptoRng>(
         &self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
-        request_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
+        request_id: &RequestId,
         data: &[u8],
         rng: &mut R,
     ) -> Result<OutboundPacket, SendError> {
@@ -646,7 +645,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Get the link MDU for a given link.
     ///
     /// Returns the default `LINK_MDU` if the link is not found.
-    pub fn get_link_mdu(&self, link_id: &[u8; TRUNCATED_HASH_LEN]) -> usize {
+    pub fn get_link_mdu(&self, link_id: &LinkId) -> usize {
         self.transport
             .get_link(link_id)
             .map(|l| {
@@ -667,8 +666,8 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// it as a `ResponseReceived` event.
     pub fn start_response_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
-        request_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
+        request_id: &RequestId,
         data: &[u8],
         rng: &mut R,
     ) -> Result<OutboundPacket, SendError> {
@@ -687,7 +686,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// advertisement packet.
     pub fn start_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         data: &[u8],
         rng: &mut R,
     ) -> Result<OutboundPacket, SendError> {
@@ -728,7 +727,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Returns outbound packets to send (RESOURCE_REQ), or empty vec if resource not found.
     pub fn accept_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         resource_hash: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
@@ -743,7 +742,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// Sends RESOURCE_RCL to the sender. Returns outbound packets.
     pub fn reject_resource<R: RngCore + CryptoRng>(
         &mut self,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
         resource_hash: &[u8; TRUNCATED_HASH_LEN],
         rng: &mut R,
     ) -> Vec<OutboundPacket> {
@@ -811,7 +810,7 @@ mod tests {
         let raw = core.build_announce(None, &mut rng, 1000).unwrap();
         let pkt = Packet::parse(&raw).unwrap();
         assert_eq!(pkt.packet_type, PacketType::Announce);
-        assert_eq!(pkt.destination_hash, core.dest_hash());
+        assert_eq!(pkt.destination_hash, core.dest_hash().as_ref());
     }
 
     #[test]
@@ -873,7 +872,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
-            .destination_hash(core.dest_hash())
+            .destination_hash(core.dest_hash().as_ref())
             .context(0x00)
             .payload(&ct_buf[..ct_len])
             .build()
@@ -906,7 +905,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
-            .destination_hash(core.dest_hash())
+            .destination_hash(core.dest_hash().as_ref())
             .context(0x00)
             .payload(&ct_buf[..ct_len])
             .build()
@@ -934,8 +933,8 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let local_hash = core.identity.hash();
-        let dest = [0xCC; TRUNCATED_HASH_LEN];
-        let next_hop = [0xDD; TRUNCATED_HASH_LEN];
+        let dest = DestHash::from([0xCC; TRUNCATED_HASH_LEN]);
+        let next_hop = IdentityHash::from([0xDD; TRUNCATED_HASH_LEN]);
         let path = rete_transport::Path::via_repeater(next_hop, 3, 100);
         core.transport.insert_path(dest, path);
 
@@ -946,8 +945,8 @@ mod tests {
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
             .transport_type(TRANSPORT_TYPE_TRANSPORT)
-            .transport_id(&local_hash)
-            .destination_hash(&dest)
+            .transport_id(local_hash.as_ref())
+            .destination_hash(dest.as_ref())
             .context(0x00)
             .payload(b"forward me")
             .build()
@@ -999,7 +998,7 @@ mod tests {
 
     /// Set up two NodeCores and perform a full handshake.
     /// Returns (initiator, responder, link_id).
-    fn two_core_handshake() -> (TestNodeCore, TestNodeCore, [u8; TRUNCATED_HASH_LEN]) {
+    fn two_core_handshake() -> (TestNodeCore, TestNodeCore, LinkId) {
         let mut rng = rand::thread_rng();
 
         // Responder
@@ -1096,7 +1095,7 @@ mod tests {
     fn node_core_initiate_link_produces_request() {
         let mut core = make_core(b"init-link-test");
         let mut rng = rand::thread_rng();
-        let dest_hash = [0xAA; TRUNCATED_HASH_LEN];
+        let dest_hash = DestHash::from([0xAA; TRUNCATED_HASH_LEN]);
 
         let (outbound, link_id) = core
             .initiate_link(dest_hash, 100, &mut rng)
@@ -1347,13 +1346,13 @@ mod tests {
     #[test]
     fn path_request_produces_valid_packet() {
         let core = make_core(b"path-req-test");
-        let dest = [0xBB; rete_core::TRUNCATED_HASH_LEN];
+        let dest = DestHash::from([0xBB; rete_core::TRUNCATED_HASH_LEN]);
         let outbound = core.request_path(&dest);
         let parsed = Packet::parse(&outbound.data).unwrap();
         assert_eq!(parsed.packet_type, PacketType::Data);
         assert_eq!(parsed.dest_type, rete_core::DestType::Plain);
-        assert_eq!(parsed.destination_hash, &rete_transport::PATH_REQUEST_DEST);
-        assert_eq!(parsed.payload, &dest);
+        assert_eq!(parsed.destination_hash, rete_transport::PATH_REQUEST_DEST.as_ref());
+        assert_eq!(parsed.payload, dest.as_ref());
     }
 
     // -----------------------------------------------------------------------
@@ -1577,7 +1576,7 @@ mod tests {
         let mut core = make_core(b"no-key-test");
         let mut rng = rand::thread_rng();
 
-        let unknown_dest = [0xFFu8; TRUNCATED_HASH_LEN];
+        let unknown_dest = DestHash::from([0xFFu8; TRUNCATED_HASH_LEN]);
         let result = core.build_data_packet(&unknown_dest, b"hello", &mut rng, 100);
         assert!(
             matches!(result, Err(rete_transport::SendError::UnknownDestination)),
@@ -1661,7 +1660,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
-            .destination_hash(&lxmf_hash)
+            .destination_hash(lxmf_hash.as_ref())
             .context(0x00)
             .payload(&ct_buf[..ct_len])
             .build()
@@ -1699,7 +1698,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
-            .destination_hash(&lxmf_hash)
+            .destination_hash(lxmf_hash.as_ref())
             .context(0x00)
             .payload(&ct_buf[..ct_len])
             .build()
@@ -1734,7 +1733,7 @@ mod tests {
 
         let pkt = Packet::parse(&pending[0]).unwrap();
         assert_eq!(pkt.packet_type, PacketType::Announce);
-        assert_eq!(pkt.destination_hash, &lxmf_hash);
+        assert_eq!(pkt.destination_hash, lxmf_hash.as_ref());
     }
 
     #[test]
@@ -1753,7 +1752,7 @@ mod tests {
     fn test_queue_announce_for_unknown_dest_fails() {
         let mut core = make_core(b"announce-unknown-test");
         let mut rng = rand::thread_rng();
-        let unknown = [0xFF; TRUNCATED_HASH_LEN];
+        let unknown = DestHash::from([0xFF; TRUNCATED_HASH_LEN]);
         assert!(!core.queue_announce_for(&unknown, None, &mut rng, 1000));
     }
 
@@ -2152,7 +2151,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Single)
-            .destination_hash(core.dest_hash())
+            .destination_hash(core.dest_hash().as_ref())
             .context(0x00)
             .payload(&garbage)
             .build()
@@ -2184,7 +2183,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Plain)
-            .destination_hash(&plain_hash)
+            .destination_hash(plain_hash.as_ref())
             .context(0x00)
             .payload(raw_payload)
             .build()
@@ -2230,7 +2229,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Group)
-            .destination_hash(&group_hash)
+            .destination_hash(group_hash.as_ref())
             .context(0x00)
             .payload(&ct_buf[..ct_len])
             .build()
@@ -2265,7 +2264,7 @@ mod tests {
         let pkt_len = PacketBuilder::new(&mut pkt_buf)
             .packet_type(PacketType::Data)
             .dest_type(DestType::Group)
-            .destination_hash(&group_hash)
+            .destination_hash(group_hash.as_ref())
             .context(0x00)
             .payload(&garbage)
             .build()
@@ -2470,11 +2469,11 @@ mod tests {
                 handler: handler_fn(|ctx, data| {
                     HANDLER_CALLED.store(true, Ordering::SeqCst);
                     // Verify all context fields are set
-                    assert!(!ctx.destination_hash.iter().all(|&b| b == 0));
+                    assert!(!ctx.destination_hash.as_bytes().iter().all(|&b| b == 0));
                     assert_eq!(ctx.path, "/test/echo");
                     assert_eq!(ctx.path_hash, rete_transport::path_hash("/test/echo"));
-                    assert!(!ctx.link_id.iter().all(|&b| b == 0));
-                    assert!(!ctx.request_id.iter().all(|&b| b == 0));
+                    assert!(!ctx.link_id.as_bytes().iter().all(|&b| b == 0));
+                    assert!(!ctx.request_id.as_bytes().iter().all(|&b| b == 0));
                     assert!(ctx.requested_at > 0.0);
                     // remote_identity is None (link not identified)
                     assert!(ctx.remote_identity.is_none());
@@ -2612,7 +2611,7 @@ mod tests {
 
         // Register handler with AllowList containing a *different* identity hash
         let dh = *resp.dest_hash();
-        let wrong_hash = [0xAB; 16];
+        let wrong_hash = IdentityHash::from([0xAB; 16]);
         resp.register_request_handler(
             &dh,
             RequestHandler {
@@ -2705,7 +2704,7 @@ mod tests {
     /// Helper: initiator sends a resource advertisement, returns the raw adv packet.
     fn send_resource_adv(
         init: &mut TestNodeCore,
-        link_id: &[u8; TRUNCATED_HASH_LEN],
+        link_id: &LinkId,
     ) -> Vec<u8> {
         let mut rng = rand::thread_rng();
         let adv = init
@@ -2895,7 +2894,7 @@ mod tests {
     #[test]
     fn get_request_status_none_for_unknown() {
         let (init, _resp, _link_id) = two_core_handshake();
-        assert_eq!(init.get_request_status(&[0u8; 16]), None);
+        assert_eq!(init.get_request_status(&RequestId::ZERO), None);
     }
 
     #[test]

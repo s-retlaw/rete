@@ -12,7 +12,7 @@ categories.workspace = true
 default = ["alloc"]
 alloc = []
 hosted = ["rete-transport/hosted"]
-serde = ["dep:serde", "rete-transport/serde"]
+serde = ["dep:serde", "rete-transport/serde", "rete-core/serde"]
 
 [dependencies]
 rete-core = { workspace = true }
