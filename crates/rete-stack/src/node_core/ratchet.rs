@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 /// Keyed on `identity_hash` (16 bytes) because ratchets are per-identity,
 /// not per-destination. One identity may have multiple destinations; all
 /// share the same ratchet.
-pub trait RatchetStore {
+pub trait RatchetStore: Send {
     /// Store a ratchet public key received in a peer's announce.
     fn store_peer_ratchet(&mut self, identity_hash: &[u8; 16], ratchet_pub: [u8; 32]);
 

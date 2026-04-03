@@ -36,8 +36,8 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         }
 
         // Packet log: inbound
-        if let Some(log_fn) = self.packet_log_fn {
-            log_fn(raw, "IN", iface);
+        if let Some(hooks) = &self.hooks {
+            hooks.log_packet(raw, "IN", iface);
         }
 
         // Use stack buffer for small packets (common case), heap for large TCP packets.
@@ -146,8 +146,8 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 let should_prove = match proof_strategy {
                     ProofStrategy::ProveAll => true,
                     ProofStrategy::ProveApp => {
-                        if let Some(f) = self.prove_app_fn {
-                            f(&dest_hash, &packet_hash, &decrypted)
+                        if let Some(hooks) = &self.hooks {
+                            hooks.prove_app(&dest_hash, &packet_hash, &decrypted)
                         } else {
                             false
                         }
@@ -471,11 +471,8 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
 
                     // Step 3: Decompress if compressed flag is set — hard fail
                     let plaintext = if is_compressed {
-                        match self.decompress_fn {
-                            Some(decompress) => match decompress(&decrypted) {
-                                Some(d) => d,
-                                None => resource_failed!(packets),
-                            },
+                        match self.hooks.as_ref().and_then(|h| h.decompress(&decrypted)) {
+                            Some(d) => d,
                             None => resource_failed!(packets),
                         }
                     } else {
@@ -803,13 +800,14 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                         requested_at,
                         remote_identity,
                     };
-                    if let Some(response_data) = (handler.handler)(&ctx, data) {
+                    if let Some(response_data) = handler.handler.handle(&ctx, data) {
                         let final_data = if handler
                             .compression_policy
                             .should_compress(response_data.len())
                         {
-                            self.compress_fn
-                                .and_then(|f| f(&response_data))
+                            self.hooks
+                                .as_ref()
+                                .and_then(|h| h.compress(&response_data))
                                 .filter(|c| c.len() < response_data.len())
                                 .unwrap_or(response_data)
                         } else {

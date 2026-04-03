@@ -15,7 +15,7 @@ Created: 2026-04-02
 | 6 | LxmfRouter narrower than upstream | P1 | ✅ DONE | Outbound queue, retry, receipts, stamps, tickets |
 | 7 | Portable LXMF boundary half-finished | P1 | ✅ DONE | Documented: rete-lxmf-core (no_std) vs rete-lxmf (hosted). AES-256 + scope fixed (item 11 overlap). |
 | 8 | Error handling (stringly-typed) | P2 | ✅ DONE | ResourceError expanded (8 variants), LxmfMessageError (5 variants), as_str() bridge removed |
-| 9 | Callbacks too narrow (fn pointers) | P2 | TODO | Can't capture state; need trait-based hooks |
+| 9 | Callbacks too narrow (fn pointers) | P2 | ✅ DONE | NodeHooks trait + RequestCallback trait, Box<dyn> like RatchetStore |
 | 10 | Type system underused for hashes | P2 | TODO | Do last — touches every signature |
 | 11 | Docs out of date | P2 | PARTIAL | AES-256, scope, ProveApp fixed. Portability matrix deferred. |
 | 12 | Linux example is a de facto daemon | P2 | TODO | 2000+ line main.rs mixing concerns |
@@ -350,7 +350,7 @@ Also: `MsgpackError::as_str()` exists as backward compat, `Destination::new()` u
 ## 9. Callbacks Too Narrow (fn Pointers)
 
 **Priority:** P2
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-03)
 
 ### Problem
 
@@ -361,22 +361,33 @@ Extension points use bare `fn` pointers:
 
 Can't capture state. Forces globals or side channels for anything stateful.
 
+### Solution
+
+Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>`, matching the existing `Box<dyn RatchetStore>` pattern.
+
+1. **`NodeHooks` trait** — 4 global hooks (compress, decompress, prove_app, log_packet) with default no-op methods. Stored as `Option<Box<dyn NodeHooks>>` on NodeCore, replacing 4 separate `Option<fn(...)>` fields. Set via `set_hooks()`/`clear_hooks()`.
+
+2. **`RequestCallback` trait** — single `handle` method for per-path request handlers. Stored as `Box<dyn RequestCallback>` in `RequestHandler` struct (replacing `RequestHandlerFn` fn pointer). `#[derive(Clone)]` removed from `RequestHandler` (never cloned).
+
+3. **`handler_fn()` helper** — converts closures to `Box<dyn RequestCallback>`, handling HRTB lifetime coercion that `Box::new(|ctx, data| ...)` can't infer with `RequestContext<'a>`.
+
+4. **Deleted type aliases**: `TransformFn`, `ProveAppFn`, `RequestHandlerFn`.
+
+5. **Linux example** — `AppHooks` struct implements `NodeHooks` with captured `packet_log: bool` config, replacing 3 separate setter calls.
+
 ### Key Files
 
-- `crates/rete-stack/src/node_core/mod.rs:29-60` — fn pointer type defs
-- `crates/rete-stack/src/node_core/mod.rs:120-131` — `RequestHandler` struct
+- `crates/rete-stack/src/node_core/hooks.rs` — `NodeHooks`, `RequestCallback` traits, `handler_fn()`, blanket impl, 5 unit tests
+- `crates/rete-stack/src/node_core/mod.rs` — `hooks` field replaces 4 fn pointer fields, `set_hooks()`/`clear_hooks()` replace 4 setters
+- `crates/rete-stack/src/node_core/ingest.rs` — 5 call sites updated
+- `crates/rete-stack/src/lib.rs` — re-exports updated
+- `examples/linux/src/main.rs` — `AppHooks` struct, `handler_fn()` usage
 
-### What to Do
+### Verified
 
-1. **Define a `NodeHooks` trait** with default no-op methods for compression, proof policy, request dispatch.
-2. **Or use `Box<dyn Fn(...)>`** behind `alloc` feature for simpler migration.
-3. **Keep `no_std` viable** — trait approach works; closures need `alloc`.
-
-### Done When
-
-- At least one hook (e.g., request handler) can capture state
-- Existing tests still compile and pass
-- `no_std` build still works
+- All 681 workspace unit tests pass
+- All 53 E2E interop tests pass
+- `cargo check -p rete-transport --target thumbv6m-none-eabi` passes (no_std)
 
 ---
 
@@ -496,3 +507,6 @@ Can't capture state. Forces globals or side channels for anything stateful.
 | 2026-04-03 | `From<MsgpackError>` for typed error enums | Follows established `RequestError` pattern. Enables `?` operator instead of `.map_err(|e| e.as_str())` chains. |
 | 2026-04-03 | Defer `expect()` on router registration | `"lxmf.delivery"` is a constant that always fits in 128 bytes. Changing to `Result` would propagate through the public API for no practical benefit. |
 | 2026-04-03 | `InvalidArgument` variant in `rete_core::Error` | Replaces misuse of `MissingField` for constraint violations in `Destination::new()`. Distinct from "field not provided" (MissingField) vs "field value invalid" (InvalidArgument). |
+| 2026-04-03 | `Box<dyn NodeHooks>` over generic `H: NodeHooks` | Matches existing `Box<dyn RatchetStore>` pattern. Dynamic dispatch avoids adding a second generic param to NodeCore (which would propagate to EmbeddedNodeCore, HostedNodeCore, EmbassyNode, TokioNode, LxmfRouter). Callbacks already require `alloc`, so `Box` costs nothing extra. |
+| 2026-04-03 | `handler_fn()` helper for HRTB coercion | `Box::new(|ctx, data| ...)` can't infer higher-ranked lifetimes for `RequestContext<'a>`. A named function with explicit bounds handles the coercion. Common pattern in tower/axum. |
+| 2026-04-03 | Single `NodeHooks` for 4 global hooks, separate `RequestCallback` for per-path | Global hooks (compress, decompress, prove_app, log_packet) share a lifecycle and are set once. Request handlers are per-path, per-destination, registered dynamically — different extension point. |

@@ -7,6 +7,7 @@
 
 mod announce;
 mod destination;
+mod hooks;
 mod ingest;
 mod link;
 pub(crate) mod ratchet;
@@ -26,16 +27,8 @@ use alloc::boxed::Box;
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::{NodeEvent, ProofStrategy, ResourceStrategy};
 
+pub use hooks::{handler_fn, NodeHooks, RequestCallback};
 pub use ratchet::{InMemoryRatchetStore, RatchetStore};
-
-/// Callback type for data compression/decompression functions.
-pub type TransformFn = fn(&[u8]) -> Option<Vec<u8>>;
-
-/// Callback type for ProveApp per-packet proof decisions.
-///
-/// Arguments: (dest_hash, packet_hash, payload_data)
-/// Return `true` to generate a proof, `false` to skip.
-pub type ProveAppFn = fn(&[u8; TRUNCATED_HASH_LEN], &[u8; 32], &[u8]) -> bool;
 
 /// Metadata passed to request handlers about the incoming request.
 pub struct RequestContext<'a> {
@@ -54,12 +47,6 @@ pub struct RequestContext<'a> {
     /// Identity hash of the remote peer, if they sent LINKIDENTIFY.
     pub remote_identity: Option<[u8; TRUNCATED_HASH_LEN]>,
 }
-
-/// Callback type for request handlers.
-///
-/// Arguments: (context, request_data)
-/// Return `Some(response_data)` to send a response, or `None` to send no response.
-pub type RequestHandlerFn = fn(&RequestContext<'_>, &[u8]) -> Option<Vec<u8>>;
 
 /// Request access policy (matches Python ALLOW_NONE/ALL/LIST).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,11 +76,11 @@ impl RequestPolicy {
 
 /// Controls whether response data is compressed before sending.
 ///
-/// Compression uses the `compress_fn` callback (typically bz2).
+/// Compression uses the `NodeHooks::compress` callback (typically bz2).
 /// Matches Python RNS `auto_compress` parameter on request handlers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ResponseCompressionPolicy {
-    /// Compress if response is below the default size limit (64 MB) and `compress_fn` is set.
+    /// Compress if response is below the default size limit (64 MB) and hooks are set.
     #[default]
     Default,
     /// Always attempt compression.
@@ -120,12 +107,11 @@ impl ResponseCompressionPolicy {
 }
 
 /// A registered request handler entry.
-#[derive(Clone)]
 pub struct RequestHandler {
     /// The path string this handler responds to.
     pub path: alloc::string::String,
-    /// The handler function.
-    pub handler: RequestHandlerFn,
+    /// The handler callback (trait object — can capture state).
+    pub handler: Box<dyn RequestCallback>,
     /// Access control policy.
     pub policy: RequestPolicy,
     /// Response compression policy.
@@ -232,20 +218,9 @@ pub struct NodeCore<S: rete_transport::TransportStorage> {
     pub(super) additional_dests: Vec<Destination>,
     /// Optional auto-reply message sent after receiving an announce.
     pub(super) auto_reply: Option<Vec<u8>>,
-    /// Optional decompressor for bz2-compressed resource data.
-    /// Called when a received resource has the compressed flag set.
-    /// Desktop: provide bz2 decompressor. MCUs without enough RAM: leave as None.
-    pub(super) decompress_fn: Option<TransformFn>,
-    /// Optional compressor for outbound resource data.
-    /// When set, `start_resource` will try to compress data before sending.
-    /// Only uses the compressed version if it is actually smaller.
-    pub(super) compress_fn: Option<TransformFn>,
-    /// Optional packet logging callback for diagnostics.
-    /// Called with (raw_bytes, direction, iface_idx) on every inbound packet.
-    /// direction is "IN".
-    pub(super) packet_log_fn: Option<fn(&[u8], &str, u8)>,
-    /// Optional ProveApp callback for per-packet proof decisions.
-    pub(super) prove_app_fn: Option<ProveAppFn>,
+    /// Application-level hooks for compression, decompression, proof policy, and diagnostics.
+    /// Desktop: provide bz2 compressor/decompressor via hooks. MCUs without enough RAM: leave as None.
+    pub(super) hooks: Option<Box<dyn NodeHooks>>,
     /// Buffer for partially-received split resources.
     /// Each entry holds decrypted+decompressed data from completed non-final segments,
     /// keyed by (link_id, original_hash). When the final segment arrives, all buffered
@@ -268,15 +243,6 @@ pub(super) struct SplitRecvEntry {
     pub(super) original_hash: [u8; 32],
     /// Accumulated plaintext data from completed segments, in order.
     pub(super) data: Vec<u8>,
-}
-
-/// Compute identity hash from a 64-byte public key: SHA-256(pub_key)[0:16].
-pub(super) fn identity_hash_from_pubkey(pub_key: &[u8; 64]) -> [u8; 16] {
-    use sha2::{Digest, Sha256};
-    let h = Sha256::digest(pub_key);
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&h[..16]);
-    out
 }
 
 impl<S: rete_transport::TransportStorage> NodeCore<S> {
@@ -309,10 +275,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
             primary_dest,
             additional_dests: Vec::new(),
             auto_reply: None,
-            decompress_fn: None,
-            compress_fn: None,
-            packet_log_fn: None,
-            prove_app_fn: None,
+            hooks: None,
             split_recv_buf: Vec::new(),
             ratchet_store: None,
             resource_strategy: ResourceStrategy::AcceptAll,
@@ -320,9 +283,16 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         })
     }
 
-    /// Set the ProveApp callback for per-packet proof decisions.
-    pub fn set_prove_app_fn(&mut self, f: Option<ProveAppFn>) {
-        self.prove_app_fn = f;
+    /// Install application hooks (compression, proof policy, diagnostics).
+    ///
+    /// Replaces any previously installed hooks.
+    pub fn set_hooks(&mut self, hooks: Box<dyn NodeHooks>) {
+        self.hooks = Some(hooks);
+    }
+
+    /// Remove application hooks, restoring default no-op behavior.
+    pub fn clear_hooks(&mut self) {
+        self.hooks = None;
     }
 
     /// Set the resource acceptance strategy for inbound resource advertisements.
@@ -370,16 +340,6 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         self.auto_reply = msg;
     }
 
-    /// Set the decompression function for bz2-compressed resource data.
-    pub fn set_decompress_fn(&mut self, f: Option<TransformFn>) {
-        self.decompress_fn = f;
-    }
-
-    /// Set the compression function for outbound resource data.
-    pub fn set_compress_fn(&mut self, f: Option<TransformFn>) {
-        self.compress_fn = f;
-    }
-
     /// Register a request handler on a destination.
     ///
     /// The handler will be auto-invoked when a matching request arrives on a link
@@ -397,12 +357,6 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         }
     }
 
-    /// Set a packet logging callback for diagnostics.
-    /// Called with `(raw_bytes, "IN", iface_idx)` on every inbound packet.
-    pub fn set_packet_log_fn(&mut self, f: Option<fn(&[u8], &str, u8)>) {
-        self.packet_log_fn = f;
-    }
-
     /// Set the ratchet key store for forward secrecy.
     ///
     /// When set, outbound encryption uses peer ratchet keys (if available),
@@ -410,6 +364,11 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     /// announces include the local ratchet public key.
     pub fn set_ratchet_store(&mut self, store: Box<dyn RatchetStore>) {
         self.ratchet_store = Some(store);
+    }
+
+    /// Remove the ratchet key store, disabling forward secrecy.
+    pub fn clear_ratchet_store(&mut self) {
+        self.ratchet_store = None;
     }
 
     /// Generate a new local ratchet keypair and store it.
@@ -487,7 +446,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         let ct_len = if let Some(ratchet_pub) = self
             .ratchet_store
             .as_ref()
-            .and_then(|s| s.recall_peer_ratchet(&identity_hash_from_pubkey(&pub_key)))
+            .and_then(|s| s.recall_peer_ratchet(&rete_core::identity_hash(&pub_key)))
         {
             recipient
                 .encrypt_with_ratchet(plaintext, &ratchet_pub, rng, &mut ct_buf)
@@ -723,7 +682,7 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
 
     /// Start a resource transfer on a link.
     ///
-    /// If a `compress_fn` is set, tries to compress `data` and only uses the
+    /// If hooks with `compress` are set, tries to compress `data` and only uses the
     /// compressed version when it is actually smaller.  Returns the outbound
     /// advertisement packet.
     pub fn start_resource<R: RngCore + CryptoRng>(
@@ -747,8 +706,9 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         }
 
         let compressed = self
-            .compress_fn
-            .and_then(|f| f(data))
+            .hooks
+            .as_ref()
+            .and_then(|h| h.compress(data))
             .filter(|c| c.len() < data.len());
 
         let (send_data, is_compressed): (Cow<'_, [u8]>, bool) = match compressed {
@@ -2380,7 +2340,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_ctx, data| Some(data.to_vec()),
+                handler: handler_fn(|_ctx, data| Some(data.to_vec())),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2414,7 +2374,7 @@ mod tests {
             &primary_dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_ctx, _data| Some(b"primary".to_vec()),
+                handler: handler_fn(|_ctx, _data| Some(b"primary".to_vec())),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2426,7 +2386,7 @@ mod tests {
             &extra_dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_ctx, _data| Some(b"extra".to_vec()),
+                handler: handler_fn(|_ctx, _data| Some(b"extra".to_vec())),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2467,7 +2427,7 @@ mod tests {
             &extra_dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_ctx, data| Some(data.to_vec()),
+                handler: handler_fn(|_ctx, data| Some(data.to_vec())),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2507,7 +2467,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |ctx, data| {
+                handler: handler_fn(|ctx, data| {
                     HANDLER_CALLED.store(true, Ordering::SeqCst);
                     // Verify all context fields are set
                     assert!(!ctx.destination_hash.iter().all(|&b| b == 0));
@@ -2519,7 +2479,7 @@ mod tests {
                     // remote_identity is None (link not identified)
                     assert!(ctx.remote_identity.is_none());
                     Some(data.to_vec())
-                },
+                }),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2568,12 +2528,12 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |ctx, data| {
+                handler: handler_fn(|ctx, data| {
                     HANDLER_CALLED.store(true, Ordering::SeqCst);
                     // remote_identity should be set after LINKIDENTIFY
                     assert!(ctx.remote_identity.is_some());
                     Some(data.to_vec())
-                },
+                }),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2622,7 +2582,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_ctx, data| Some(data.to_vec()),
+                handler: handler_fn(|_ctx, data| Some(data.to_vec())),
                 policy: RequestPolicy::AllowList(vec![init.identity.hash()]),
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2657,7 +2617,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_ctx, data| Some(data.to_vec()),
+                handler: handler_fn(|_ctx, data| Some(data.to_vec())),
                 policy: RequestPolicy::AllowList(vec![wrong_hash]),
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2686,7 +2646,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_ctx, data| Some(data.to_vec()),
+                handler: handler_fn(|_ctx, data| Some(data.to_vec())),
                 policy: RequestPolicy::AllowList(vec![init.identity.hash()]),
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -2998,7 +2958,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/echo".into(),
-                handler: |_ctx, data| Some(data.to_vec()),
+                handler: handler_fn(|_ctx, data| Some(data.to_vec())),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -3035,7 +2995,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/echo".into(),
-                handler: |_ctx, data| Some(data.to_vec()),
+                handler: handler_fn(|_ctx, data| Some(data.to_vec())),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
@@ -3077,7 +3037,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/small".into(),
-                handler: |_ctx, _data| Some(b"tiny".to_vec()),
+                handler: handler_fn(|_ctx, _data| Some(b"tiny".to_vec())),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Never,
             },
@@ -3102,7 +3062,7 @@ mod tests {
             &dh,
             RequestHandler {
                 path: "/large".into(),
-                handler: |_ctx, _data| Some(vec![0xAB; 1000]),
+                handler: handler_fn(|_ctx, _data| Some(vec![0xAB; 1000])),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Never,
             },

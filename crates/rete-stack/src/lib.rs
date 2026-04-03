@@ -298,9 +298,9 @@ pub use destination::{Destination, DestinationType, Direction};
 
 #[cfg(feature = "alloc")]
 pub use node_core::{
-    EmbeddedNodeCore, IngestOutcome, NodeCore, NodeStats, OutboundPacket,
-    PacketRouting, ProveAppFn, RequestContext, RequestHandler, RequestHandlerFn, RequestPolicy,
-    ResponseCompressionPolicy,
+    EmbeddedNodeCore, IngestOutcome, NodeCore, NodeHooks, NodeStats, OutboundPacket,
+    PacketRouting, RequestCallback, RequestContext, RequestHandler, RequestPolicy,
+    ResponseCompressionPolicy, handler_fn,
 };
 #[cfg(feature = "alloc")]
 pub use node_core::request_receipt::{PendingRequest, RequestStatus};

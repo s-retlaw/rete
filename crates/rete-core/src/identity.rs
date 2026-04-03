@@ -65,14 +65,25 @@ pub struct Identity {
     cached_hash: [u8; TRUNCATED_HASH_LEN],
 }
 
+/// Compute identity hash from a 64-byte combined public key.
+///
+/// `identity_hash = SHA-256(pub_key)[0:16]`
+///
+/// Format: `pub_key = X25519_pub[0:32] || Ed25519_pub[32:64]`
+pub fn identity_hash(pub_key: &[u8; 64]) -> [u8; TRUNCATED_HASH_LEN] {
+    let digest = Sha256::digest(pub_key);
+    let mut out = [0u8; TRUNCATED_HASH_LEN];
+    out.copy_from_slice(&digest[..TRUNCATED_HASH_LEN]);
+    out
+}
+
 impl Identity {
     /// Compute identity hash from raw public key halves.
     fn compute_hash(x25519_pub: &[u8; 32], ed25519_pub: &[u8; 32]) -> [u8; TRUNCATED_HASH_LEN] {
         let mut pub_key = [0u8; 64];
         pub_key[..32].copy_from_slice(x25519_pub);
         pub_key[32..].copy_from_slice(ed25519_pub);
-        let digest = Sha256::digest(pub_key);
-        digest[..TRUNCATED_HASH_LEN].try_into().unwrap()
+        identity_hash(&pub_key)
     }
 
     /// Create a verify-only Identity from a 64-byte combined public key.

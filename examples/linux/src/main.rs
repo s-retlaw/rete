@@ -22,7 +22,10 @@ use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
 use rete_iface_serial::SerialInterface;
 use rete_iface_tcp::TcpInterface;
 use rete_lxmf::{LXMessage, LxmfEvent, LxmfRouter};
-use rete_stack::{OutboundPacket, RequestHandler, RequestPolicy, ResponseCompressionPolicy};
+use rete_stack::{
+    handler_fn, NodeHooks, OutboundPacket, RequestHandler, RequestPolicy,
+    ResponseCompressionPolicy,
+};
 use rete_tokio::local::{LocalServer, ReconnectingLocalClient};
 use rete_tokio::tcp_server::TcpServer;
 use rete_tokio::{interface_task, InboundMsg, InterfaceSlot, NodeCommand, NodeEvent, TokioNode};
@@ -284,6 +287,30 @@ fn bz2_decompress(data: &[u8]) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Application hooks
+// ---------------------------------------------------------------------------
+
+struct AppHooks {
+    packet_log: bool,
+}
+
+impl NodeHooks for AppHooks {
+    fn compress(&self, data: &[u8]) -> Option<Vec<u8>> {
+        bz2_compress(data)
+    }
+
+    fn decompress(&self, data: &[u8]) -> Option<Vec<u8>> {
+        bz2_decompress(data)
+    }
+
+    fn log_packet(&self, raw: &[u8], direction: &str, iface: u8) {
+        if self.packet_log {
+            log_packet(raw, direction, iface);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -737,11 +764,7 @@ async fn main() {
 
     // Create node
     let mut node = TokioNode::new_boxed(identity, APP_NAME, ASPECTS).expect("valid app name");
-    node.core.set_decompress_fn(Some(bz2_decompress));
-    node.core.set_compress_fn(Some(bz2_compress));
-    if packet_log {
-        node.core.set_packet_log_fn(Some(log_packet));
-    }
+    node.core.set_hooks(Box::new(AppHooks { packet_log }));
 
     // Load snapshot from previous run (if any)
     let mut snapshot_store = JsonFileStore::new(data_dir.join("snapshot.json"));
@@ -796,7 +819,7 @@ async fn main() {
             &dh,
             RequestHandler {
                 path: "/test/echo".into(),
-                handler: |_ctx, data| Some(data.to_vec()),
+                handler: handler_fn(|_ctx, data| Some(data.to_vec())),
                 policy: RequestPolicy::AllowAll,
                 compression_policy: ResponseCompressionPolicy::Default,
             },
