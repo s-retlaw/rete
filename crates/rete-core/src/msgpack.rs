@@ -24,10 +24,9 @@ pub enum MsgpackError {
     UnsupportedType,
 }
 
-impl MsgpackError {
-    /// Convert to a static string for backward compatibility with `&'static str` error callers.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
+impl core::fmt::Display for MsgpackError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
             Self::Truncated => "unexpected end of msgpack data",
             Self::ExpectedArray => "expected msgpack array",
             Self::ExpectedMap => "expected msgpack map",
@@ -36,13 +35,7 @@ impl MsgpackError {
             Self::ExpectedUint => "expected msgpack uint",
             Self::ExpectedFloat => "expected msgpack float",
             Self::UnsupportedType => "unsupported msgpack type",
-        }
-    }
-}
-
-impl core::fmt::Display for MsgpackError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.as_str())
+        })
     }
 }
 

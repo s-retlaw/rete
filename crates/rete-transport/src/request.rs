@@ -36,12 +36,10 @@ pub const REQUEST_ID_LEN: usize = TRUNCATED_HASH_LEN;
 pub enum RequestError {
     /// Data too short or truncated.
     TooShort,
-    /// Expected msgpack array header not found.
-    BadArrayHeader,
-    /// Expected msgpack float64 not found.
-    BadTimestamp,
-    /// Expected msgpack bin (path_hash or data) not found.
-    BadBin,
+    /// Msgpack decoding failed.
+    Msgpack(MsgpackError),
+    /// Wrong array length (expected 3 for request, 2 for response).
+    InvalidArrayLen,
     /// Path hash has wrong length (expected 16 bytes).
     BadPathHashLen,
     /// Request ID has wrong length (expected 16 bytes).
@@ -50,12 +48,7 @@ pub enum RequestError {
 
 impl From<MsgpackError> for RequestError {
     fn from(e: MsgpackError) -> Self {
-        match e {
-            MsgpackError::Truncated => RequestError::TooShort,
-            MsgpackError::ExpectedArray => RequestError::BadArrayHeader,
-            MsgpackError::ExpectedFloat => RequestError::BadTimestamp,
-            _ => RequestError::BadBin,
-        }
+        RequestError::Msgpack(e)
     }
 }
 
@@ -107,7 +100,7 @@ pub fn parse_request(packed: &[u8]) -> Result<(f64, [u8; PATH_HASH_LEN], Vec<u8>
     // Read fixarray(3) header
     let arr_len = msgpack::read_array_len(packed, &mut pos)?;
     if arr_len != 3 {
-        return Err(RequestError::BadArrayHeader);
+        return Err(RequestError::InvalidArrayLen);
     }
 
     // Read float64 timestamp
@@ -150,7 +143,7 @@ pub fn parse_response(packed: &[u8]) -> Result<([u8; REQUEST_ID_LEN], Vec<u8>), 
     // Read fixarray(2) header
     let arr_len = msgpack::read_array_len(packed, &mut pos)?;
     if arr_len != 2 {
-        return Err(RequestError::BadArrayHeader);
+        return Err(RequestError::InvalidArrayLen);
     }
 
     // Read request_id (bin, expect 16 bytes)

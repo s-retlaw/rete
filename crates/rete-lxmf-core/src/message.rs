@@ -4,9 +4,42 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use rete_core::msgpack;
+use rete_core::msgpack::{self, MsgpackError};
 use rete_core::Identity;
 use sha2::{Digest, Sha256};
+
+/// Errors from LXMF message packing, unpacking, and verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LxmfMessageError {
+    /// Message data too short (need at least 96 bytes).
+    TooShort,
+    /// Signature verification failed.
+    InvalidSignature,
+    /// Signing failed.
+    SigningFailed,
+    /// Msgpack decoding failed.
+    Msgpack(MsgpackError),
+    /// Expected array of 4 or 5 elements.
+    InvalidArrayLen,
+}
+
+impl From<MsgpackError> for LxmfMessageError {
+    fn from(e: MsgpackError) -> Self {
+        LxmfMessageError::Msgpack(e)
+    }
+}
+
+impl core::fmt::Display for LxmfMessageError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TooShort => write!(f, "message too short (need at least 96 bytes)"),
+            Self::InvalidSignature => write!(f, "signature verification failed"),
+            Self::SigningFailed => write!(f, "signing failed"),
+            Self::Msgpack(e) => write!(f, "msgpack error: {e}"),
+            Self::InvalidArrayLen => write!(f, "expected array of 4 or 5 elements"),
+        }
+    }
+}
 
 // Field type constants
 /// Embedded LXMF messages field.
@@ -113,7 +146,7 @@ impl LXMessage {
         content: &[u8],
         fields: BTreeMap<u8, Vec<u8>>,
         timestamp: f64,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self, LxmfMessageError> {
         // Build msgpack payload
         let msgpack_payload = encode_msgpack_payload(timestamp, title, content, &fields);
 
@@ -121,7 +154,7 @@ impl LXMessage {
 
         let signature = source_identity
             .sign(&sign_data)
-            .map_err(|_| "signing failed")?;
+            .map_err(|_| LxmfMessageError::SigningFailed)?;
 
         Ok(LXMessage {
             destination_hash,
@@ -165,9 +198,9 @@ impl LXMessage {
     ///
     /// Handles both 4-element (no stamp) and 5-element (with stamp) payloads.
     /// Signature is always verified over the 4-element payload, matching Python LXMF.
-    pub fn unpack(data: &[u8], verify_identity: Option<&Identity>) -> Result<Self, &'static str> {
+    pub fn unpack(data: &[u8], verify_identity: Option<&Identity>) -> Result<Self, LxmfMessageError> {
         if data.len() < 96 {
-            return Err("message too short (need at least 96 bytes)");
+            return Err(LxmfMessageError::TooShort);
         }
 
         let mut destination_hash = [0u8; 16];
@@ -192,7 +225,7 @@ impl LXMessage {
                 build_sign_data(&destination_hash, &source_hash, &payload_for_signing);
             identity
                 .verify(&sign_data, &signature)
-                .map_err(|_| "signature verification failed")?;
+                .map_err(|_| LxmfMessageError::InvalidSignature)?;
         }
 
         Ok(LXMessage {
@@ -403,23 +436,23 @@ fn encode_msgpack_payload_opt_stamp(
 type DecodedPayload = (f64, Vec<u8>, Vec<u8>, BTreeMap<u8, Vec<u8>>, Option<[u8; crate::stamp::STAMP_SIZE]>);
 
 /// Decode the msgpack payload.
-fn decode_msgpack_payload(data: &[u8]) -> Result<DecodedPayload, &'static str> {
+fn decode_msgpack_payload(data: &[u8]) -> Result<DecodedPayload, LxmfMessageError> {
     let mut pos = 0;
 
     // Read array header: 4 elements [ts, title, content, fields] or
     // 5 elements [ts, title, content, fields, stamp] (Python LXMF >= 0.9.x)
-    let arr_len = msgpack::read_array_len(data, &mut pos).map_err(|e| e.as_str())?;
+    let arr_len = msgpack::read_array_len(data, &mut pos)?;
     if !(4..=5).contains(&arr_len) {
-        return Err("expected array of 4 or 5 elements");
+        return Err(LxmfMessageError::InvalidArrayLen);
     }
 
-    let timestamp = msgpack::read_float64(data, &mut pos).map_err(|e| e.as_str())?;
-    let title = msgpack::read_bin_or_str(data, &mut pos).map_err(|e| e.as_str())?.to_vec();
-    let content = msgpack::read_bin_or_str(data, &mut pos).map_err(|e| e.as_str())?.to_vec();
+    let timestamp = msgpack::read_float64(data, &mut pos)?;
+    let title = msgpack::read_bin_or_str(data, &mut pos)?.to_vec();
+    let content = msgpack::read_bin_or_str(data, &mut pos)?.to_vec();
     let fields = read_map(data, &mut pos)?;
 
     let stamp = if arr_len == 5 {
-        let stamp_bytes = msgpack::read_bin_or_str(data, &mut pos).map_err(|e| e.as_str())?;
+        let stamp_bytes = msgpack::read_bin_or_str(data, &mut pos)?;
         if stamp_bytes.len() >= crate::stamp::STAMP_SIZE {
             let mut s = [0u8; crate::stamp::STAMP_SIZE];
             s.copy_from_slice(&stamp_bytes[..crate::stamp::STAMP_SIZE]);
@@ -446,12 +479,12 @@ fn write_map(buf: &mut Vec<u8>, map: &BTreeMap<u8, Vec<u8>>) {
     }
 }
 
-fn read_map(data: &[u8], pos: &mut usize) -> Result<BTreeMap<u8, Vec<u8>>, &'static str> {
-    let len = msgpack::read_map_len(data, pos).map_err(|e| e.as_str())?;
+fn read_map(data: &[u8], pos: &mut usize) -> Result<BTreeMap<u8, Vec<u8>>, LxmfMessageError> {
+    let len = msgpack::read_map_len(data, pos)?;
     let mut map = BTreeMap::new();
     for _ in 0..len {
-        let key = msgpack::read_uint(data, pos).map_err(|e| e.as_str())? as u8;
-        let val = msgpack::read_bin_or_str(data, pos).map_err(|e| e.as_str())?.to_vec();
+        let key = msgpack::read_uint(data, pos)? as u8;
+        let val = msgpack::read_bin_or_str(data, pos)?.to_vec();
         map.insert(key, val);
     }
     Ok(map)
@@ -861,5 +894,55 @@ mod tests {
         assert_eq!(unpacked.stamp, msg.stamp);
         assert_eq!(unpacked.title, b"Hello");
         assert_eq!(unpacked.content, b"World");
+    }
+
+    #[test]
+    fn test_unpack_too_short() {
+        let data = [0u8; 50];
+        assert_eq!(
+            LXMessage::unpack(&data, None).unwrap_err(),
+            LxmfMessageError::TooShort
+        );
+    }
+
+    #[test]
+    fn test_unpack_bad_signature() {
+        let (msg, _source) = make_test_message();
+        let packed = msg.pack();
+
+        let wrong_identity = Identity::from_seed(b"wrong-identity-seed").unwrap();
+        assert_eq!(
+            LXMessage::unpack(&packed, Some(&wrong_identity)).unwrap_err(),
+            LxmfMessageError::InvalidSignature
+        );
+    }
+
+    #[test]
+    fn test_unpack_bad_msgpack() {
+        // 96 bytes of header (dest+source+sig) + garbage msgpack
+        let mut data = vec![0u8; 96];
+        data.extend_from_slice(&[0xFF, 0xFF]); // invalid msgpack
+
+        assert!(matches!(
+            LXMessage::unpack(&data, None).unwrap_err(),
+            LxmfMessageError::Msgpack(_)
+        ));
+    }
+
+    #[test]
+    fn test_unpack_wrong_array_len() {
+        // 96 bytes of header + a 3-element msgpack array (need 4 or 5)
+        let mut data = vec![0u8; 96];
+        data.push(0x93); // fixarray of 3
+        data.push(0xcb); // float64
+        data.extend_from_slice(&1700000000.0f64.to_be_bytes());
+        // Two more bin elements
+        data.extend_from_slice(&[0xc4, 0x01, 0x41]); // bin8 "A"
+        data.extend_from_slice(&[0xc4, 0x01, 0x42]); // bin8 "B"
+
+        assert_eq!(
+            LXMessage::unpack(&data, None).unwrap_err(),
+            LxmfMessageError::InvalidArrayLen
+        );
     }
 }

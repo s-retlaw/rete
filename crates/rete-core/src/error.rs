@@ -25,6 +25,8 @@ pub enum Error {
     InvalidPadding,
     /// A required field was not provided to the packet builder.
     MissingField(&'static str),
+    /// An argument violates a constraint (e.g., wrong identity for destination type).
+    InvalidArgument(&'static str),
 }
 
 impl core::fmt::Display for Error {
@@ -41,6 +43,7 @@ impl core::fmt::Display for Error {
             Error::InvalidSignature => write!(f, "Ed25519 signature verification failed"),
             Error::InvalidPadding => write!(f, "invalid PKCS#7 padding"),
             Error::MissingField(field) => write!(f, "missing required field: {field}"),
+            Error::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
         }
     }
 }

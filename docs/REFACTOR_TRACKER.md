@@ -13,11 +13,11 @@ Created: 2026-04-02
 | 4 | Destination/NodeCore modeling | P1 | ✅ DONE | `destination_hashes()` canonical; `decrypt_with_identity()` on Destination |
 | 5 | Request/Resource lifecycle parity | P1 | ✅ DONE | PendingRequest tracking, timeout, large req/resp as resource |
 | 6 | LxmfRouter narrower than upstream | P1 | ✅ DONE | Outbound queue, retry, receipts, stamps, tickets |
-| 7 | Portable LXMF boundary half-finished | P1 | TODO | Lower priority — RNode doesn't need rete-lxmf |
-| 8 | Error handling (stringly-typed) | P2 | TODO | Resource + LXMF still use `&'static str` errors |
+| 7 | Portable LXMF boundary half-finished | P1 | ✅ DONE | Documented: rete-lxmf-core (no_std) vs rete-lxmf (hosted). AES-256 + scope fixed (item 11 overlap). |
+| 8 | Error handling (stringly-typed) | P2 | ✅ DONE | ResourceError expanded (8 variants), LxmfMessageError (5 variants), as_str() bridge removed |
 | 9 | Callbacks too narrow (fn pointers) | P2 | TODO | Can't capture state; need trait-based hooks |
 | 10 | Type system underused for hashes | P2 | TODO | Do last — touches every signature |
-| 11 | Docs out of date | P2 | TODO | README says AES-128, code uses AES-256; scope wrong |
+| 11 | Docs out of date | P2 | PARTIAL | AES-256, scope, ProveApp fixed. Portability matrix deferred. |
 | 12 | Linux example is a de facto daemon | P2 | TODO | 2000+ line main.rs mixing concerns |
 
 ---
@@ -248,7 +248,7 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 ## 7. Portable LXMF Boundary Half-Finished
 
 **Priority:** P1 (lowered — RNode doesn't need `rete-lxmf` on MCU)
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-03)
 
 ### Problem
 
@@ -271,12 +271,19 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 - `cargo check -p rete-lxmf-core --target thumbv6m-none-eabi` passes (already does)
 - Decision is documented
 
+### Solution
+
+Chose **Option A**: accept the split. Added portability guidance to both crate docs. Also fixed overlapping item 11 issues:
+- AES-128-CBC → AES-256-CBC in README.md and CLAUDE.md
+- Updated scope tables (Links, Channels, LXMF now marked as implemented)
+- Removed stale "not yet handled" comment from ProveApp in rete-stack
+
 ---
 
 ## 8. Error Handling (Stringly-Typed)
 
 **Priority:** P2
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-03)
 
 ### Problem
 
@@ -307,6 +314,36 @@ Also: `MsgpackError::as_str()` exists as backward compat, `Destination::new()` u
 - No public API returns `&'static str` errors
 - No `expect()` on public registration/construction paths
 - Tests assert on error variants, not messages
+
+### Solution
+
+1. **`ResourceError` expanded** from 1 to 8 variants: `HashMismatch`, `Msgpack(MsgpackError)`, `MissingField`, `InvalidFieldLen`, `ImplausibleSegmentCount`, `PayloadTooShort`, `UpdateHashMismatch`, `InvalidUpdateFormat`. `From<MsgpackError>` impl for `?` conversion.
+
+2. **`LxmfMessageError` created** with 5 variants: `TooShort`, `InvalidSignature`, `SigningFailed`, `Msgpack(MsgpackError)`, `InvalidArrayLen`. `From<MsgpackError>` impl.
+
+3. **All `&'static str` returns replaced**: `Resource::from_advertisement()`, `Resource::apply_hashmap_update()`, `LXMessage::new()`, `LXMessage::unpack()`, private helpers `decode_msgpack_payload()`, `read_map()`.
+
+4. **`MsgpackError::as_str()` bridge removed**. Display impl now inlines strings directly.
+
+5. **`destination.rs` wrong error variant fixed**: `MissingField("identity")` → `InvalidArgument("Single/Link destinations require an identity")`.
+
+6. **`expect()` on router registration deferred**: the `expect("lxmf.delivery fits in 128 bytes")` is a known-safe constant invariant, not a real risk.
+
+7. **12 new error-variant tests** added: 8 in `resource.rs`, 4 in `message.rs`.
+
+### Key Files
+
+- `crates/rete-transport/src/resource.rs` — `ResourceError` enum + `from_advertisement` + `apply_hashmap_update`
+- `crates/rete-lxmf-core/src/message.rs` — `LxmfMessageError` enum + `new` + `unpack` + helpers
+- `crates/rete-core/src/msgpack.rs` — removed `as_str()`, inlined Display
+- `crates/rete-core/src/error.rs` — added `InvalidArgument` variant
+- `crates/rete-stack/src/destination.rs` — uses `InvalidArgument` instead of `MissingField`
+
+### Verified
+
+- All workspace unit tests pass
+- All E2E interop tests pass
+- `cargo check -p rete-transport --target thumbv6m-none-eabi` passes (no_std)
 
 ---
 
@@ -455,3 +492,7 @@ Can't capture state. Forces globals or side channels for anything stateful.
 | 2026-04-02 | Ticket cache is in-memory with export/import | Tickets are small (2 bytes each). In-memory HashMap with export/import msgpack serialization for persistence. No trait abstraction — simple enough for direct use. |
 | 2026-04-02 | `process_outbound` in tick, not separate poll | Consistent with `check_peer_syncs()` pattern. Called from the application event loop during tick processing. |
 | 2026-04-02 | Stamp enforcement defaults to off (`enforce_stamps=false`) | Matches Python: stamps are validated but invalid stamps are logged, not rejected, unless enforcement is explicitly enabled. |
+| 2026-04-03 | Accept rete-lxmf-core/rete-lxmf split (Option A) | RNode doesn't need LXMF on MCU. `rete-lxmf-core` is the portable `no_std + alloc` codec crate; `rete-lxmf` with router is hosted-only. Documented in crate docs. |
+| 2026-04-03 | `From<MsgpackError>` for typed error enums | Follows established `RequestError` pattern. Enables `?` operator instead of `.map_err(|e| e.as_str())` chains. |
+| 2026-04-03 | Defer `expect()` on router registration | `"lxmf.delivery"` is a constant that always fits in 128 bytes. Changing to `Result` would propagate through the public API for no practical benefit. |
+| 2026-04-03 | `InvalidArgument` variant in `rete_core::Error` | Replaces misuse of `MissingField` for constraint violations in `Destination::new()`. Distinct from "field not provided" (MissingField) vs "field value invalid" (InvalidArgument). |

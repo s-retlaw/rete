@@ -102,7 +102,6 @@ pub enum ProofStrategy {
     /// Automatically prove all received data packets.
     ProveAll,
     /// Only prove packets for specific destinations (application decides).
-    /// Reserved for future use — not yet handled by NodeCore.
     ProveApp,
 }
 

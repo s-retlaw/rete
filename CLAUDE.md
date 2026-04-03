@@ -155,17 +155,28 @@ dest_hash     = SHA-256(addr_material)[0:16]
 
 ### Encryption (SINGLE destination)
 ```
-Ciphertext = ephemeral_X25519_pub[32] || AES_IV[16] || aes_cbc_body
+Ciphertext = ephemeral_X25519_pub[32] || token
+Token      = AES_IV[16] || aes_256_cbc_body || HMAC_SHA256[32]
 
 Encrypt:
-  shared = X25519(ephemeral_prv, recipient_X25519_pub)
-  key    = HKDF-SHA256(ikm=shared, length=32)
-  ct     = AES-128-CBC(key=key[0:16], iv=random[16], plaintext, padding=PKCS7)
+  shared     = X25519(ephemeral_prv, recipient_X25519_pub)
+  derived    = HKDF-SHA256(ikm=shared, salt=identity_hash, info=b"", length=64)
+  sign_key   = derived[0:32]
+  enc_key    = derived[32:64]
+  iv         = random[16]
+  aes_body   = AES-256-CBC(enc_key, iv, PKCS7_pad(plaintext))
+  hmac       = HMAC-SHA256(sign_key, iv || aes_body)
+  ciphertext = ephemeral_pub[32] || iv[16] || aes_body || hmac[32]
 
 Decrypt:
-  shared = X25519(recipient_X25519_prv, ciphertext[0:32])
-  key    = HKDF-SHA256(ikm=shared, length=32)
-  pt     = AES-128-CBC-decrypt(key=key[0:16], iv=ciphertext[32:48], ciphertext[48:])
+  shared     = X25519(recipient_X25519_prv, ciphertext[0:32])
+  derived    = HKDF-SHA256(ikm=shared, salt=identity_hash, info=b"", length=64)
+  sign_key   = derived[0:32]
+  enc_key    = derived[32:64]
+  verify HMAC-SHA256(sign_key, token[:-32]) == token[-32:]
+  iv         = token[0:16]
+  aes_body   = token[16:-32]
+  plaintext  = PKCS7_unpad(AES-256-CBC-decrypt(enc_key, iv, aes_body))
 ```
 
 ---
@@ -256,17 +267,13 @@ Start here — do not skip ahead:
 
 ---
 
-## What is explicitly out of scope (Phase 2+)
+## Not yet implemented
 
-Do NOT implement these yet — get core protocol working first:
+The following are not yet implemented:
 
-- Links (`RNS/Link.py`) — connection-oriented sessions
-- Channels / Buffer (`RNS/Channel.py`, `RNS/Buffer.py`) — reliable streams over links
-- LXMF — the message protocol built on top of RNS
 - AutoInterface — mDNS-based peer discovery
 - I2P interface
 - Shared instance IPC (Unix socket between local programs)
-- Interface Access Codes (private network segments)
 
 ---
 

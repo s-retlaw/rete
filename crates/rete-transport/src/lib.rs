@@ -47,7 +47,7 @@ pub use request::{
     RequestError, PATH_HASH_LEN, REQUEST_ID_LEN,
 };
 pub use resource::{
-    hashmap_max_len, Resource, ResourceError, ResourceFlags, ResourceState,
+    hashmap_max_len, AdvertisementField, Resource, ResourceError, ResourceFlags, ResourceState,
     HASHMAP_MAX_LEN_DEFAULT,
 };
 pub use snapshot::{IdentityEntry, PathEntry, Snapshot, SnapshotDetail, SnapshotStore};

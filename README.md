@@ -82,23 +82,23 @@ against these vectors before any code ships.
 | Truncated hash length | 16 bytes |
 | Name hash length | 10 bytes |
 | Identity key | X25519 + Ed25519 (64 bytes each, combined) |
-| Encryption | ECDH → HKDF → AES-128-CBC |
+| Encryption | ECDH → HKDF → AES-256-CBC + HMAC-SHA256 |
 | Signing | Ed25519 |
 
 ## Implementation status
 
 | Crate | Status | Notes |
 |---|---|---|
-| `rete-core` packet | 🚧 In progress | Wire format parser + builder |
-| `rete-core` identity | 🚧 In progress | Keypairs, ECDH, signing |
-| `rete-transport` | 📋 Planned | Path tables, announce handling |
-| `rete-stack` | 📋 Planned | Async trait definitions |
-| `rete-embassy` | 📋 Planned | Embassy task layer |
-| `rete-tokio` | 📋 Planned | Tokio task layer |
-| `rete-iface-kiss` | 📋 Planned | KISS TNC framing |
-| `rete-iface-tcp` | 📋 Planned | TCP transport |
-| Links / Channels | ❌ Out of scope | Phase 2 |
-| LXMF | ❌ Out of scope | Phase 3 |
+| `rete-core` | ✅ Complete | Wire format, crypto, identity |
+| `rete-transport` | ✅ Complete | Path tables, announce handling, resources, links, channels |
+| `rete-stack` | ✅ Complete | Async trait definitions, NodeCore |
+| `rete-embassy` | ✅ Complete | Embassy task layer |
+| `rete-tokio` | ✅ Complete | Tokio task layer |
+| `rete-iface-kiss` | ✅ Complete | KISS TNC framing |
+| `rete-iface-tcp` | ✅ Complete | TCP transport |
+| `rete-lxmf-core` | ✅ Complete | LXMF message codec (`no_std + alloc`) |
+| `rete-lxmf` | ✅ Complete | LXMF router, delivery, propagation (hosted) |
+| Links / Channels | ✅ Complete | Connection-oriented sessions, reliable streams |
 
 ## Getting started
 

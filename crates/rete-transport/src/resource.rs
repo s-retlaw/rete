@@ -16,7 +16,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use rand_core::{CryptoRng, RngCore};
-use rete_core::msgpack;
+use rete_core::msgpack::{self, MsgpackError};
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
@@ -185,17 +185,71 @@ impl ResourceFlags {
     }
 }
 
-/// Errors from resource assembly and verification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Required fields in a resource advertisement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertisementField {
+    /// "t" — transfer size in bytes.
+    TransferSize,
+    /// "n" — number of segments.
+    NumParts,
+    /// "h" — 32-byte resource hash.
+    ResourceHash,
+    /// "r" — 4-byte random hash.
+    RandomHash,
+    /// "m" — segment hash map.
+    Hashmap,
+}
+
+impl core::fmt::Display for AdvertisementField {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::TransferSize => "t",
+            Self::NumParts => "n",
+            Self::ResourceHash => "h",
+            Self::RandomHash => "r",
+            Self::Hashmap => "m",
+        })
+    }
+}
+
+/// Errors from resource parsing, assembly, and verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceError {
     /// Assembled data hash does not match the advertised resource_hash.
     HashMismatch,
+    /// Msgpack decoding failed.
+    Msgpack(MsgpackError),
+    /// Required field missing from advertisement.
+    MissingField(AdvertisementField),
+    /// Field has wrong byte length.
+    InvalidFieldLen(AdvertisementField),
+    /// Segment count implausible relative to transfer size.
+    ImplausibleSegmentCount,
+    /// Hashmap update payload too short.
+    PayloadTooShort,
+    /// Resource hash in hashmap update doesn't match.
+    UpdateHashMismatch,
+    /// Wrong array length in hashmap update.
+    InvalidUpdateFormat,
+}
+
+impl From<MsgpackError> for ResourceError {
+    fn from(e: MsgpackError) -> Self {
+        ResourceError::Msgpack(e)
+    }
 }
 
 impl core::fmt::Display for ResourceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::HashMismatch => write!(f, "resource hash mismatch"),
+            Self::Msgpack(e) => write!(f, "msgpack error: {e}"),
+            Self::MissingField(field) => write!(f, "missing field '{field}' in advertisement"),
+            Self::InvalidFieldLen(field) => write!(f, "invalid length for field '{field}'"),
+            Self::ImplausibleSegmentCount => write!(f, "implausible segment count in advertisement"),
+            Self::PayloadTooShort => write!(f, "hashmap update payload too short"),
+            Self::UpdateHashMismatch => write!(f, "resource hash mismatch in hashmap update"),
+            Self::InvalidUpdateFormat => write!(f, "invalid hashmap update format"),
         }
     }
 }
@@ -650,10 +704,10 @@ impl Resource {
     ///
     /// Parses a msgpack dictionary with keys:
     /// "t", "d", "n", "h", "r", "o", "i", "l", "q", "f", "m"
-    pub fn from_advertisement(adv_payload: &[u8], link_id: [u8; 16]) -> Result<Self, &'static str> {
+    pub fn from_advertisement(adv_payload: &[u8], link_id: [u8; 16]) -> Result<Self, ResourceError> {
         let mut pos = 0;
 
-        let map_len = msgpack::read_map_len(adv_payload, &mut pos).map_err(|e| e.as_str())?;
+        let map_len = msgpack::read_map_len(adv_payload, &mut pos)?;
 
         // Parse key-value pairs from the map
         let mut transfer_size: Option<usize> = None;
@@ -670,44 +724,44 @@ impl Resource {
 
         for _ in 0..map_len {
             // Read key (should be a 1-char string; accept bin for compat)
-            let key_bytes = msgpack::read_bin_or_str(adv_payload, &mut pos).map_err(|e| e.as_str())?;
+            let key_bytes = msgpack::read_bin_or_str(adv_payload, &mut pos)?;
             if key_bytes.len() != 1 {
                 // Skip unknown key
-                msgpack::skip_value(adv_payload, &mut pos).map_err(|e| e.as_str())?;
+                msgpack::skip_value(adv_payload, &mut pos)?;
                 continue;
             }
             let key = key_bytes[0];
 
             match key {
                 b't' => {
-                    transfer_size = Some(msgpack::read_uint(adv_payload, &mut pos).map_err(|e| e.as_str())? as usize);
+                    transfer_size = Some(msgpack::read_uint(adv_payload, &mut pos)? as usize);
                 }
                 b'd' => {
-                    _data_size = Some(msgpack::read_uint(adv_payload, &mut pos).map_err(|e| e.as_str())? as usize);
+                    _data_size = Some(msgpack::read_uint(adv_payload, &mut pos)? as usize);
                 }
                 b'n' => {
-                    num_parts = Some(msgpack::read_uint(adv_payload, &mut pos).map_err(|e| e.as_str())? as usize);
+                    num_parts = Some(msgpack::read_uint(adv_payload, &mut pos)? as usize);
                 }
                 b'h' => {
-                    let rh = msgpack::read_bin_or_str(adv_payload, &mut pos).map_err(|e| e.as_str())?;
+                    let rh = msgpack::read_bin_or_str(adv_payload, &mut pos)?;
                     if rh.len() != 32 {
-                        return Err("resource_hash must be 32 bytes");
+                        return Err(ResourceError::InvalidFieldLen(AdvertisementField::ResourceHash));
                     }
                     let mut arr = [0u8; 32];
                     arr.copy_from_slice(rh);
                     resource_hash_bytes = Some(arr);
                 }
                 b'r' => {
-                    let rh = msgpack::read_bin_or_str(adv_payload, &mut pos).map_err(|e| e.as_str())?;
+                    let rh = msgpack::read_bin_or_str(adv_payload, &mut pos)?;
                     if rh.len() != RANDOM_HASH_SIZE {
-                        return Err("random_hash must be 4 bytes");
+                        return Err(ResourceError::InvalidFieldLen(AdvertisementField::RandomHash));
                     }
                     let mut arr = [0u8; RANDOM_HASH_SIZE];
                     arr.copy_from_slice(rh);
                     random_hash_bytes = Some(arr);
                 }
                 b'o' => {
-                    match msgpack::read_bin_or_nil(adv_payload, &mut pos).map_err(|e| e.as_str())? {
+                    match msgpack::read_bin_or_nil(adv_payload, &mut pos)? {
                         Some(oh) if oh.len() == 32 => {
                             let mut arr = [0u8; 32];
                             arr.copy_from_slice(oh);
@@ -718,45 +772,45 @@ impl Resource {
                 }
                 b'i' => {
                     split_index =
-                        msgpack::read_uint_or_nil(adv_payload, &mut pos).map_err(|e| e.as_str())?.unwrap_or(1) as usize;
+                        msgpack::read_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(1) as usize;
                 }
                 b'l' => {
                     split_total =
-                        msgpack::read_uint_or_nil(adv_payload, &mut pos).map_err(|e| e.as_str())?.unwrap_or(1) as usize;
+                        msgpack::read_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(1) as usize;
                 }
                 b'q' => {
                     // request_id: can be nil, bin, or str
-                    match msgpack::read_bin_or_nil(adv_payload, &mut pos).map_err(|e| e.as_str())? {
+                    match msgpack::read_bin_or_nil(adv_payload, &mut pos)? {
                         Some(q) => _request_id = Some(q.to_vec()),
                         None => _request_id = None,
                     }
                 }
                 b'f' => {
-                    flags_byte = msgpack::read_uint(adv_payload, &mut pos).map_err(|e| e.as_str())? as u8;
+                    flags_byte = msgpack::read_uint(adv_payload, &mut pos)? as u8;
                 }
                 b'm' => {
-                    hashmap_raw = Some(msgpack::read_bin_or_str(adv_payload, &mut pos).map_err(|e| e.as_str())?);
+                    hashmap_raw = Some(msgpack::read_bin_or_str(adv_payload, &mut pos)?);
                 }
                 _ => {
                     // Unknown key, skip value
-                    msgpack::skip_value(adv_payload, &mut pos).map_err(|e| e.as_str())?;
+                    msgpack::skip_value(adv_payload, &mut pos)?;
                 }
             }
         }
 
         // Validate required fields
-        let total_size = transfer_size.ok_or("missing 't' (transfer_size) in advertisement")?;
-        let total_segments = num_parts.ok_or("missing 'n' (num_parts) in advertisement")?;
+        let total_size = transfer_size.ok_or(ResourceError::MissingField(AdvertisementField::TransferSize))?;
+        let total_segments = num_parts.ok_or(ResourceError::MissingField(AdvertisementField::NumParts))?;
         let resource_hash =
-            resource_hash_bytes.ok_or("missing 'h' (resource_hash) in advertisement")?;
-        let random_hash = random_hash_bytes.ok_or("missing 'r' (random_hash) in advertisement")?;
-        let hashmap_bytes = hashmap_raw.ok_or("missing 'm' (hashmap) in advertisement")?;
+            resource_hash_bytes.ok_or(ResourceError::MissingField(AdvertisementField::ResourceHash))?;
+        let random_hash = random_hash_bytes.ok_or(ResourceError::MissingField(AdvertisementField::RandomHash))?;
+        let hashmap_bytes = hashmap_raw.ok_or(ResourceError::MissingField(AdvertisementField::Hashmap))?;
 
         // Sanity-check total_segments against total_size to prevent OOM from
         // a malicious advertisement. Segments can't be smaller than 1 byte
         // and can't exceed MAX_EFFICIENT_SIZE / MAPHASH_LEN (~4M).
         if total_segments > total_size || total_segments > MAX_EFFICIENT_SIZE {
-            return Err("implausible segment count in advertisement");
+            return Err(ResourceError::ImplausibleSegmentCount);
         }
 
         let flags = ResourceFlags::from_byte(flags_byte);
@@ -961,26 +1015,26 @@ impl Resource {
     /// Process a hashmap update (more part hashes from the sender).
     ///
     /// Format: `resource_hash[32] || msgpack([segment_index, new_hashes_bytes])`
-    pub fn apply_hashmap_update(&mut self, hmu_payload: &[u8]) -> Result<(), &'static str> {
+    pub fn apply_hashmap_update(&mut self, hmu_payload: &[u8]) -> Result<(), ResourceError> {
         if hmu_payload.len() < 32 {
-            return Err("hashmap update too short");
+            return Err(ResourceError::PayloadTooShort);
         }
 
         // Verify full 32-byte resource_hash
         if hmu_payload[..32] != self.resource_hash[..] {
-            return Err("resource hash mismatch in hashmap update");
+            return Err(ResourceError::UpdateHashMismatch);
         }
 
         let msgpack_data = &hmu_payload[32..];
         let mut pos = 0;
 
-        let array_len = msgpack::read_array_len(msgpack_data, &mut pos).map_err(|e| e.as_str())?;
+        let array_len = msgpack::read_array_len(msgpack_data, &mut pos)?;
         if array_len != 2 {
-            return Err("expected 2-element msgpack array in hashmap update");
+            return Err(ResourceError::InvalidUpdateFormat);
         }
 
-        let segment_index = msgpack::read_uint(msgpack_data, &mut pos).map_err(|e| e.as_str())? as usize;
-        let new_hashes = msgpack::read_bin(msgpack_data, &mut pos).map_err(|e| e.as_str())?;
+        let segment_index = msgpack::read_uint(msgpack_data, &mut pos)? as usize;
+        let new_hashes = msgpack::read_bin(msgpack_data, &mut pos)?;
 
         // Place hashes at the correct segment-aligned position
         let placement_start = segment_index * self.hashmap_max_len;
@@ -1737,5 +1791,110 @@ mod tests {
         receiver.verify_hash(plaintext.to_vec()).unwrap();
         assert_eq!(receiver.state, ResourceState::Complete);
         assert_eq!(receiver.data, plaintext);
+    }
+
+    #[test]
+    fn test_from_advertisement_empty() {
+        let result = Resource::from_advertisement(&[], [0x11; 16]);
+        assert!(matches!(result, Err(ResourceError::Msgpack(_))));
+    }
+
+    #[test]
+    fn test_from_advertisement_missing_transfer_size() {
+        // Build a minimal advertisement missing the 't' key
+        let mut buf = Vec::new();
+        msgpack::write_map_header(&mut buf, 1);
+        msgpack::write_fixstr1(&mut buf, b'n');
+        msgpack::write_uint(&mut buf, 1);
+
+        assert!(matches!(
+            Resource::from_advertisement(&buf, [0x11; 16]),
+            Err(ResourceError::MissingField(AdvertisementField::TransferSize))
+        ));
+    }
+
+    #[test]
+    fn test_from_advertisement_bad_resource_hash_len() {
+        let mut buf = Vec::new();
+        msgpack::write_map_header(&mut buf, 1);
+        msgpack::write_fixstr1(&mut buf, b'h');
+        msgpack::write_bin(&mut buf, &[0xAA; 16]); // should be 32 bytes
+
+        assert!(matches!(
+            Resource::from_advertisement(&buf, [0x11; 16]),
+            Err(ResourceError::InvalidFieldLen(AdvertisementField::ResourceHash))
+        ));
+    }
+
+    #[test]
+    fn test_from_advertisement_bad_random_hash_len() {
+        let mut buf = Vec::new();
+        msgpack::write_map_header(&mut buf, 1);
+        msgpack::write_fixstr1(&mut buf, b'r');
+        msgpack::write_bin(&mut buf, &[0xBB; 16]); // should be 4 bytes
+
+        assert!(matches!(
+            Resource::from_advertisement(&buf, [0x11; 16]),
+            Err(ResourceError::InvalidFieldLen(AdvertisementField::RandomHash))
+        ));
+    }
+
+    #[test]
+    fn test_from_advertisement_implausible_segments() {
+        // Build advertisement with t=10, n=100 (segments > size)
+        let mut buf = Vec::new();
+        msgpack::write_map_header(&mut buf, 5);
+        msgpack::write_fixstr1(&mut buf, b't');
+        msgpack::write_uint(&mut buf, 10);
+        msgpack::write_fixstr1(&mut buf, b'n');
+        msgpack::write_uint(&mut buf, 100);
+        msgpack::write_fixstr1(&mut buf, b'h');
+        msgpack::write_bin(&mut buf, &[0xAA; 32]);
+        msgpack::write_fixstr1(&mut buf, b'r');
+        msgpack::write_bin(&mut buf, &[0xBB; RANDOM_HASH_SIZE]);
+        msgpack::write_fixstr1(&mut buf, b'm');
+        msgpack::write_bin(&mut buf, &[0xCC; 4]);
+
+        assert!(matches!(
+            Resource::from_advertisement(&buf, [0x11; 16]),
+            Err(ResourceError::ImplausibleSegmentCount)
+        ));
+    }
+
+    #[test]
+    fn test_apply_hashmap_update_too_short() {
+        let data = b"test hmu short";
+        let (_sender, mut receiver) = make_delivered_pair(data);
+
+        let result = receiver.apply_hashmap_update(&[0u8; 10]);
+        assert_eq!(result, Err(ResourceError::PayloadTooShort));
+    }
+
+    #[test]
+    fn test_apply_hashmap_update_wrong_hash() {
+        let data = b"test hmu wrong hash";
+        let (_sender, mut receiver) = make_delivered_pair(data);
+
+        let mut payload = vec![0xFF; 32]; // wrong resource hash
+        payload.extend_from_slice(&[0x92, 0x00, 0xC4, 0x00]); // msgpack [0, b""]
+        let result = receiver.apply_hashmap_update(&payload);
+        assert_eq!(result, Err(ResourceError::UpdateHashMismatch));
+    }
+
+    #[test]
+    fn test_apply_hashmap_update_bad_format() {
+        let data = b"test hmu bad format";
+        let (_sender, mut receiver) = make_delivered_pair(data);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&receiver.resource_hash);
+        // 3-element array instead of 2
+        msgpack::write_array_header(&mut payload, 3);
+        msgpack::write_uint(&mut payload, 0);
+        msgpack::write_bin(&mut payload, &[]);
+        msgpack::write_uint(&mut payload, 0);
+
+        let result = receiver.apply_hashmap_update(&payload);
+        assert_eq!(result, Err(ResourceError::InvalidUpdateFormat));
     }
 }

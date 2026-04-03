@@ -82,12 +82,14 @@ impl Destination {
         match dest_type {
             DestinationType::Single | DestinationType::Link => {
                 if identity.is_none() {
-                    return Err(rete_core::Error::MissingField("identity"));
+                    return Err(rete_core::Error::InvalidArgument(
+                        "Single/Link destinations require an identity",
+                    ));
                 }
             }
             DestinationType::Plain => {
                 if identity.is_some() {
-                    return Err(rete_core::Error::MissingField(
+                    return Err(rete_core::Error::InvalidArgument(
                         "Plain destinations must not have an identity",
                     ));
                 }
