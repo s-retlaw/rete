@@ -1,0 +1,24 @@
+[package]
+name = "rete-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hosted-node building blocks for rete Reticulum daemons (config, identity, event handling)"
+
+[dependencies]
+rete-core      = { workspace = true }
+rete-transport = { workspace = true, features = ["serde"] }
+rete-stack     = { workspace = true, features = ["serde"] }
+rete-tokio     = { workspace = true }
+rete-lxmf      = { workspace = true }
+serde          = { workspace = true, features = ["derive"] }
+serde_json     = { workspace = true }
+tokio          = { workspace = true }
+rand           = "0.8"
+rand_core      = { version = "0.6", features = ["std"] }
+hex            = "0.4"
+toml           = "0.8"
+libbz2-rs-sys  = { version = "0.2.2", default-features = false, features = ["rust-allocator"] }
+
+[dev-dependencies]
+tempfile = "3"

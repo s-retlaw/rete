@@ -18,7 +18,7 @@ Created: 2026-04-02
 | 9 | Callbacks too narrow (fn pointers) | P2 | ✅ DONE | NodeHooks trait + RequestCallback trait, Box<dyn> like RatchetStore |
 | 10 | Type system underused for hashes | P2 | ✅ DONE | DestHash, IdentityHash, LinkId, PathHash, RequestId newtypes |
 | 11 | Docs out of date | P2 | PARTIAL | AES-256, scope, ProveApp fixed. Portability matrix deferred. |
-| 12 | Linux example is a de facto daemon | P2 | TODO | 2000+ line main.rs mixing concerns |
+| 12 | Linux example is a de facto daemon | P2 | ✅ DONE | New `rete-daemon` crate; main.rs 2172→402 lines |
 
 ---
 
@@ -468,7 +468,7 @@ Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>
 ## 12. Linux Example Is a De Facto Daemon
 
 **Priority:** P2 — long-term, not urgent until external users
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-03)
 
 ### Problem
 
@@ -484,11 +484,30 @@ Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>
 2. **Keep `examples/linux`** as a thin example demonstrating the library API.
 3. **Move config loading, identity persistence, monitoring** into library code.
 
-### Done When
+### Solution
 
-- `examples/linux/src/main.rs` is under 500 lines
-- Extracted logic is reusable by other hosted applications
-- All interop tests still pass
+New `crates/rete-daemon` crate with 7 modules:
+
+1. **`config`** — TOML config structs, `load_config()`, `generate_default_config()`, `DaemonConfig` + `parse_cli_args()` (CLI+TOML merge).
+2. **`compression`** — `bz2_compress/decompress`, `log_packet`, `AppHooks` implementing `NodeHooks`.
+3. **`identity`** — `load_or_create_identity()` (returns `Result` instead of calling `process::exit`), `default_data_dir()`, `JsonFileStore` implementing `SnapshotStore`.
+4. **`command`** — `parse_command()` (~20 commands), hex helpers, `spawn_signal_handler/stdin_reader`.
+5. **`monitoring`** — HTTP `/health`/`/stats`/`/metrics` server, `format_prometheus()`.
+6. **`event`** — `on_event()`, `on_node_event()`, `handle_lxmf_command()`. All stdout markers preserved verbatim.
+7. **`file_store`** — `FileMessageStore` + `AnyMessageStore` moved from `examples/linux/src/file_store.rs`.
+
+### Key Files
+
+- `crates/rete-daemon/src/` — all 7 modules with 57 unit tests
+- `examples/linux/src/main.rs` — thin orchestration, 402 lines (was 2172)
+- `examples/linux/Cargo.toml` — adds `rete-daemon`, removes `toml` and `libbz2-rs-sys` (now transitive)
+
+### Verified
+
+- `main.rs`: 2172 → **402 lines** (81% reduction, well under 500-line target)
+- All workspace unit tests pass (57 new tests in rete-daemon)
+- All 53 E2E interop tests pass (10/10 test suites)
+- `load_or_create_identity` and `load_config` now return `Result` instead of calling `process::exit`
 
 ---
 
@@ -527,3 +546,7 @@ Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>
 | 2026-04-03 | ReverseMap/ReceiptMap/ChannelReceiptMap stay `[u8; 16]` | These are keyed by truncated packet hashes (first 16 bytes of SHA-256), not one of the 5 semantic types. Introducing a 6th `TruncatedPacketHash` type would add complexity for 3 maps with no mix-up risk. |
 | 2026-04-03 | `#[serde(transparent)]` on hash newtypes | Serializes identically to `[u8; 16]`, preserving backward compatibility with existing snapshot formats. |
 | 2026-04-03 | `Packet<'a>` stays zero-copy `&[u8]` | Wire-level parser must not allocate or copy. Conversion to newtypes happens at extraction sites (`let dh = DestHash::from(arr)`) where callers already copy into fixed arrays. |
+| 2026-04-03 | New `rete-daemon` crate over expanding `rete-tokio` | Hosted-node building blocks (config, identity, compression, events, monitoring, file store) belong in their own crate. `rete-tokio` stays focused on the Tokio async runtime harness. |
+| 2026-04-03 | `load_or_create_identity` and `load_config` return `Result` not `process::exit` | Library code must not call `process::exit`. Callers (main.rs) decide how to handle errors. Pattern: `Ok`/`Err` on the library side, `unwrap_or_else(|e| { eprintln!("{e}"); process::exit(1) })` in main. |
+| 2026-04-03 | `DaemonConfig` + `parse_cli_args()` for CLI/TOML merge | Encapsulating the ~20-flag CLI parsing in one library function reduces main.rs by ~120 lines and makes the config layering testable in isolation. |
+| 2026-04-03 | Stdout markers in `event.rs` preserved verbatim | E2E tests parse exact `ANNOUNCE:`, `LINK_ESTABLISHED:`, etc. formats. No abstraction layer added — moved code verbatim. The test contract is verified by running the E2E suite, not by unit tests. |
