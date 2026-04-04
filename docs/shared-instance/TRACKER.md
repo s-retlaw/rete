@@ -55,7 +55,7 @@ No task is complete with prose-only confirmation.
 |---|---|---|---|---|---|---|
 | `EPIC-00` | Freeze compatibility contract | `complete` | Architectural review complete | claude | Shared-mode scope, references, and trace plan are frozen. 12 golden traces captured and validated. | `test_fixture_index.py` GREEN (4/4), `test_reference_inventory.py` GREEN (8/8), `test_golden_traces.py` GREEN (12/12). Pickle opcodes + wire format documented in REFERENCE.md. |
 | `EPIC-01` | Real daemon surface | `complete` | `EPIC-00` | claude | Dedicated daemon surface exists and owns canonical hosted node lifecycle | `shared_daemon_boot.rs` GREEN (4/4): boot, Unix exclusivity, TCP exclusivity, clean shutdown. `rete-shared` binary builds. Config: `SharedInstanceConfig` with 6 frozen keys. |
-| `EPIC-02` | Unix shared-attach compatibility | `planned` | `EPIC-00`, `EPIC-01` | `TBD` | Stock Python shared attach works over Unix | `TBD` |
+| `EPIC-02` | Unix shared-attach compatibility | `complete` | `EPIC-00`, `EPIC-01` | claude | Stock Python shared attach works over Unix | `shared_daemon_attach.rs` GREEN (3/3): relay, disconnect, packet ingest. Python E2E: `attach_single_client.py` (7/7), `attach_multi_client.py` (9/9), `reconnect.py` (8/8). Workspace tests pass. E2E interop (53/53) no regressions. |
 | `EPIC-03` | TCP shared-attach compatibility | `planned` | `EPIC-00`, `EPIC-01` | `TBD` | Stock Python shared attach works over TCP | `TBD` |
 | `EPIC-04` | Shared control plane / RPC compatibility | `planned` | `EPIC-02`, `EPIC-03` | `TBD` | In-scope control/status interactions match contract | `TBD` |
 | `EPIC-05` | Canonical shared state and client session semantics | `planned` | `EPIC-04` | `TBD` | Shared daemon semantics are canonical, not relay-only | `TBD` |
@@ -71,6 +71,7 @@ No task is complete with prose-only confirmation.
 | `EPIC-00a-01` | `EPIC-00` | `done` | claude | `test_fixture_index.py`, `test_reference_inventory.py` | Contract docs frozen, probe scripts written, 4/12 traces captured |
 | `EPIC-00b-01` | `EPIC-00` | `done` | claude | `test_golden_traces.py` | Remaining 8 traces captured, pickle opcodes documented, wire format documented |
 | `EPIC-01-01` | `EPIC-01` | `done` | claude | `shared_daemon_boot.rs` (4 tests) | `SharedInstanceConfig` + `SharedDaemon` + `rete-shared` binary. All 4 integration tests green. Full workspace tests pass. E2E interop (53/53) no regressions. |
+| `EPIC-02-01` | `EPIC-02` | `done` | claude | `shared_daemon_attach.rs` (3 tests), `attach_single_client.py`, `attach_multi_client.py`, `reconnect.py` | Rust: 3/3 integration tests (relay, disconnect, packet ingest). Python E2E: single attach 7/7, multi-client 9/9, reconnect 8/8. Zero compat issues — HDLC framing works unchanged. Workspace tests pass. E2E interop (53/53) no regressions. |
 
 ## Blocker Log
 
@@ -91,12 +92,14 @@ No task is complete with prose-only confirmation.
 | `2026-04-04` | Auth handshake is 3 messages (one-way) in observed traces | CHALLENGE, DIGEST, WELCOME. Mutual auth (6 messages) may occur in other flows |
 | `2026-04-04` | `Transport.has_path()` returns False in shared-mode clients | Shared-mode clients defer transport to daemon; path resolution is daemon-side only |
 | `2026-04-04` | rnsd writes logs to file, not stderr | Daemon stderr is empty; control.log from probes only has content when probe writes its own output |
+| `2026-04-04` | Unix data-plane framing is fully compatible without changes | Stock Python RNS 1.1.4 clients attach to rete-shared in 7ms. HDLC framing, client relay, disconnect cleanup, and reconnect all work identically. No DIFFS.md entries needed for EPIC-02. |
+| `2026-04-04` | DaemonFuture must be actively polled for server accept/relay to work | Tests using `tokio::select!` to drive daemon future concurrently with test logic. Boot tests only needed `connect()` (kernel-buffered), but relay/ingest tests require the accept loop. |
 
 ## Next-Up Queue
 
 1. ~~`EPIC-00` contract freeze and golden trace capture.~~ COMPLETE
 2. ~~`EPIC-01` daemon surface extraction from example-only hosted logic.~~ COMPLETE
-3. `EPIC-02` Unix shared attach with stock Python shared-mode E2E.
+3. ~~`EPIC-02` Unix shared attach with stock Python shared-mode E2E.~~ COMPLETE
 4. `EPIC-03` TCP shared attach with stock Python shared-mode E2E.
 5. Seed row ownership and status fields in [PARITY_TEST_MATRIX.md](PARITY_TEST_MATRIX.md) before implementation starts.
 

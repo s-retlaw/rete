@@ -1,6 +1,6 @@
 # EPIC-02: Unix Shared-Attach Compatibility
 
-Status: `planned`
+Status: `complete`
 Depends on: `EPIC-00`, `EPIC-01`
 Roadmap: [../ROADMAP.md](../ROADMAP.md)
 Tracker: [../TRACKER.md](../TRACKER.md)

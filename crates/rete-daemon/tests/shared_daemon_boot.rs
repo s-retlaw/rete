@@ -1,43 +1,13 @@
 //! Integration tests for SharedDaemon boot, exclusivity, and shutdown.
 
-use rete_daemon::config::{SharedInstanceConfig, SharedInstanceType};
+mod common;
+
+use common::{big_stack_test, make_tcp_config, make_unix_config};
 use rete_daemon::daemon::{DaemonError, SharedDaemonBuilder};
 
 use rete_tokio::local::LocalClient;
 
 use tokio::time::{timeout, Duration};
-
-/// Run an async test on a thread with 16 MB stack.
-///
-/// In debug builds, `Box::new(T::new())` may materialise the struct on the
-/// stack before moving it to the heap, so we need a generous stack.
-fn big_stack_test(f: fn()) {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(f)
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-fn make_unix_config(name: &str) -> SharedInstanceConfig {
-    SharedInstanceConfig {
-        share_instance: true,
-        instance_name: name.to_string(),
-        shared_instance_type: SharedInstanceType::Unix,
-        ..Default::default()
-    }
-}
-
-fn make_tcp_config(port: u16) -> SharedInstanceConfig {
-    SharedInstanceConfig {
-        share_instance: true,
-        instance_name: "default".to_string(),
-        shared_instance_type: SharedInstanceType::Tcp,
-        shared_instance_port: port,
-        ..Default::default()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Test 1: daemon starts from shared config and accepts a client
