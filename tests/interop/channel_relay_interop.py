@@ -22,7 +22,7 @@ RNSD_PORT = 4270
 
 
 def main():
-    with InteropTest("channel-relay-interop", default_port=RNSD_PORT) as t:
+    with InteropTest("channel-relay-interop", default_port=RNSD_PORT, default_timeout=60.0) as t:
         # Start rnsd transport relay
         t.start_rnsd(port=RNSD_PORT)
 

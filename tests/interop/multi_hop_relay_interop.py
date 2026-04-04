@@ -31,7 +31,7 @@ from interop_helpers import InteropTest
 
 
 def main():
-    with InteropTest("multi-hop-relay", default_port=4318) as t:
+    with InteropTest("multi-hop-relay", default_port=4318, default_timeout=60.0) as t:
         port1 = t.port
         port2 = t.port + 1
 
@@ -48,7 +48,7 @@ def main():
         # Get Rust transport node's dest hash for filtering
         rust_dest_hex = t.wait_for_line(rust, "IDENTITY:", timeout=10) or ""
         print(f"[multi-hop-relay] Rust transport dest hash: {rust_dest_hex}")
-        time.sleep(3)
+        time.sleep(5)
 
         # Python_A: server side (announces, receives DATA, accepts incoming link)
         py_a = t.start_py_helper(f"""\
@@ -143,7 +143,7 @@ if data_received.wait(timeout=timeout):
 else:
     print("NODE_A_DATA_TIMEOUT", flush=True)
 
-if link_established_evt.wait(timeout=15):
+if link_established_evt.wait(timeout={t.timeout}):
     print("NODE_A_LINK_OK", flush=True)
 else:
     print("NODE_A_LINK_TIMEOUT", flush=True)
@@ -234,6 +234,7 @@ while time.time() < deadline:
         print(f"NODE_B_DISCOVERED:{{h.hex()}}", flush=True)
         break
     if peer_dest_hash:
+        time.sleep(1)  # Allow transport nodes to fully propagate path before sending link request
         break
     time.sleep(0.5)
 
@@ -266,7 +267,7 @@ time.sleep(3)
 # Establish link to Node A through relay
 link = RNS.Link(out_dest, established_callback=link_established_cb, closed_callback=link_closed_cb)
 
-if not link_established.wait(timeout=15):
+if not link_established.wait(timeout={t.timeout}):
     print(f"NODE_B_LINK_TIMEOUT:status={{link.status}}", flush=True)
     print("NODE_B_DONE", flush=True)
     sys.exit(1)

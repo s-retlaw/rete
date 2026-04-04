@@ -384,6 +384,8 @@ test-all:
         local output rc
         output=$(cd tests/interop && uv run python "$script" 2>&1)
         rc=$?
+        # Brief pause so OS can reclaim TCP sockets and FDs before the next test.
+        sleep 2
         echo "$output"
         local p t f s
         p=$(echo "$output" | grep -oP '\d+(?=/\d+ passed)' | tail -1 || echo "0")

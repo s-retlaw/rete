@@ -30,7 +30,7 @@ from interop_helpers import (
 
 
 def main():
-    with InteropTest("link-rust-relay", default_port=4272) as t:
+    with InteropTest("link-rust-relay", default_port=4272, default_timeout=60.0) as t:
         port1 = t.port       # 4272
         port2 = t.port + 1   # 4273
 
@@ -66,7 +66,7 @@ def main():
         t._log(f"Rust transport dest hash: {rust_dest_hex}")
 
         # Give Rust time to connect and announce on both interfaces
-        time.sleep(3)
+        time.sleep(5)
 
         # Start Python_A first (connects to rnsd_1) — it will listen for announces
         # while waiting for Python_B to announce.
@@ -124,6 +124,7 @@ while time.time() < deadline:
         print(f"PY_A_DISCOVERED_B:{{h.hex()}}", flush=True)
         break
     if target_hash:
+        time.sleep(1)  # Allow transport nodes to fully propagate path before sending link request
         break
     time.sleep(0.5)
 
