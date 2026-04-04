@@ -577,7 +577,11 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         let req_id = rete_transport::request_id(packed);
         let (pkt, resource_hash) = self
             .transport
-            .start_resource_flagged(link_id, packed, packed, false, true, false, rng)
+            .prepare_and_advertise_segment(
+                link_id, packed, packed,
+                rete_transport::ResourceOptions { is_request: true, ..Default::default() },
+                rng,
+            )
             .ok_or(SendError::ResourceLimit)?;
         let mut rh = [0u8; TRUNCATED_HASH_LEN];
         rh.copy_from_slice(&resource_hash[..TRUNCATED_HASH_LEN]);
@@ -674,7 +678,15 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
         let packed = rete_transport::build_response(request_id, data);
         let (pkt, _resource_hash) = self
             .transport
-            .start_resource_flagged(link_id, &packed, &packed, false, false, true, rng)
+            .prepare_and_advertise_segment(
+                link_id, &packed, &packed,
+                rete_transport::ResourceOptions {
+                    is_response: true,
+                    request_id: Some(*request_id),
+                    ..Default::default()
+                },
+                rng,
+            )
             .ok_or(SendError::ResourceLimit)?;
         Ok(OutboundPacket::broadcast(pkt))
     }
@@ -3124,6 +3136,77 @@ mod tests {
             resp_outcome.events.iter().any(|e| matches!(e, NodeEvent::ResourceOffered { .. })),
             "responder should receive ResourceOffered for large request, got {:?}",
             resp_outcome.events
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7: Concurrent requests with large responses (request_id correlation)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_large_responses_correlated_by_request_id() {
+        let (mut init, mut resp, link_id) = two_core_handshake();
+        let mut rng = rand::thread_rng();
+
+        // Register handler returning large data (> LINK_MDU) — response
+        // will be promoted to a resource transfer.
+        let dh = *resp.dest_hash();
+        resp.register_request_handler(
+            &dh,
+            RequestHandler {
+                path: "/big".into(),
+                handler: handler_fn(|_ctx, _data| Some(vec![0xAB; 1000])),
+                policy: RequestPolicy::AllowAll,
+                compression_policy: ResponseCompressionPolicy::Never,
+            },
+        );
+
+        // Send 2 concurrent requests on the same link
+        let (req1, id1) = init
+            .send_request(&link_id, "/big", b"first", 200, &mut rng)
+            .unwrap();
+        let (req2, id2) = init
+            .send_request(&link_id, "/big", b"second", 201, &mut rng)
+            .unwrap();
+        assert_eq!(init.pending_requests.len(), 2);
+        assert_ne!(id1, id2);
+
+        // Responder handles both requests — each produces a resource advertisement
+        let resp_out1 = resp.handle_ingest(&req1.data, 202, 0, &mut rng);
+        let resp_out2 = resp.handle_ingest(&req2.data, 203, 0, &mut rng);
+        assert!(!resp_out1.packets.is_empty(), "resp1 should produce packets");
+        assert!(!resp_out2.packets.is_empty(), "resp2 should produce packets");
+
+        // Feed response-resource advertisements back to initiator.
+        // With request_id correlation via "q" field, each should associate
+        // with the correct PendingRequest regardless of order.
+        let init_out1 = init.handle_ingest(&resp_out1.packets[0].data, 204, 0, &mut rng);
+        assert!(
+            init_out1.events.iter().any(|e| matches!(e, NodeEvent::ResourceOffered { .. })),
+            "first response should be ResourceOffered"
+        );
+
+        let init_out2 = init.handle_ingest(&resp_out2.packets[0].data, 205, 0, &mut rng);
+        assert!(
+            init_out2.events.iter().any(|e| matches!(e, NodeEvent::ResourceOffered { .. })),
+            "second response should be ResourceOffered"
+        );
+
+        // Both pending requests should now have response_resource_hash set
+        let pr1 = init.pending_requests.iter().find(|r| r.request_id == id1).unwrap();
+        let pr2 = init.pending_requests.iter().find(|r| r.request_id == id2).unwrap();
+        assert!(
+            pr1.response_resource_hash.is_some(),
+            "request 1 should have response resource associated"
+        );
+        assert!(
+            pr2.response_resource_hash.is_some(),
+            "request 2 should have response resource associated"
+        );
+        // The two response resources should be different
+        assert_ne!(
+            pr1.response_resource_hash, pr2.response_resource_hash,
+            "each request should be associated with a distinct response resource"
         );
     }
 }

@@ -5,6 +5,7 @@ mod link;
 mod path;
 mod receipt;
 mod resource;
+pub use resource::ResourceOptions;
 
 /// Relay debug logging — only available when the `relay-debug` feature is enabled.
 macro_rules! relay_log {
@@ -280,6 +281,8 @@ pub enum IngestResult<'a> {
         is_request_or_response: bool,
         /// True if this resource carries a response payload.
         is_response: bool,
+        /// Request ID from the `"q"` advertisement field (for response-resource correlation).
+        request_id: Option<rete_core::RequestId>,
     },
     /// Resource transfer progress.
     ResourceProgress {
@@ -460,13 +463,12 @@ pub struct Transport<S: TransportStorage> {
     pub(super) stats: TransportStats,
 }
 
-/// Queued data for a pending split resource segment.
 /// Metadata for a split resource segment advertisement.
-pub(super) struct SplitMeta {
-    pub(super) split_index: usize,
-    pub(super) split_total: usize,
-    pub(super) original_hash: [u8; 32],
-    pub(super) full_original_size: usize,
+pub(crate) struct SplitMeta {
+    pub(crate) split_index: usize,
+    pub(crate) split_total: usize,
+    pub(crate) original_hash: [u8; 32],
+    pub(crate) full_original_size: usize,
 }
 
 pub(super) struct SplitSendEntry {

@@ -17,7 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use rand_core::{CryptoRng, RngCore};
 use rete_core::msgpack::{self, MsgpackError};
-use rete_core::LinkId;
+use rete_core::{LinkId, RequestId};
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
@@ -331,6 +331,12 @@ pub struct Resource {
     /// Python: `math.floor((Link.MDU - OVERHEAD) / MAPHASH_LEN)`.
     /// For radio (MDU=431) = 74; for TCP (MDU≈8111) ≈ 1994.
     hashmap_max_len: usize,
+
+    /// Optional request ID for request/response resources.
+    /// Populated from the `"q"` field in advertisements. Used to correlate
+    /// response-resources with their originating requests when multiple
+    /// requests are concurrent on the same link.
+    pub request_id: Option<RequestId>,
 }
 
 impl Resource {
@@ -423,6 +429,7 @@ impl Resource {
             hashmap_cursor: 0,
             outstanding_parts: 0,
             hashmap_max_len: hml,
+            request_id: None,
         }
     }
 
@@ -488,9 +495,12 @@ impl Resource {
         msgpack::write_fixstr1(&mut buf, b'l');
         msgpack::write_uint(&mut buf, self.split_total as u64);
 
-        // "q" = request_id (None for normal resources)
+        // "q" = request_id (populated for response-resources, None otherwise)
         msgpack::write_fixstr1(&mut buf, b'q');
-        msgpack::write_nil(&mut buf);
+        match self.request_id {
+            Some(ref id) => msgpack::write_bin(&mut buf, id.as_ref()),
+            None => msgpack::write_nil(&mut buf),
+        }
 
         // "f" = flags byte
         msgpack::write_fixstr1(&mut buf, b'f');
@@ -719,7 +729,7 @@ impl Resource {
         let mut original_hash_parsed: Option<[u8; 32]> = None;
         let mut split_index: usize = 1;
         let mut split_total: usize = 1;
-        let mut _request_id: Option<Vec<u8>> = None;
+        let mut request_id_parsed: Option<RequestId> = None;
         let mut flags_byte: u8 = 0;
         let mut hashmap_raw: Option<&[u8]> = None;
 
@@ -780,10 +790,12 @@ impl Resource {
                         msgpack::read_uint_or_nil(adv_payload, &mut pos)?.unwrap_or(1) as usize;
                 }
                 b'q' => {
-                    // request_id: can be nil, bin, or str
+                    // request_id: can be nil or bin (16 bytes = RequestId)
                     match msgpack::read_bin_or_nil(adv_payload, &mut pos)? {
-                        Some(q) => _request_id = Some(q.to_vec()),
-                        None => _request_id = None,
+                        Some(q) if q.len() == 16 => {
+                            request_id_parsed = Some(RequestId::from_slice(q));
+                        }
+                        _ => request_id_parsed = None,
                     }
                 }
                 b'f' => {
@@ -858,6 +870,7 @@ impl Resource {
             hashmap_cursor: initial_hashes,
             outstanding_parts: 0,
             hashmap_max_len: initial_hashes,
+            request_id: request_id_parsed,
         })
     }
 

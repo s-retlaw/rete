@@ -11,7 +11,7 @@ Created: 2026-04-02
 | 2 | Resource auto-accept, no policy | P0 | ✅ DONE | ResourceStrategy enum, AcceptNone/AcceptAll/AcceptApp, RESOURCE_RCL |
 | 3 | Storage arch (heapless for hosted) | P1 | ✅ DONE | TransportStorage trait; HeaplessStorage + StdStorage backends |
 | 4 | Destination/NodeCore modeling | P1 | ✅ DONE | `destination_hashes()` canonical; `decrypt_with_identity()` on Destination |
-| 5 | Request/Resource lifecycle parity | P1 | ✅ DONE | PendingRequest tracking, timeout, large req/resp as resource |
+| 5 | Request/Resource lifecycle parity | P1 | ✅ DONE | PendingRequest tracking, timeout, large req/resp as resource, `"q"` field request-id correlation |
 | 6 | LxmfRouter narrower than upstream | P1 | ✅ DONE | Outbound queue, retry, receipts, stamps, tickets |
 | 7 | Portable LXMF boundary half-finished | P1 | ✅ DONE | Documented: rete-lxmf-core (no_std) vs rete-lxmf (hosted). AES-256 + scope fixed (item 11 overlap). |
 | 8 | Error handling (stringly-typed) | P2 | ✅ DONE | ResourceError expanded (8 variants), LxmfMessageError (5 variants), as_str() bridge removed |
@@ -136,6 +136,7 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 2. **Deleted `compute_dest_hashes()`** from `node_core/mod.rs`. All callers (`Destination::new()`, `register_destination()`, `register_destination_typed()`) use `destination_hashes()` directly.
 3. **Added `Destination::decrypt_with_identity()`** — accepts external `&Identity` + ratchet keys. Centralizes decrypt dispatch on Destination without requiring identity ownership (Identity has `ZeroizeOnDrop`, not `Clone`).
 4. **Simplified `ingest.rs`** — 30-line match block replaced with single `decrypt_with_identity()` call.
+5. **Inbound destinations hold `identity: None` by design.** The node's identity lives on `NodeCore` and is passed to `decrypt_with_identity()` at call sites, avoiding `Clone` on `Identity` (which has `ZeroizeOnDrop`) and keeping a single ownership point.
 
 ### Key Files
 
@@ -158,13 +159,13 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 
 ### Solution
 
-1. **`IngestOutcome` refactored** from `event: Option<NodeEvent>` to `events: Vec<NodeEvent>` — enables emitting multiple events per ingest/tick (e.g., `Tick` + `RequestTimedOut`).
+1. **`IngestOutcome` refactored** from `event: Option<NodeEvent>` to `events: Vec<NodeEvent>` — enables emitting multiple events per ingest/tick (e.g., `Tick` + `RequestFailed { reason: Timeout }`).
 
-2. **`PendingRequest` tracking** — `send_request()` now registers a `PendingRequest` with RTT-based timeout. `get_request_status()` accessor added. States: `Sent`, `Receiving`, `Ready`, `Failed`.
+2. **`PendingRequest` tracking** — `send_request()` now registers a `PendingRequest` with RTT-based timeout. `get_request_status()` accessor added. States: `Sent`, `Receiving` (terminal states remove from pending list).
 
-3. **New `NodeEvent` variants**: `RequestTimedOut`, `RequestFailed { reason: RequestFailReason }`, `RequestProgress`. `RequestFailReason` enum: `Timeout`, `LinkClosed`, `ResourceFailed`.
+3. **New `NodeEvent` variants**: `RequestFailed { reason: RequestFailReason }`, `RequestProgress`. `RequestFailReason` enum: `Timeout`, `LinkClosed`, `ResourceFailed`.
 
-4. **Timeout in `handle_tick()`** — pending requests checked each tick; timed-out requests emit `RequestTimedOut` and are removed.
+4. **Timeout in `handle_tick()`** — pending requests checked each tick; timed-out requests emit `RequestFailed { reason: Timeout }` and are removed.
 
 5. **Link-close cleanup** — pending requests on a closed link emit `RequestFailed { reason: LinkClosed }`.
 
@@ -183,8 +184,8 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 - `crates/rete-stack/src/node_core/request_receipt.rs` — `RequestStatus`, `PendingRequest`, timeout computation
 - `crates/rete-stack/src/node_core/mod.rs` — `IngestOutcome` multi-event, `pending_requests` field, `send_request()` size check, `start_response_resource()`, `get_link_mdu()`, `get_request_status()`
 - `crates/rete-stack/src/node_core/ingest.rs` — `dispatch_request_handler()`, timeout in `handle_tick()`, response/request resource detection, progress event mapping
-- `crates/rete-stack/src/lib.rs` — `RequestTimedOut`, `RequestFailed`, `RequestProgress` events, `RequestFailReason` enum
-- `crates/rete-transport/src/transport/resource.rs` — `start_resource_flagged()`, `set_last_resource_flags()`
+- `crates/rete-stack/src/lib.rs` — `RequestFailed`, `RequestProgress` events, `RequestFailReason` enum
+- `crates/rete-transport/src/transport/resource.rs` — `prepare_and_advertise_segment()`, `ResourceOptions`
 - `crates/rete-tokio/src/lib.rs` — multi-event consumer migration
 - `crates/rete-embassy/src/lib.rs` — multi-event consumer migration
 
@@ -327,7 +328,7 @@ Also: `MsgpackError::as_str()` exists as backward compat, `Destination::new()` u
 
 5. **`destination.rs` wrong error variant fixed**: `MissingField("identity")` → `InvalidArgument("Single/Link destinations require an identity")`.
 
-6. **`expect()` on router registration deferred**: the `expect("lxmf.delivery fits in 128 bytes")` is a known-safe constant invariant, not a real risk.
+6. **`expect()` on router registration deferred**: `expect("lxmf.delivery fits in 128 bytes")` in `router/mod.rs` and `expect("lxmf.propagation fits in 128 bytes")` in `router/propagation.rs` are known-safe constant invariants, not real risks.
 
 7. **12 new error-variant tests** added: 8 in `resource.rs`, 4 in `message.rs`.
 
@@ -514,12 +515,12 @@ New `crates/rete-daemon` crate with 7 modules:
 | 2026-04-02 | `hosted` feature flag on rete-transport/rete-stack | Gates `StdStorage` and `HostedNodeCore` behind opt-in feature. Embedded crates never pull in hashbrown. |
 | 2026-04-02 | `decrypt_with_identity()` over type split | Identity has `ZeroizeOnDrop` (not `Clone`). Instead of splitting Destination into LocalDestination/DestinationAddress, added method accepting external `&Identity` + ratchet keys. |
 | 2026-04-02 | `destination_hash()` as thin wrapper | ~30 call sites only need dest_hash. Kept as convenience delegating to `destination_hashes().0` rather than updating all callers. |
-| 2026-04-02 | `IngestOutcome.events: Vec<NodeEvent>` over `Option<NodeEvent>` | Timeout checking in tick needs to emit both `Tick` and `RequestTimedOut`. Multi-event model is the correct long-term design. |
+| 2026-04-02 | `IngestOutcome.events: Vec<NodeEvent>` over `Option<NodeEvent>` | Timeout checking in tick needs to emit both `Tick` and `RequestFailed { reason: Timeout }`. Multi-event model is the correct long-term design. |
 | 2026-04-02 | `PendingRequest` in `Vec` not `HashMap` | Low cardinality (bounded by active links/concurrent requests). Linear scan fine for <32 entries. Consistent with existing `resources` Vec pattern. |
 | 2026-04-02 | RTT-based request timeout with 30s default | Matches Python: `traffic_timeout_ms / 1000 + grace`. Falls back to 30s when RTT unknown (0.0). Minimum 15s + 10s grace. |
-| 2026-04-02 | `start_resource_flagged()` for request/response resources | Flags must be set before `build_advertisement()` serializes them. Added `prepare_and_advertise_segment_ex()` with `is_request`/`is_response` parameters. |
+| 2026-04-02 | `ResourceOptions` struct for resource creation | Replaced boolean parameter sprawl with `ResourceOptions` struct. `prepare_and_advertise_segment()` is the single public entry point for flagged resources. |
 | 2026-04-02 | `dispatch_request_handler()` extraction | Reused for both single-packet and resource-based requests. Avoids duplicating handler dispatch + compression + MDU check logic. |
-| 2026-04-02 | Response-resource to request matching is FIFO on link | With concurrent requests on one link, `RequestProgress` events could associate with the wrong request. Completion is always correct (response payload contains `request_id`). Fix available: populate the `"q"` field in resource advertisements — wire format already defines it, we just write `nil`. Deferred because concurrent requests per link are rare in practice. |
+| 2026-04-02 | Response-resource to request matching uses `"q"` field | Resource advertisements now carry the `request_id` in the `"q"` field for response-resources (matching Python RNS). Receiver matches by request_id when present, falls back to FIFO when `"q"` is nil (plain resources or legacy peers). |
 | 2026-04-02 | Separate `outbound.rs` and `tickets.rs` from router core | Outbound queue + tickets are orthogonal concerns with their own state machines. Keeps `mod.rs` focused on registration/announce/config. |
 | 2026-04-02 | `handle_outbound` auto-includes reply ticket | Every outbound message includes a `FIELD_TICKET` so the recipient can reply without PoW. Matches Python `include_ticket=True` default. |
 | 2026-04-02 | Signature verification uses re-encoded 4-element payload | Python LXMF signs over 4-element msgpack (without stamp), then appends stamp as 5th element. On unpack, must re-encode 4-element for verification. Critical for stamped message interop. |

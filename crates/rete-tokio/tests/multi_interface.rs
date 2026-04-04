@@ -6,8 +6,8 @@
 //! - Local data not forwarded
 //! - Proof routed to correct interface
 //!
-//! Note: TokioNode uses HostedTransport (~600KB). Tests run on a thread with
-//! 4MB stack to avoid overflow.
+//! Note: In debug builds `Box::new(T::new())` may materialise the struct on
+//! the stack before moving to heap, so tests run on a thread with enlarged stack.
 
 use rete_core::{
     DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU,
@@ -52,7 +52,7 @@ fn build_header2_data(
     buf[..n].to_vec()
 }
 
-/// Box-allocate a TokioNode to avoid stack overflow (HostedTransport is ~600KB).
+/// Box-allocate a TokioNode to avoid debug-build stack overflow.
 fn make_node(seed: &[u8]) -> Box<TokioNode> {
     let identity = Identity::from_seed(seed).unwrap();
     Box::new(TokioNode::new(identity, "rete", &["example", "v1"]).unwrap())
@@ -98,8 +98,7 @@ async fn run_multi_with_inbound(
 
 /// Run an async test on a thread with 16MB stack.
 ///
-/// HostedNodeCore contains large heapless collections (~700 KB inline).
-/// In debug builds `Box::new(T::new())` materialises the struct on the
+/// In debug builds `Box::new(T::new())` may materialise the struct on the
 /// stack before moving it to the heap, so we need a generous stack.
 fn big_stack_test(f: fn()) {
     std::thread::Builder::new()

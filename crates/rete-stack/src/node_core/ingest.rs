@@ -341,17 +341,31 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
                 total_size,
                 is_request_or_response,
                 is_response,
+                request_id,
             } => {
                 let mut packets = Vec::new();
 
-                // Associate response-resource with pending request
+                // Associate response-resource with pending request.
+                // Match by request_id from "q" field when available (Python always
+                // populates it for response-resources), fall back to FIFO for
+                // interop with peers that send nil.
                 if is_response {
-                    if let Some(req) = self
-                        .pending_requests
-                        .iter_mut()
-                        .find(|r| r.link_id == link_id && r.response_resource_hash.is_none()
-                            && matches!(r.status, super::request_receipt::RequestStatus::Sent))
-                    {
+                    let matched = if let Some(rid) = request_id {
+                        self.pending_requests.iter_mut().find(|r| {
+                            r.link_id == link_id && r.request_id == rid
+                        })
+                    } else {
+                        // FIFO fallback: first Sent request without a resource yet
+                        self.pending_requests.iter_mut().find(|r| {
+                            r.link_id == link_id
+                                && r.response_resource_hash.is_none()
+                                && matches!(
+                                    r.status,
+                                    super::request_receipt::RequestStatus::Sent
+                                )
+                        })
+                    };
+                    if let Some(req) = matched {
                         req.response_resource_hash = Some(resource_hash);
                     }
                 }

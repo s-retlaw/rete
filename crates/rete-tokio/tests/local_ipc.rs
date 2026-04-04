@@ -12,10 +12,8 @@ use tokio::time::{timeout, Duration};
 
 /// Run an async test on a thread with 16MB stack.
 ///
-/// HostedNodeCore (via TokioNode) contains heapless collections that are
-/// allocated inline, totalling ~700 KB. In debug builds `Box::new(T::new())`
-/// materialises the full struct on the stack before moving it to the heap,
-/// so we need a generous stack.
+/// In debug builds `Box::new(T::new())` may materialise the struct on the
+/// stack before moving it to the heap, so we need a generous stack.
 fn big_stack_test(f: fn()) {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
