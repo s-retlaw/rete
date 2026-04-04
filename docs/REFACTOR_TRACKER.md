@@ -157,6 +157,16 @@ Extracted a `TransportStorage` trait with pluggable `StorageMap`, `StorageDeque`
 **Priority:** P1
 **Status:** ✅ DONE (2026-04-02)
 
+The review recommended two layers: (1) typed low-level state in NodeCore/Transport, and
+(2) an optional higher-level client-facing API (RequestReceipt, ResourceTransferState,
+per-request callbacks). Layer 1 is implemented. Layer 2 was evaluated and determined to be
+ergonomic sugar rather than a functional gap — the event-driven model already provides full
+functional parity with Python: timeout, failure, progress, response delivery, resource
+auto-promotion, and acceptance strategy are all covered through `NodeEvent` variants and
+`PendingRequest` tracking. A convenience wrapper (RequestReceipt handle, per-request
+callbacks, ResourceTransferState enum) can be added later if hosted application demand
+materializes.
+
 ### Solution
 
 1. **`IngestOutcome` refactored** from `event: Option<NodeEvent>` to `events: Vec<NodeEvent>` — enables emitting multiple events per ingest/tick (e.g., `Tick` + `RequestFailed { reason: Timeout }`).
