@@ -3,8 +3,8 @@
 A `no_std`, runtime-agnostic implementation of the
 [Reticulum Network Stack (RNS)](https://github.com/markqvist/Reticulum) in Rust.
 
-> ⚠️ **Early development.** Wire format is being validated against the Python
-> reference implementation. Not yet suitable for production use.
+> ⚠️ **Pre-release.** Wire format and interop testing are stable against the Python
+> reference. API surface may change before 1.0.
 
 ## What is Reticulum?
 
@@ -54,12 +54,17 @@ rete/
 │   ├── rete-stack/         async traits     — runtime-agnostic interface
 │   ├── rete-embassy/       Embassy integration
 │   ├── rete-tokio/         Tokio integration
-│   ├── rete-iface-kiss/    KISS TNC serial interface
-│   ├── rete-iface-serial/  Raw serial interface
-│   └── rete-iface-tcp/     TCP interface
+│   ├── rete-daemon/        Hosted daemon building blocks (config, identity, monitoring)
+│   ├── rete-lxmf-core/    LXMF message codec (no_std + alloc)
+│   ├── rete-lxmf/         LXMF router, delivery, propagation (hosted)
+│   ├── rete-iface-auto/   AutoInterface — IPv6 multicast peer discovery
+│   ├── rete-iface-kiss/   KISS TNC serial interface
+│   ├── rete-iface-serial/ Raw serial interface
+│   └── rete-iface-tcp/    TCP interface
 └── examples/
     ├── linux/              Hosted — embassy-std or tokio executor
     ├── esp32s3/            ESP32-S3 bare metal
+    ├── esp32c6/            ESP32-C6 bare metal
     └── rp2040/             Raspberry Pi Pico 2W bare metal
 ```
 
@@ -95,10 +100,29 @@ against these vectors before any code ships.
 | `rete-embassy` | ✅ Complete | Embassy task layer |
 | `rete-tokio` | ✅ Complete | Tokio task layer |
 | `rete-iface-kiss` | ✅ Complete | KISS TNC framing |
+| `rete-iface-serial` | ✅ Complete | Raw serial + HDLC framing |
 | `rete-iface-tcp` | ✅ Complete | TCP transport |
+| `rete-iface-auto` | ✅ Complete | IPv6 multicast peer discovery |
 | `rete-lxmf-core` | ✅ Complete | LXMF message codec (`no_std + alloc`) |
 | `rete-lxmf` | ✅ Complete | LXMF router, delivery, propagation (hosted) |
+| `rete-daemon` | ✅ Complete | Hosted daemon config, identity, monitoring |
 | Links / Channels | ✅ Complete | Connection-oriented sessions, reliable streams |
+
+## Portability
+
+| Crate | `x86_64` | `wasm32` | `thumbv6m` (MCU) |
+|---|---|---|---|
+| `rete-core` | ✅ | ✅ | ✅ |
+| `rete-transport` | ✅ | ✅ | ✅ |
+| `rete-stack` | ✅ | ✅ | ✅ |
+| `rete-embassy` | ✅ | — | ✅ |
+| `rete-tokio` | ✅ | — | — |
+| `rete-daemon` | ✅ | — | — |
+| `rete-lxmf-core` | ✅ | ✅ | ✅ |
+| `rete-lxmf` | ✅ | ✅\* | — |
+| `rete-iface-*` | ✅ | — | varies |
+
+\*`rete-lxmf` compiles for `wasm32` with `--no-default-features` only.
 
 ## Getting started
 

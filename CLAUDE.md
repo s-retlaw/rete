@@ -63,12 +63,17 @@ rete/
 │   ├── rete-stack/         async traits only, no executor dependency
 │   ├── rete-embassy/       Embassy executor integration
 │   ├── rete-tokio/         Tokio integration (hosted/gateway nodes)
-│   ├── rete-iface-kiss/    KISS TNC serial interface
-│   ├── rete-iface-serial/  Raw serial interface
-│   └── rete-iface-tcp/     TCP interface
+│   ├── rete-daemon/        Hosted daemon building blocks (config, identity, monitoring)
+│   ├── rete-lxmf-core/    LXMF message codec (no_std + alloc)
+│   ├── rete-lxmf/         LXMF router, delivery, propagation (hosted)
+│   ├── rete-iface-auto/   AutoInterface — IPv6 multicast peer discovery
+│   ├── rete-iface-kiss/   KISS TNC serial interface
+│   ├── rete-iface-serial/ Raw serial interface
+│   └── rete-iface-tcp/    TCP interface
 └── examples/
     ├── linux/              Hosted — Tokio or embassy-std
     ├── esp32s3/            ESP32-S3 bare metal
+    ├── esp32c6/            ESP32-C6 bare metal
     └── rp2040/             Raspberry Pi Pico 2W bare metal
 ```
 
@@ -271,9 +276,7 @@ Start here — do not skip ahead:
 
 The following are not yet implemented:
 
-- AutoInterface — mDNS-based peer discovery
 - I2P interface
-- Shared instance IPC (Unix socket between local programs)
 
 ---
 

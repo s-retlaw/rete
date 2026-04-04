@@ -17,7 +17,7 @@ Created: 2026-04-02
 | 8 | Error handling (stringly-typed) | P2 | ✅ DONE | ResourceError expanded (8 variants), LxmfMessageError (5 variants), as_str() bridge removed |
 | 9 | Callbacks too narrow (fn pointers) | P2 | ✅ DONE | NodeHooks trait + RequestCallback trait, Box<dyn> like RatchetStore |
 | 10 | Type system underused for hashes | P2 | ✅ DONE | DestHash, IdentityHash, LinkId, PathHash, RequestId newtypes |
-| 11 | Docs out of date | P2 | PARTIAL | AES-256, scope, ProveApp fixed. Portability matrix deferred. |
+| 11 | Docs out of date | P2 | ✅ DONE | AES-256, scope, ProveApp, portability matrix, crate tree, AutoInterface/IPC |
 | 12 | Linux example is a de facto daemon | P2 | ✅ DONE | New `rete-daemon` crate; main.rs 2172→402 lines |
 
 ---
@@ -435,33 +435,24 @@ Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>
 ## 11. Docs Out of Date
 
 **Priority:** P2
-**Status:** TODO
+**Status:** ✅ DONE (2026-04-04)
 
-### Problem
+### Solution
 
-- README says links, channels, LXMF are "out of scope" — they're implemented
-- README says AES-128-CBC — code uses AES-256
-- CLAUDE.md also says AES-128-CBC
-- `rete-stack` says `ProveApp` is "not yet handled" — it is handled in `ingest.rs:160-168`
+Completed in two passes:
 
-### Key Files
+**Pass 1 (2026-04-03, item 7 overlap):**
+- AES-128-CBC → AES-256-CBC in README.md and CLAUDE.md
+- Updated scope tables (Links, Channels, LXMF now marked as implemented)
+- Removed stale "not yet handled" comment from ProveApp in rete-stack
 
-- `README.md:77-101`
-- `CLAUDE.md:163-168`
-- `crates/rete-stack/src/lib.rs:96-107`
-
-### What to Do
-
-1. **Update README** to reflect actual implemented scope.
-2. **Fix AES-128 → AES-256** in README and CLAUDE.md.
-3. **Remove "not yet handled" comment** from ProveApp in rete-stack.
-4. **Add portability matrix** — which crates work on which targets.
-
-### Done When
-
-- README matches reality
-- No stale "not implemented" claims for implemented features
-- AES key size is correct everywhere
+**Pass 2 (2026-04-04):**
+- Added missing crates to tree diagrams in README.md and CLAUDE.md: `rete-daemon`, `rete-lxmf-core`, `rete-lxmf`, `rete-iface-auto`
+- Added missing example `esp32c6` to tree diagrams
+- Added `rete-iface-auto`, `rete-iface-serial`, `rete-daemon` to README status table
+- Added portability matrix (x86_64 / wasm32 / thumbv6m) to README
+- Updated "Early development" warning to "Pre-release" (reflects stable interop)
+- Removed AutoInterface and Shared instance IPC from "Not yet implemented" in CLAUDE.md (both implemented)
 
 ---
 
