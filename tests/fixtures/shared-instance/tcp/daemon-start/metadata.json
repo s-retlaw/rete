@@ -1,0 +1,12 @@
+{
+  "scenario": "daemon-start",
+  "mode": "tcp",
+  "rns_version": "1.1.4",
+  "data_port": 47428,
+  "control_port": 47429,
+  "data_port_bound": true,
+  "control_port_bound": true,
+  "readiness_seconds": 4.0,
+  "daemon_alive": true,
+  "capture_date": "2026-04-04 15:26:51"
+}

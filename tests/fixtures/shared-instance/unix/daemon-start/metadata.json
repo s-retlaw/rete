@@ -1,0 +1,13 @@
+{
+  "scenario": "daemon-start",
+  "mode": "unix",
+  "rns_version": "1.1.4",
+  "instance_name": "default",
+  "data_socket": "\\0rns/default",
+  "rpc_socket": "\\0rns/default/rpc",
+  "data_socket_bound": true,
+  "rpc_socket_bound": true,
+  "readiness_seconds": 4.0,
+  "daemon_alive": true,
+  "capture_date": "2026-04-04 15:26:47"
+}

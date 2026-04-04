@@ -1,0 +1,15 @@
+{
+  "scenario": "control-status-query",
+  "mode": "tcp",
+  "rns_version": "1.1.4",
+  "auth_digest": "sha256",
+  "challenge_total_bytes": 63,
+  "challenge_message_bytes": 48,
+  "request_pickle_bytes": 39,
+  "request_pickle_protocol": 2,
+  "response_pickle_bytes": 446,
+  "response_type": "dict",
+  "mutual_auth": true,
+  "server_auth_ok": true,
+  "capture_date": "2026-04-04 15:16:54"
+}

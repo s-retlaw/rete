@@ -53,6 +53,22 @@ Deferred to later programs, if ever needed:
 - Windows named-pipe or platform-native local attach backend
 - New Rust-native control protocols separate from the shared-instance compatibility surface
 
+## Frozen Config Surface
+
+These shared-mode config keys are in scope. Semantics frozen from
+Python RNS 1.1.4 (`Reticulum.py`, `rnsd.py`, `using.html`):
+
+| Key | Type | Default | Semantics |
+|-----|------|---------|-----------|
+| `share_instance` | bool | `true` | Whether this node acts as or connects to a shared instance |
+| `instance_name` | string | `"default"` | Names the shared instance; maps to socket path `\0rns/{name}` (Unix) |
+| `shared_instance_type` | string | `"unix"` | Transport for shared attach: `"unix"` or `"tcp"` |
+| `shared_instance_port` | int | `37428` | Data socket port (TCP mode only) |
+| `instance_control_port` | int | `37429` | RPC/control socket port (TCP mode only) |
+| `rpc_key` | string | derived | HMAC auth key for RPC; if absent, derived from transport identity |
+
+Any config key not listed above is out of scope for this roadmap.
+
 ## Compatibility Boundary
 
 The compatibility boundary for this effort is:
