@@ -202,7 +202,9 @@ mod tests {
         let hooks = AppHooks { packet_log: false };
         let data = b"test data for hooks";
         let compressed = hooks.compress(data).expect("compress must succeed");
-        let decompressed = hooks.decompress(&compressed).expect("decompress must succeed");
+        let decompressed = hooks
+            .decompress(&compressed)
+            .expect("decompress must succeed");
         assert_eq!(decompressed, data);
     }
 

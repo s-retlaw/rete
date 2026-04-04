@@ -3,7 +3,9 @@
 //! Replaces Python `rnsd` as the system shared instance. Stock Python
 //! shared-mode clients attach unchanged over Unix sockets or TCP.
 
-use rete_daemon::config::{has_flag, load_config, value_of, SharedInstanceConfig, SharedInstanceType};
+use rete_daemon::config::{
+    has_flag, load_config, value_of, SharedInstanceConfig, SharedInstanceType,
+};
 use rete_daemon::daemon::SharedDaemonBuilder;
 use rete_daemon::identity::default_data_dir;
 
@@ -19,6 +21,8 @@ fn main() {
         eprintln!("  --data-dir <PATH>           Data directory (default: ~/.rete)");
         eprintln!("  --instance-name <NAME>      Instance name (default: \"default\")");
         eprintln!("  --shared-instance-type <T>  \"unix\" or \"tcp\" (default: unix)");
+        eprintln!("  --shared-instance-port <P>  TCP data port (default: 37428)");
+        eprintln!("  --instance-control-port <P> RPC control port (default: 37429)");
         eprintln!("  --transport                 Enable transport mode");
         eprintln!("  --help                      Show this help");
         std::process::exit(0);
@@ -53,6 +57,12 @@ fn main() {
                 std::process::exit(1);
             }
         };
+    }
+    if let Some(p) = value_of(&args, "--shared-instance-port") {
+        shared.shared_instance_port = p.parse().expect("invalid port number");
+    }
+    if let Some(p) = value_of(&args, "--instance-control-port") {
+        shared.instance_control_port = p.parse().expect("invalid control port number");
     }
 
     let transport = has_flag(&args, "--transport");

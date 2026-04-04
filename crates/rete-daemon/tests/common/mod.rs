@@ -25,7 +25,6 @@ pub fn make_unix_config(name: &str) -> SharedInstanceConfig {
     }
 }
 
-#[allow(dead_code)] // used by shared_daemon_boot but not shared_daemon_attach
 pub fn make_tcp_config(port: u16) -> SharedInstanceConfig {
     SharedInstanceConfig {
         share_instance: true,

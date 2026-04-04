@@ -56,8 +56,8 @@ No task is complete with prose-only confirmation.
 | `EPIC-00` | Freeze compatibility contract | `complete` | Architectural review complete | claude | Shared-mode scope, references, and trace plan are frozen. 12 golden traces captured and validated. | `test_fixture_index.py` GREEN (4/4), `test_reference_inventory.py` GREEN (8/8), `test_golden_traces.py` GREEN (12/12). Pickle opcodes + wire format documented in REFERENCE.md. |
 | `EPIC-01` | Real daemon surface | `complete` | `EPIC-00` | claude | Dedicated daemon surface exists and owns canonical hosted node lifecycle | `shared_daemon_boot.rs` GREEN (4/4): boot, Unix exclusivity, TCP exclusivity, clean shutdown. `rete-shared` binary builds. Config: `SharedInstanceConfig` with 6 frozen keys. |
 | `EPIC-02` | Unix shared-attach compatibility | `complete` | `EPIC-00`, `EPIC-01` | claude | Stock Python shared attach works over Unix | `shared_daemon_attach.rs` GREEN (3/3): relay, disconnect, packet ingest. Python E2E: `attach_single_client.py` (7/7), `attach_multi_client.py` (9/9), `reconnect.py` (8/8). Workspace tests pass. E2E interop (53/53) no regressions. |
-| `EPIC-03` | TCP shared-attach compatibility | `planned` | `EPIC-00`, `EPIC-01` | `TBD` | Stock Python shared attach works over TCP | `TBD` |
-| `EPIC-04` | Shared control plane / RPC compatibility | `planned` | `EPIC-02`, `EPIC-03` | `TBD` | In-scope control/status interactions match contract | `TBD` |
+| `EPIC-03` | TCP shared-attach compatibility | `complete` | `EPIC-00`, `EPIC-01` | claude | Stock Python shared attach works over TCP | `shared_daemon_attach_tcp.rs` GREEN (3/3): relay, disconnect, packet ingest. Python E2E: `attach_single_client.py` (7/7), `attach_multi_client.py` (9/9), `reconnect.py` (8/8). Workspace tests pass. E2E interop (53/53) no regressions. |
+| `EPIC-04` | Shared control plane / RPC compatibility | `complete` | `EPIC-02`, `EPIC-03` | claude | In-scope control/status interactions match contract | `shared_daemon_control.rs` GREEN (4/4): Unix/TCP auth+query, auth failure, multiple queries. Python E2E: `unix/control_status.py` (11/11), `tcp/control_status.py` (12/12). Pickle codec validates against golden traces. Workspace tests pass (771). E2E interop (53/53) no regressions. |
 | `EPIC-05` | Canonical shared state and client session semantics | `planned` | `EPIC-04` | `TBD` | Shared daemon semantics are canonical, not relay-only | `TBD` |
 | `EPIC-06` | Config / persistence / restart compatibility | `planned` | `EPIC-05` | `TBD` | Restart and reattach flows are stable and tested | `TBD` |
 | `EPIC-07` | Utility / operator parity | `planned` | `EPIC-06` | `TBD` | In-scope utility and operator workflows work | `TBD` |
@@ -72,6 +72,8 @@ No task is complete with prose-only confirmation.
 | `EPIC-00b-01` | `EPIC-00` | `done` | claude | `test_golden_traces.py` | Remaining 8 traces captured, pickle opcodes documented, wire format documented |
 | `EPIC-01-01` | `EPIC-01` | `done` | claude | `shared_daemon_boot.rs` (4 tests) | `SharedInstanceConfig` + `SharedDaemon` + `rete-shared` binary. All 4 integration tests green. Full workspace tests pass. E2E interop (53/53) no regressions. |
 | `EPIC-02-01` | `EPIC-02` | `done` | claude | `shared_daemon_attach.rs` (3 tests), `attach_single_client.py`, `attach_multi_client.py`, `reconnect.py` | Rust: 3/3 integration tests (relay, disconnect, packet ingest). Python E2E: single attach 7/7, multi-client 9/9, reconnect 8/8. Zero compat issues — HDLC framing works unchanged. Workspace tests pass. E2E interop (53/53) no regressions. |
+| `EPIC-03-01` | `EPIC-03` | `done` | claude | `shared_daemon_attach_tcp.rs` (3 tests), `tcp/attach_single_client.py`, `tcp/attach_multi_client.py`, `tcp/reconnect.py` | Rust: 3/3 integration tests (relay, disconnect, packet ingest over TCP). Python E2E: single attach 7/7, multi-client 9/9, reconnect 8/8. Required `shared_instance_type = tcp` in Python client config for TCP detection. Workspace tests pass. E2E interop (53/53) no regressions. |
+| `EPIC-04-01` | `EPIC-04` | `done` | claude | `pickle::tests` (7 tests), `control::tests` (6 tests), `shared_daemon_control.rs` (4 tests), `unix/control_status.py` (11/11), `tcp/control_status.py` (12/12) | Pickle codec (proto 2+4, 20 opcodes) validates against golden traces. HMAC-SHA256 auth handshake. Control listener (Unix+TCP). interface_stats + path_table + rate_table + link_count + blackholed_identities handlers. Auth failure correctly rejected. Workspace tests pass (771). E2E interop (53/53) no regressions. |
 
 ## Blocker Log
 
@@ -94,14 +96,21 @@ No task is complete with prose-only confirmation.
 | `2026-04-04` | rnsd writes logs to file, not stderr | Daemon stderr is empty; control.log from probes only has content when probe writes its own output |
 | `2026-04-04` | Unix data-plane framing is fully compatible without changes | Stock Python RNS 1.1.4 clients attach to rete-shared in 7ms. HDLC framing, client relay, disconnect cleanup, and reconnect all work identically. No DIFFS.md entries needed for EPIC-02. |
 | `2026-04-04` | DaemonFuture must be actively polled for server accept/relay to work | Tests using `tokio::select!` to drive daemon future concurrently with test logic. Boot tests only needed `connect()` (kernel-buffered), but relay/ingest tests require the accept loop. |
+| `2026-04-04` | TCP data-plane framing is fully compatible without changes | Stock Python RNS 1.1.4 clients attach to rete-shared TCP in <10ms. HDLC framing, client relay, disconnect cleanup, and reconnect all work identically to Unix. No DIFFS.md entries needed for EPIC-03. |
+| `2026-04-04` | Python RNS requires `shared_instance_type = tcp` in client config for TCP mode | On Linux, Python RNS defaults to AF_UNIX. The `shared_instance_type = tcp` config key forces TCP mode. Without it, clients start standalone instead of attaching to the TCP daemon. |
+| `2026-04-04` | S1-TCP-ATTACH-003 reassigned from EPIC-05 to EPIC-03 | TCP reconnect is structurally identical to Unix reconnect (ClientHub disconnect cleanup is transport-agnostic). No reason to defer to EPIC-05. |
+| `2026-04-04` | Control plane does not route through NodeCommand for read-only queries | interface_stats, path_table, etc. are built from static config data at daemon startup. No command channel needed. Write operations (drop, blackhole) can be added later via NodeCommand when dynamic state tracking is implemented. |
+| `2026-04-04` | Pickle codec is in rete-daemon, not a separate crate | Control-plane-only, never needed by no_std targets, tightly coupled to RPC response shapes. No benefit to a separate crate. |
+| `2026-04-04` | Python RNS uses "LocalServerInterface" type name for both Unix and TCP shared attach interfaces | Golden traces confirm identical type string regardless of transport. |
 
 ## Next-Up Queue
 
 1. ~~`EPIC-00` contract freeze and golden trace capture.~~ COMPLETE
 2. ~~`EPIC-01` daemon surface extraction from example-only hosted logic.~~ COMPLETE
 3. ~~`EPIC-02` Unix shared attach with stock Python shared-mode E2E.~~ COMPLETE
-4. `EPIC-03` TCP shared attach with stock Python shared-mode E2E.
-5. Seed row ownership and status fields in [PARITY_TEST_MATRIX.md](PARITY_TEST_MATRIX.md) before implementation starts.
+4. ~~`EPIC-03` TCP shared attach with stock Python shared-mode E2E.~~ COMPLETE
+5. ~~`EPIC-04` Shared control plane / RPC compatibility.~~ COMPLETE
+6. Seed row ownership and status fields in [PARITY_TEST_MATRIX.md](PARITY_TEST_MATRIX.md) before implementation starts.
 
 ## Task Template Reference
 

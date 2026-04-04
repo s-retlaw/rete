@@ -10,8 +10,10 @@
 pub mod command;
 pub mod compression;
 pub mod config;
+pub mod control;
 pub mod daemon;
 pub mod event;
 pub mod file_store;
 pub mod identity;
 pub mod monitoring;
+pub mod pickle;

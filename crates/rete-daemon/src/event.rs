@@ -5,8 +5,8 @@ use std::cell::RefCell;
 
 use rete_lxmf::{LXMessage, LxmfEvent, LxmfRouter};
 use rete_stack::{HostedNodeCore, NodeStats, OutboundPacket};
-use rete_transport::SnapshotStore as _;
 use rete_tokio::{NodeCommand, NodeEvent};
+use rete_transport::SnapshotStore as _;
 
 use crate::file_store::AnyMessageStore;
 use crate::identity::JsonFileStore;
@@ -58,9 +58,7 @@ pub fn on_event(
         }
 
         // Process outbound message queue
-        let (out_pkts, _out_events) = lxmf_router
-            .borrow_mut()
-            .process_outbound(core, rng, now);
+        let (out_pkts, _out_events) = lxmf_router.borrow_mut().process_outbound(core, rng, now);
         if !out_pkts.is_empty() {
             return out_pkts;
         }
@@ -311,10 +309,7 @@ pub fn on_event(
                         .borrow_mut()
                         .advance_outbound_on_link_established(link_id, core, rng);
                     if !pkts.is_empty() {
-                        eprintln!(
-                            "[rete] LXMF_OUTBOUND_SENDING link={}",
-                            hex::encode(link_id),
-                        );
+                        eprintln!("[rete] LXMF_OUTBOUND_SENDING link={}", hex::encode(link_id),);
                         on_node_event(event);
                         return pkts;
                     }
@@ -408,8 +403,7 @@ pub fn on_event(
 
                     // Try depositing as inbound sync resource
                     if lxmf_router.borrow().has_sync_job_for_link(link_id) {
-                        let deposited =
-                            lxmf_router.borrow_mut().deposit_sync_resource(data, now);
+                        let deposited = lxmf_router.borrow_mut().deposit_sync_resource(data, now);
                         if !deposited.is_empty() {
                             for (dest, hash) in &deposited {
                                 eprintln!(

@@ -141,7 +141,10 @@ impl FileMessageStore {
                 timestamp,
             };
 
-            self.by_dest.entry(DestHash::from(dest)).or_default().push(hash);
+            self.by_dest
+                .entry(DestHash::from(dest))
+                .or_default()
+                .push(hash);
             self.index.insert(hash, meta);
         }
 

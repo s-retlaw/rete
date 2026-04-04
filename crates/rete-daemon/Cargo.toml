@@ -17,6 +17,8 @@ tokio          = { workspace = true }
 rand           = "0.8"
 rand_core      = { version = "0.6", features = ["std"] }
 hex            = "0.4"
+sha2           = { workspace = true }
+hmac           = { workspace = true }
 toml           = "0.8"
 libbz2-rs-sys  = { version = "0.2.2", default-features = false, features = ["rust-allocator"] }
 

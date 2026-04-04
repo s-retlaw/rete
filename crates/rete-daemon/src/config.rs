@@ -164,9 +164,7 @@ pub struct DaemonConfig {
 pub fn parse_cli_args(args: &[String], cfg: &Config) -> DaemonConfig {
     let flag = |name: &str| args.iter().any(|a| a == name);
     let value = |name: &str| -> Option<String> {
-        args.windows(2)
-            .find(|w| w[0] == name)
-            .map(|w| w[1].clone())
+        args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
     };
     let values = |name: &str| -> Vec<String> {
         args.windows(2)
@@ -239,9 +237,7 @@ pub fn has_flag(args: &[String], name: &str) -> bool {
 
 /// Get the value following a named flag (e.g. `--data-dir /tmp`).
 pub fn value_of(args: &[String], name: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == name)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
 }
 
 /// Return the default config file template as a static string.
@@ -373,12 +369,7 @@ connect = ["127.0.0.1:4242", "10.0.0.1:4242"]"#
         )
         .unwrap();
         let cfg = load_config(f.path()).unwrap().unwrap();
-        let connects = cfg
-            .interfaces
-            .tcp_client
-            .unwrap()
-            .connect
-            .unwrap();
+        let connects = cfg.interfaces.tcp_client.unwrap().connect.unwrap();
         assert_eq!(connects.len(), 2);
         assert_eq!(connects[0], "127.0.0.1:4242");
     }

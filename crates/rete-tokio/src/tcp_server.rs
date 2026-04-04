@@ -82,6 +82,11 @@ impl TcpServer {
         self.hub.broadcaster()
     }
 
+    /// Return the local address the server is bound to.
+    pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
+
     /// Run the accept loop forever, spawning tasks for each connection.
     ///
     /// This should be spawned as a Tokio task.

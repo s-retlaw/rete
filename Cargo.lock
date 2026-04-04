@@ -944,6 +944,7 @@ name = "rete-daemon"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "hmac",
  "libbz2-rs-sys",
  "rand",
  "rand_core",
@@ -954,6 +955,7 @@ dependencies = [
  "rete-transport",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",

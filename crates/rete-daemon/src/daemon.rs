@@ -4,6 +4,7 @@
 //! [`SharedDaemon`] is a handle to the running daemon for shutdown control.
 
 use crate::config::{SharedInstanceConfig, SharedInstanceType};
+use crate::control::{self, ControlContext, InterfaceInfo};
 use crate::identity::{load_or_create_identity, JsonFileStore};
 
 use rete_stack::OutboundPacket;
@@ -12,6 +13,7 @@ use rete_tokio::{InterfaceSlot, NodeCommand, NodeEvent, TokioNode};
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -108,8 +110,10 @@ impl SharedDaemonBuilder {
 
         // Load or create identity.
         let identity_path = self.data_dir.join("identity");
-        let identity =
-            load_or_create_identity(&identity_path).map_err(DaemonError::Identity)?;
+        let identity = load_or_create_identity(&identity_path).map_err(DaemonError::Identity)?;
+
+        // Extract private key for authkey derivation before identity is moved.
+        let private_key = identity.private_key();
 
         // Create the node.
         let mut node = TokioNode::new_boxed(identity, "rete", &["shared"])
@@ -135,50 +139,76 @@ impl SharedDaemonBuilder {
 
         // Bind listener based on transport type.
         type ServerFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-        let (slot, server_future): (InterfaceSlot, ServerFuture) =
-            match self.config.shared_instance_type {
-                SharedInstanceType::Unix => {
-                    let server = rete_tokio::local::LocalServer::bind(
-                        &self.config.instance_name,
-                        inbound_tx,
-                        0,
-                    )
-                    .map_err(|e| {
-                        DaemonError::Bind(format!(
-                            "failed to bind shared instance '{}': {e} \
+        let (slot, server_future): (InterfaceSlot, ServerFuture) = match self
+            .config
+            .shared_instance_type
+        {
+            SharedInstanceType::Unix => {
+                let server =
+                    rete_tokio::local::LocalServer::bind(&self.config.instance_name, inbound_tx, 0)
+                        .map_err(|e| {
+                            DaemonError::Bind(format!(
+                                "failed to bind shared instance '{}': {e} \
                              (another daemon may be running with the same instance name)",
-                            self.config.instance_name
-                        ))
-                    })?;
-                    let broadcaster = server.broadcaster();
-                    (InterfaceSlot::Hub(broadcaster), Box::pin(server.run()))
-                }
-                SharedInstanceType::Tcp => {
-                    let addr = format!("127.0.0.1:{}", self.config.shared_instance_port);
-                    let server = rete_tokio::TcpServer::bind(
-                        &addr,
-                        inbound_tx,
-                        0,
-                        None, // No IFAC on shared-attach (local-trust)
-                        Default::default(),
-                    )
-                    .await
-                    .map_err(|e| {
-                        DaemonError::Bind(format!(
-                            "failed to bind shared instance on {addr}: {e} \
+                                self.config.instance_name
+                            ))
+                        })?;
+                let broadcaster = server.broadcaster();
+                (InterfaceSlot::Hub(broadcaster), Box::pin(server.run()))
+            }
+            SharedInstanceType::Tcp => {
+                let addr = format!("127.0.0.1:{}", self.config.shared_instance_port);
+                let server = rete_tokio::TcpServer::bind(
+                    &addr,
+                    inbound_tx,
+                    0,
+                    None, // No IFAC on shared-attach (local-trust)
+                    Default::default(),
+                )
+                .await
+                .map_err(|e| {
+                    DaemonError::Bind(format!(
+                        "failed to bind shared instance on {addr}: {e} \
                              (another daemon may be running on the same port)",
-                        ))
-                    })?;
-                    let broadcaster = server.broadcaster();
-                    (InterfaceSlot::Hub(broadcaster), Box::pin(server.run()))
-                }
-            };
+                    ))
+                })?;
+                let broadcaster = server.broadcaster();
+                (InterfaceSlot::Hub(broadcaster), Box::pin(server.run()))
+            }
+        };
 
-        // Control port is parsed but not bound yet (EPIC-04 scope).
-        eprintln!(
-            "[rete-shared] control port {} reserved (RPC not yet implemented)",
-            self.config.instance_control_port
-        );
+        // Compute authkey for RPC control plane.
+        let authkey = match self.config.rpc_key {
+            Some(ref rpc_key) if !rpc_key.is_empty() => hex::decode(rpc_key)
+                .map_err(|e| DaemonError::Config(format!("invalid rpc_key (must be hex): {e}")))?,
+            _ => control::derive_authkey(&private_key).to_vec(),
+        };
+
+        let iface_info = InterfaceInfo::from_config(&self.config);
+        let control_ctx = Arc::new(ControlContext::new(authkey, iface_info));
+
+        // Bind control listener.
+        type ControlFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+        let control_future: ControlFuture = match self.config.shared_instance_type {
+            SharedInstanceType::Unix => {
+                let name = self.config.instance_name.clone();
+                let ctx = control_ctx.clone();
+                Box::pin(async move {
+                    if let Err(e) = control::run_unix_control_listener(&name, ctx).await {
+                        eprintln!("[rete-shared] control listener error: {e}");
+                    }
+                })
+            }
+            SharedInstanceType::Tcp => {
+                let port = self.config.instance_control_port;
+                let ctx = control_ctx.clone();
+                Box::pin(async move {
+                    if let Err(e) = control::run_tcp_control_listener(port, ctx).await {
+                        eprintln!("[rete-shared] control listener error: {e}");
+                    }
+                })
+            }
+        };
 
         // Signal readiness.
         println!("{DAEMON_READY}");
@@ -197,6 +227,9 @@ impl SharedDaemonBuilder {
                     server_future.await;
                 });
 
+                // Spawn control listener.
+                let control_handle = tokio::spawn(control_future);
+
                 let slots = vec![slot];
 
                 // Run the node event loop.
@@ -211,14 +244,18 @@ impl SharedDaemonBuilder {
                 )
                 .await;
 
-                // Abort the server accept loop to release the listener socket.
+                // Abort the server and control accept loops.
                 server_handle.abort();
+                control_handle.abort();
                 let _ = server_handle.await;
+                let _ = control_handle.await;
 
                 // Save snapshot on shutdown.
                 {
                     use rete_transport::SnapshotStore;
-                    let snap = node.core.save_snapshot(rete_transport::SnapshotDetail::Standard);
+                    let snap = node
+                        .core
+                        .save_snapshot(rete_transport::SnapshotDetail::Standard);
                     if let Err(e) = snapshot_store.save(&snap) {
                         eprintln!("[rete-shared] failed to save snapshot: {e}");
                     }

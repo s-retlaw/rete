@@ -100,7 +100,11 @@ mod tests {
     use rete_transport::SnapshotStore;
 
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("rete_daemon_identity_test_{}_{}", std::process::id(), name))
+        std::env::temp_dir().join(format!(
+            "rete_daemon_identity_test_{}_{}",
+            std::process::id(),
+            name
+        ))
     }
 
     #[test]
@@ -146,7 +150,10 @@ mod tests {
             identities: Default::default(),
         };
         store.save(&snap).expect("must save snapshot");
-        let loaded = store.load().expect("must load snapshot").expect("must be Some");
+        let loaded = store
+            .load()
+            .expect("must load snapshot")
+            .expect("must be Some");
         assert_eq!(loaded.paths.len(), 0);
 
         let _ = std::fs::remove_file(&path);

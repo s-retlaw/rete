@@ -33,6 +33,8 @@ def start_rete_shared(
     instance_type="unix",
     transport=False,
     timeout_secs=10,
+    port=None,
+    control_port=None,
 ):
     """Start rete-shared and wait for DAEMON_READY.
 
@@ -49,6 +51,10 @@ def start_rete_shared(
         "--instance-name", instance_name,
         "--shared-instance-type", instance_type,
     ]
+    if port is not None:
+        cmd.extend(["--shared-instance-port", str(port)])
+    if control_port is not None:
+        cmd.extend(["--instance-control-port", str(control_port)])
     if transport:
         cmd.append("--transport")
 
@@ -120,6 +126,7 @@ def write_shared_client_config(config_dir, mode="unix", ports=None):
         content = (
             f"[reticulum]\n"
             f"  share_instance = Yes\n"
+            f"  shared_instance_type = tcp\n"
             f"  shared_instance_port = {data_port}\n"
             f"  instance_control_port = {ctrl_port}\n"
             f"  enable_transport = No\n"
@@ -251,15 +258,19 @@ class SharedModeTest:
         self.tmpdir = tempfile.mkdtemp(prefix=f"rete_shared_{name}_")
         self.daemon_proc = None
 
-    def start_daemon(self, instance_name="default", instance_type="unix", transport=False):
+    def start_daemon(self, instance_name="default", instance_type="unix",
+                     transport=False, port=None, control_port=None):
         data_dir = os.path.join(self.tmpdir, "daemon_data")
         os.makedirs(data_dir, exist_ok=True)
+        self.data_dir = data_dir
         self.daemon_proc = start_rete_shared(
             data_dir=data_dir,
             rust_binary=self.rust_binary,
             instance_name=instance_name,
             instance_type=instance_type,
             transport=transport,
+            port=port,
+            control_port=control_port,
         )
         self.check(
             self.daemon_proc.poll() is None,
@@ -267,10 +278,10 @@ class SharedModeTest:
         )
         return self.daemon_proc
 
-    def make_client_dir(self, name):
+    def make_client_dir(self, name, mode="unix", ports=None):
         d = os.path.join(self.tmpdir, name)
         os.makedirs(d, exist_ok=True)
-        write_shared_client_config(d, mode="unix")
+        write_shared_client_config(d, mode=mode, ports=ports)
         return d
 
     def check(self, condition, description):

@@ -321,7 +321,11 @@ mod tests {
     fn parse_request_command() {
         let cmd = parse_command(&format!("request {HEX16} /test/echo payload")).unwrap();
         match cmd {
-            NodeCommand::SendRequest { link_id, path, payload } => {
+            NodeCommand::SendRequest {
+                link_id,
+                path,
+                payload,
+            } => {
                 assert_eq!(link_id.as_bytes(), &[0x01u8; 16]);
                 assert_eq!(path, "/test/echo");
                 assert_eq!(payload, b"payload");
@@ -351,7 +355,9 @@ mod tests {
     fn parse_lxmf_command() {
         let cmd = parse_command(&format!("lxmf {HEX16} my message")).unwrap();
         match cmd {
-            NodeCommand::AppCommand { name, dest_hash, .. } => {
+            NodeCommand::AppCommand {
+                name, dest_hash, ..
+            } => {
                 assert_eq!(name, "lxmf-send");
                 assert!(dest_hash.is_some());
             }
@@ -363,7 +369,12 @@ mod tests {
     fn parse_lxmf_link_command() {
         let cmd = parse_command(&format!("lxmf-link {HEX16} {HEX16B} message")).unwrap();
         match cmd {
-            NodeCommand::AppCommand { name, link_id, dest_hash, .. } => {
+            NodeCommand::AppCommand {
+                name,
+                link_id,
+                dest_hash,
+                ..
+            } => {
                 assert_eq!(name, "lxmf-link-send");
                 assert!(link_id.is_some());
                 assert!(dest_hash.is_some());
