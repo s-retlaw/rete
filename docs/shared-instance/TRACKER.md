@@ -54,7 +54,7 @@ No task is complete with prose-only confirmation.
 | ID | Title | Status | Depends On | Owner | Exit Criteria | Evidence |
 |---|---|---|---|---|---|---|
 | `EPIC-00` | Freeze compatibility contract | `complete` | Architectural review complete | claude | Shared-mode scope, references, and trace plan are frozen. 12 golden traces captured and validated. | `test_fixture_index.py` GREEN (4/4), `test_reference_inventory.py` GREEN (8/8), `test_golden_traces.py` GREEN (12/12). Pickle opcodes + wire format documented in REFERENCE.md. |
-| `EPIC-01` | Real daemon surface | `planned` | `EPIC-00` | `TBD` | Dedicated daemon surface exists and owns canonical hosted node lifecycle | `TBD` |
+| `EPIC-01` | Real daemon surface | `complete` | `EPIC-00` | claude | Dedicated daemon surface exists and owns canonical hosted node lifecycle | `shared_daemon_boot.rs` GREEN (4/4): boot, Unix exclusivity, TCP exclusivity, clean shutdown. `rete-shared` binary builds. Config: `SharedInstanceConfig` with 6 frozen keys. |
 | `EPIC-02` | Unix shared-attach compatibility | `planned` | `EPIC-00`, `EPIC-01` | `TBD` | Stock Python shared attach works over Unix | `TBD` |
 | `EPIC-03` | TCP shared-attach compatibility | `planned` | `EPIC-00`, `EPIC-01` | `TBD` | Stock Python shared attach works over TCP | `TBD` |
 | `EPIC-04` | Shared control plane / RPC compatibility | `planned` | `EPIC-02`, `EPIC-03` | `TBD` | In-scope control/status interactions match contract | `TBD` |
@@ -70,6 +70,7 @@ No task is complete with prose-only confirmation.
 |---|---|---|---|---|---|
 | `EPIC-00a-01` | `EPIC-00` | `done` | claude | `test_fixture_index.py`, `test_reference_inventory.py` | Contract docs frozen, probe scripts written, 4/12 traces captured |
 | `EPIC-00b-01` | `EPIC-00` | `done` | claude | `test_golden_traces.py` | Remaining 8 traces captured, pickle opcodes documented, wire format documented |
+| `EPIC-01-01` | `EPIC-01` | `done` | claude | `shared_daemon_boot.rs` (4 tests) | `SharedInstanceConfig` + `SharedDaemon` + `rete-shared` binary. All 4 integration tests green. Full workspace tests pass. E2E interop (53/53) no regressions. |
 
 ## Blocker Log
 
@@ -93,8 +94,8 @@ No task is complete with prose-only confirmation.
 
 ## Next-Up Queue
 
-1. `EPIC-00` contract freeze and golden trace capture.
-2. `EPIC-01` daemon surface extraction from example-only hosted logic.
+1. ~~`EPIC-00` contract freeze and golden trace capture.~~ COMPLETE
+2. ~~`EPIC-01` daemon surface extraction from example-only hosted logic.~~ COMPLETE
 3. `EPIC-02` Unix shared attach with stock Python shared-mode E2E.
 4. `EPIC-03` TCP shared attach with stock Python shared-mode E2E.
 5. Seed row ownership and status fields in [PARITY_TEST_MATRIX.md](PARITY_TEST_MATRIX.md) before implementation starts.

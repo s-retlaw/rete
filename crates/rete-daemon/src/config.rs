@@ -11,6 +11,7 @@ pub struct Config {
     pub interfaces: InterfacesConfig,
     pub ifac: IfacConfig,
     pub logging: LoggingConfig,
+    pub shared_instance: SharedInstanceConfig,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -57,6 +58,49 @@ pub struct IfacConfig {
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct LoggingConfig {
     pub packet_log: Option<bool>,
+}
+
+/// Transport type for the shared instance listener.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SharedInstanceType {
+    #[default]
+    Unix,
+    Tcp,
+}
+
+/// Configuration for the `[shared_instance]` TOML section.
+///
+/// Frozen config keys from the shared-mode compatibility contract
+/// (`contracts/SCOPE.md`).
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct SharedInstanceConfig {
+    /// Whether this node acts as a shared instance daemon.
+    pub share_instance: bool,
+    /// Instance name — maps to socket path `\0rns/{name}` (Unix mode).
+    pub instance_name: String,
+    /// Transport for shared attach: Unix domain socket or TCP.
+    pub shared_instance_type: SharedInstanceType,
+    /// Data socket port (TCP mode only). Default: 37428.
+    pub shared_instance_port: u16,
+    /// RPC/control socket port (TCP mode only). Default: 37429.
+    pub instance_control_port: u16,
+    /// HMAC auth key for RPC. If absent, derived from transport identity.
+    pub rpc_key: Option<String>,
+}
+
+impl Default for SharedInstanceConfig {
+    fn default() -> Self {
+        SharedInstanceConfig {
+            share_instance: true,
+            instance_name: "default".to_string(),
+            shared_instance_type: SharedInstanceType::Unix,
+            shared_instance_port: 37428,
+            instance_control_port: 37429,
+            rpc_key: None,
+        }
+    }
 }
 
 /// Load a config file. Returns:
@@ -184,6 +228,22 @@ pub fn parse_cli_args(args: &[String], cfg: &Config) -> DaemonConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CLI helpers
+// ---------------------------------------------------------------------------
+
+/// Check if a flag (e.g. `--transport`) is present in args.
+pub fn has_flag(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| a == name)
+}
+
+/// Get the value following a named flag (e.g. `--data-dir /tmp`).
+pub fn value_of(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|w| w[0] == name)
+        .map(|w| w[1].clone())
+}
+
 /// Return the default config file template as a static string.
 pub fn generate_default_config() -> &'static str {
     r#"# rete node configuration
@@ -219,6 +279,15 @@ pub fn generate_default_config() -> &'static str {
 [logging]
 # Log every inbound/outbound packet header to stderr
 # packet_log = false
+
+[shared_instance]
+# Enable shared instance daemon mode
+# share_instance = true
+# instance_name = "default"
+# shared_instance_type = "unix"   # "unix" or "tcp"
+# shared_instance_port = 37428    # TCP data port
+# instance_control_port = 37429   # TCP control/RPC port
+# rpc_key = ""                    # HMAC auth key (derived from identity if absent)
 "#
 }
 
@@ -256,6 +325,42 @@ mod tests {
         writeln!(f, "not valid toml !!!{{{{").unwrap();
         let result = load_config(f.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn shared_instance_config_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.shared_instance.share_instance);
+        assert_eq!(cfg.shared_instance.instance_name, "default");
+        assert_eq!(
+            cfg.shared_instance.shared_instance_type,
+            SharedInstanceType::Unix
+        );
+        assert_eq!(cfg.shared_instance.shared_instance_port, 37428);
+        assert_eq!(cfg.shared_instance.instance_control_port, 37429);
+        assert!(cfg.shared_instance.rpc_key.is_none());
+    }
+
+    #[test]
+    fn shared_instance_config_tcp_roundtrip() {
+        let toml_str = r#"
+[shared_instance]
+share_instance = true
+instance_name = "mynode"
+shared_instance_type = "tcp"
+shared_instance_port = 40000
+instance_control_port = 40001
+rpc_key = "deadbeef"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.shared_instance.instance_name, "mynode");
+        assert_eq!(
+            cfg.shared_instance.shared_instance_type,
+            SharedInstanceType::Tcp
+        );
+        assert_eq!(cfg.shared_instance.shared_instance_port, 40000);
+        assert_eq!(cfg.shared_instance.instance_control_port, 40001);
+        assert_eq!(cfg.shared_instance.rpc_key.as_deref(), Some("deadbeef"));
     }
 
     #[test]
