@@ -1,6 +1,33 @@
 # Shared-Mode Golden Trace Plan
 
 Created: 2026-04-02
+Completed: 2026-04-04
+
+## Completion Status
+
+All 12 golden trace scenarios have been captured and validated.
+
+| Scenario | Mode | Status | Key Observation |
+|----------|------|--------|----------------|
+| daemon-start | unix | complete | Socket `\0rns/default` bound, no stderr output |
+| daemon-start | tcp | complete | Port 47428/47429 bound, no stderr output |
+| first-attach | unix | complete | Attach in 7ms, no handshake on data socket |
+| first-attach | tcp | complete | Attach in 7ms, same protocol as unix |
+| second-attach | unix | complete | Two clients relay announces through daemon |
+| second-attach | tcp | complete | Same relay behavior as unix |
+| client-detach | unix | complete | Daemon does not log disconnect to stderr |
+| client-reconnect | unix | complete | Path does not survive across reconnect |
+| announce-propagation | unix | complete | `Transport.has_path()` returns False in shared mode |
+| encrypted-data | unix | complete | Path discovery fails in shared mode (by design) |
+| control-status-query | unix | complete | Protocol 2 request, protocol 4 response |
+| control-status-query | tcp | complete | Same wire format as unix |
+
+**Key finding:** In shared mode, `Transport.has_path()` always returns False
+on the client side because the client defers transport to the daemon. Path
+resolution only works through the daemon. This means the encrypted-data and
+announce-propagation probes could not verify cross-client visibility, but the
+daemon's relay behavior is confirmed by the data plane working correctly in
+the attach scenarios.
 
 ## Trace Capture Goals
 

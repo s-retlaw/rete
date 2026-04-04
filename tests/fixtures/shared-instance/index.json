@@ -5,62 +5,62 @@
   "scenarios": {
     "unix/daemon-start": {
       "description": "Daemon startup on Unix socket, listener readiness",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "notes.md"]
     },
     "unix/first-attach": {
       "description": "First client attach over Unix socket",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "packets.log", "notes.md"]
     },
     "unix/second-attach": {
       "description": "Second client attach over Unix socket",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "packets.log", "notes.md"]
     },
     "unix/client-detach": {
       "description": "Client detach and state cleanup",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "notes.md"]
     },
     "unix/client-reconnect": {
       "description": "Client reconnect after disconnect",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "notes.md"]
     },
     "unix/announce-propagation": {
       "description": "Announce propagation through shared instance",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "packets.log", "notes.md"]
     },
     "unix/encrypted-data": {
       "description": "Encrypted data send/receive through shared instance",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "packets.log", "notes.md"]
     },
     "unix/control-status-query": {
       "description": "RPC control/status query via Unix socket",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "rpc_auth.bin", "rpc_request.bin", "rpc_response.bin", "notes.md"]
     },
     "tcp/daemon-start": {
       "description": "Daemon startup on TCP, listener readiness",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "notes.md"]
     },
     "tcp/first-attach": {
       "description": "First client attach over TCP",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "packets.log", "notes.md"]
     },
     "tcp/second-attach": {
       "description": "Second client attach over TCP",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "packets.log", "notes.md"]
     },
     "tcp/control-status-query": {
       "description": "RPC control/status query via TCP",
-      "status": "planned",
+      "status": "complete",
       "required_files": ["metadata.json", "control.log", "rpc_auth.bin", "rpc_request.bin", "rpc_response.bin", "notes.md"]
     }
   }

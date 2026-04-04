@@ -1,0 +1,10 @@
+{
+  "scenario": "announce-propagation",
+  "mode": "unix",
+  "rns_version": "1.1.4",
+  "announcer_dest_hash": "f7e127bceab497e3fedc8e5b85162e16",
+  "listener_dest_hash": "334f494f1714b901f4f8d3664483582b",
+  "listener_sees_announcer": false,
+  "poll_iterations": 15,
+  "capture_date": "2026-04-04 19:17:35"
+}

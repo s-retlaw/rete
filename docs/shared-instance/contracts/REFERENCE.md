@@ -201,3 +201,139 @@ Frozen from `Reticulum.py` `rpc_loop()`:
 **BLACKHOLE operations:**
 - `{"blackhole_identity": bytes, "until": float, "reason": str}`
 - `{"unblackhole_identity": bytes}`
+
+## Pickle Opcodes Observed in Golden Traces
+
+Captured 2026-04-04 from RNS 1.1.4. These are the exact opcodes the Rust
+pickle decoder must handle.
+
+### Request Pickle (Protocol 2)
+
+RPC requests use pickle protocol 2 (`\x80\x02` header).
+
+| Opcode | Byte | Description |
+|--------|------|-------------|
+| `PROTO` | `\x80` | Protocol version marker (arg: 2) |
+| `EMPTY_DICT` | `}` | Push empty dict |
+| `BINPUT` | `q` | Store top of stack in memo by 1-byte index |
+| `BINUNICODE` | `X` | Push unicode string (4-byte little-endian length + UTF-8) |
+| `SETITEM` | `s` | Pop value, pop key, add to dict on stack |
+| `STOP` | `.` | End of pickle stream |
+
+**Example:** `{"get": "interface_stats"}` encodes as 39 bytes:
+```
+80 02 7d 71 00 58 03000000 676574 71 01 58 0f000000 696e746572666163655f7374617473 71 02 73 2e
+```
+
+### Response Pickle (Protocol 4)
+
+RPC responses use pickle protocol 4 (`\x80\x04\x95` header with frame length).
+
+| Opcode | Byte | Description |
+|--------|------|-------------|
+| `PROTO` | `\x80` | Protocol version marker (arg: 4) |
+| `FRAME` | `\x95` | Frame length (8-byte little-endian) |
+| `EMPTY_DICT` | `}` | Push empty dict |
+| `MEMOIZE` | `\x94` | Store top of stack in next memo slot |
+| `MARK` | `(` | Push mark onto stack |
+| `SHORT_BINUNICODE` | `\x8c` | Push short unicode (1-byte length + UTF-8) |
+| `EMPTY_LIST` | `]` | Push empty list |
+| `BININT1` | `K` | Push 1-byte unsigned int |
+| `BININT` | `J` | Push 4-byte signed int (little-endian) |
+| `BINFLOAT` | `G` | Push 8-byte IEEE 754 float (big-endian) |
+| `NONE` | `N` | Push None |
+| `NEWTRUE` | `\x88` | Push True |
+| `SHORT_BINBYTES` | `C` | Push short bytes (1-byte length + raw) |
+| `SETITEMS` | `u` | Pop mark..top as key/value pairs into dict |
+| `APPEND` | `a` | Append top of stack to list below it |
+| `BINGET` | `h` | Push item from memo by 1-byte index |
+| `STOP` | `.` | End of pickle stream |
+
+### Minimum Rust Decoder Scope
+
+The Rust pickle decoder must handle these 19 unique opcodes:
+
+**Protocol 2 (requests):** `PROTO`, `EMPTY_DICT`, `BINPUT`, `BINUNICODE`, `SETITEM`, `STOP`
+
+**Protocol 4 (responses, adds):** `FRAME`, `MEMOIZE`, `MARK`, `SHORT_BINUNICODE`,
+`EMPTY_LIST`, `BININT1`, `BININT`, `BINFLOAT`, `NONE`, `NEWTRUE`, `SHORT_BINBYTES`,
+`SETITEMS`, `APPEND`, `BINGET`
+
+**Not yet observed but likely in other RPC responses:** `NEWFALSE` (`\x89`),
+`TUPLE` (`t`), `EMPTY_TUPLE` (`)`)
+
+## multiprocessing.connection Wire Format (from Golden Traces)
+
+Captured 2026-04-04 from RNS 1.1.4. Byte-level specification for the Rust
+implementation.
+
+### Message Framing
+
+Every message on the control socket uses:
+```
+[4-byte big-endian unsigned length] [payload bytes]
+```
+
+### Auth Handshake
+
+The server initiates authentication. Observed as a 3-message exchange
+(server authenticates client):
+
+**Message 1 — CHALLENGE (server -> client):**
+```
+Length: 59 bytes (0x0000003B)
+Payload: #CHALLENGE#{sha256}<40-random-bytes>
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+         11 bytes tag + 8 bytes algo + 40 bytes nonce
+```
+
+**Message 2 — DIGEST (client -> server):**
+```
+Length: 40 bytes (0x00000028)
+Payload: {sha256}<32-byte-HMAC-SHA256-digest>
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+         8 bytes algo prefix + 32 bytes digest
+```
+Digest = `HMAC-SHA256(authkey, challenge_payload)` where `challenge_payload`
+is the full payload from Message 1 (59 bytes).
+
+**Message 3 — WELCOME (server -> client):**
+```
+Length: 9 bytes (0x00000009)
+Payload: #WELCOME#
+```
+
+If auth fails, server sends `#FAILURE#` instead.
+
+**Note:** CPython's `multiprocessing.connection` supports mutual auth (client
+also challenges server), making it a 6-message exchange. The golden traces
+captured a 3-message exchange (one-way). The Rust implementation should handle
+both: always respond to incoming challenges, and optionally initiate a
+challenge as client.
+
+### Post-Auth RPC Messages
+
+After auth completes, the same 4-byte-length framing is used:
+
+**Request (client -> server):**
+```
+[4-byte length] [pickle protocol 2 payload]
+```
+
+**Response (server -> client):**
+```
+[4-byte length] [pickle protocol 4 payload]
+```
+
+### Observed Byte Sizes
+
+| Message | Unix | TCP |
+|---------|------|-----|
+| Auth CHALLENGE | 63 (4+59) | 63 (4+59) |
+| Auth DIGEST | 44 (4+40) | 44 (4+40) |
+| Auth WELCOME | 13 (4+9) | 13 (4+9) |
+| RPC request (`interface_stats`) | 43 (4+39) | 43 (4+39) |
+| RPC response (`interface_stats`) | 456 (4+452) | 450 (4+446) |
+
+Response size differs between Unix and TCP because the interface name differs
+(`Shared Instance[rns/default]` vs `Shared Instance[47428]`).

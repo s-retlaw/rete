@@ -1,0 +1,10 @@
+{
+  "scenario": "second-attach",
+  "mode": "unix",
+  "rns_version": "1.1.4",
+  "client1_dest": "8daf48a0dc3755e2ba7a95af78aa4601",
+  "client2_dest": "348230e03af5f4f43bd9bd644f110bde",
+  "c1_in_daemon_logs": false,
+  "c2_in_daemon_logs": false,
+  "capture_date": "2026-04-04 19:12:03"
+}

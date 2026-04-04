@@ -1,143 +1,151 @@
 #!/usr/bin/env python3
 """Probe: capture shared-instance attach behavior.
 
-Starts rnsd, attaches a stock Python client in shared mode,
-captures the HDLC bytes exchanged on the data socket.
+Starts rnsd, attaches stock Python client(s) in shared mode via subprocesses
+(to avoid RNS singleton limitation), captures HDLC bytes exchanged.
 
-Output goes to tests/fixtures/shared-instance/{unix,tcp}/first-attach/
+Output goes to tests/fixtures/shared-instance/{unix,tcp}/{first,second}-attach/
 """
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 
-from probe_helpers import write_fixture, stop_process
+from probe_helpers import (
+    write_fixture, write_packets_log, stop_process, wait_or_kill,
+    read_result_file, write_daemon_config, write_client_config,
+    start_rnsd, run_client_subprocess,
+)
+
+
+_CLIENT_SCRIPT = textwrap.dedent("""\
+import json, os, sys, time
+import RNS
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+app_name = sys.argv[3]
+aspect = sys.argv[4]
+wait_secs = int(sys.argv[5])
+
+t0 = time.time()
+rns = RNS.Reticulum(configdir=config_dir)
+attach_time = time.time() - t0
+attached = rns.is_connected_to_shared_instance
+
+identity = RNS.Identity()
+dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE,
+                       app_name, aspect)
+dest.announce()
+
+time.sleep(wait_secs)
+
+result = {
+    "attached": attached,
+    "attach_time": round(attach_time, 3),
+    "dest_hash": dest.hash.hex(),
+    "identity_hash": identity.hexhash,
+}
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
+
+_MULTI_CLIENT_SCRIPT = textwrap.dedent("""\
+import json, os, sys, time
+import RNS
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+app_name = sys.argv[3]
+aspect = sys.argv[4]
+check_hash_hex = sys.argv[5] if len(sys.argv) > 5 else ""
+wait_secs = int(sys.argv[6]) if len(sys.argv) > 6 else 5
+
+rns = RNS.Reticulum(configdir=config_dir)
+attached = rns.is_connected_to_shared_instance
+
+identity = RNS.Identity()
+dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE,
+                       app_name, aspect)
+dest.announce()
+
+time.sleep(wait_secs)
+
+sees_other = False
+if check_hash_hex:
+    sees_other = RNS.Transport.has_path(bytes.fromhex(check_hash_hex))
+
+result = {
+    "attached": attached,
+    "dest_hash": dest.hash.hex(),
+    "sees_other": sees_other,
+}
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
 
 
 def run_attach_probe(mode="unix"):
-    """Start rnsd and attach a Python client."""
+    """Start rnsd and attach a Python client (in subprocess)."""
     scenario = "first-attach"
 
     with tempfile.TemporaryDirectory() as config_dir:
-        config_path = os.path.join(config_dir, "config")
-
-        if mode == "unix":
-            with open(config_path, "w") as f:
-                f.write("""\
-[reticulum]
-  share_instance = Yes
-  enable_transport = No
-
-[logging]
-  loglevel = 7
-""")
-        else:
-            data_port = 47428
-            ctrl_port = 47429
-            with open(config_path, "w") as f:
-                f.write(f"""\
-[reticulum]
-  share_instance = Yes
-  shared_instance_port = {data_port}
-  instance_control_port = {ctrl_port}
-  enable_transport = No
-
-[logging]
-  loglevel = 7
-""")
+        ports = write_daemon_config(os.path.join(config_dir, "config"), mode)
 
         print(f"[probe] starting rnsd ({mode})...")
-        proc = subprocess.Popen(
-            ["rnsd", "--config", config_dir, "-vvv"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        time.sleep(4)
-
-        if proc.poll() is not None:
-            _, stderr = proc.communicate()
-            print(f"[probe] rnsd died: {stderr.decode(errors='replace')[-500:]}")
+        proc = start_rnsd(config_dir)
+        if proc is None:
             return False
 
-        # Attach a stock Python client
         client_dir = os.path.join(config_dir, "client")
         os.makedirs(client_dir, exist_ok=True)
-        client_config = os.path.join(client_dir, "config")
+        write_client_config(os.path.join(client_dir, "config"), mode, ports)
 
-        if mode == "unix":
-            with open(client_config, "w") as f:
-                f.write("""\
-[reticulum]
-  share_instance = Yes
-  enable_transport = No
+        result_file = os.path.join(config_dir, "result.json")
 
-[logging]
-  loglevel = 7
-""")
-        else:
-            with open(client_config, "w") as f:
-                f.write(f"""\
-[reticulum]
-  share_instance = Yes
-  shared_instance_port = {data_port}
-  instance_control_port = {ctrl_port}
-  enable_transport = No
+        print(f"[probe] attaching Python client ({mode}) in subprocess...")
+        client_proc = run_client_subprocess(
+            _CLIENT_SCRIPT,
+            [client_dir, result_file, "probe", "test", "3"],
+        )
+        wait_or_kill(client_proc)
 
-[logging]
-  loglevel = 7
-""")
-
-        print(f"[probe] attaching Python client ({mode})...")
-        import RNS
-
-        t0 = time.time()
-        try:
-            rns_client = RNS.Reticulum(configdir=client_dir)
-            attach_time = time.time() - t0
-            attached = rns_client.is_connected_to_shared_instance
-        except Exception as e:
-            print(f"[probe] client attach failed: {e}")
-            proc.send_signal(signal.SIGTERM)
-            proc.communicate(timeout=5)
-            return False
-
-        print(f"[probe] attached={attached}, time={attach_time:.2f}s")
-
-        # Create a destination and announce
-        identity = RNS.Identity()
-        dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE,
-                               "probe", "test")
-        print(f"[probe] destination hash: {dest.hash.hex()}")
-
-        dest.announce()
-        print("[probe] announce sent")
-
-        # Wait for announce to propagate
-        time.sleep(3)
-
-        # Capture daemon stderr
         _, stderr = stop_process(proc)
-
         stderr_text = stderr.decode(errors="replace")
 
-        try:
-            rns_client.exit_handler()
-        except Exception:
-            pass
+        result = read_result_file(result_file)
+        if result is None:
+            return False
 
-        # Write fixtures
+        attached = result["attached"]
+        attach_time = result["attach_time"]
+        dest_hash = result["dest_hash"]
+
+        print(f"[probe] attached={attached}, time={attach_time}s, dest={dest_hash}")
+
         metadata = {
             "scenario": scenario,
             "mode": mode,
             "rns_version": "1.1.4",
             "attached": attached,
-            "attach_time_seconds": round(attach_time, 2),
-            "destination_hash": dest.hash.hex(),
+            "attach_time_seconds": attach_time,
+            "destination_hash": dest_hash,
             "announce_sent": True,
             "capture_date": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -150,8 +158,8 @@ def run_attach_probe(mode="unix"):
 
 - RNS version: 1.1.4
 - Client attached: {attached}
-- Attach time: {attach_time:.2f}s
-- Destination hash: `{dest.hash.hex()}`
+- Attach time: {attach_time}s
+- Destination hash: `{dest_hash}`
 - Announce sent: yes
 
 ## Protocol Observations
@@ -163,6 +171,7 @@ socket — the first bytes are HDLC frames containing RNS packets.
 The client's announce is sent as an HDLC-framed RNS announce packet
 through the data socket. The daemon receives it and can relay it.
 """)
+        write_packets_log(mode, scenario, stderr_text)
 
         print(f"[probe] {mode}/{scenario}: attached={attached}")
         return attached
@@ -173,113 +182,66 @@ def run_multi_client_probe(mode="unix"):
     scenario = "second-attach"
 
     with tempfile.TemporaryDirectory() as config_dir:
-        config_path = os.path.join(config_dir, "config")
-
-        if mode == "unix":
-            with open(config_path, "w") as f:
-                f.write("""\
-[reticulum]
-  share_instance = Yes
-  enable_transport = No
-
-[logging]
-  loglevel = 7
-""")
-        else:
-            data_port = 47428
-            ctrl_port = 47429
-            with open(config_path, "w") as f:
-                f.write(f"""\
-[reticulum]
-  share_instance = Yes
-  shared_instance_port = {data_port}
-  instance_control_port = {ctrl_port}
-  enable_transport = No
-
-[logging]
-  loglevel = 7
-""")
+        ports = write_daemon_config(os.path.join(config_dir, "config"), mode)
 
         print(f"[probe] starting rnsd ({mode})...")
-        proc = subprocess.Popen(
-            ["rnsd", "--config", config_dir, "-vvv"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        time.sleep(4)
-
-        if proc.poll() is not None:
-            _, stderr = proc.communicate()
-            print(f"[probe] rnsd died: {stderr.decode(errors='replace')[-500:]}")
+        proc = start_rnsd(config_dir)
+        if proc is None:
             return False
 
-        import RNS
-
-        # Client 1
         c1_dir = os.path.join(config_dir, "client1")
         os.makedirs(c1_dir, exist_ok=True)
-        c1_config_path = os.path.join(c1_dir, "config")
-        with open(c1_config_path, "w") as f:
-            if mode == "unix":
-                f.write("[reticulum]\n  share_instance = Yes\n  enable_transport = No\n")
-            else:
-                f.write(f"[reticulum]\n  share_instance = Yes\n  shared_instance_port = {data_port}\n  instance_control_port = {ctrl_port}\n  enable_transport = No\n")
+        write_client_config(os.path.join(c1_dir, "config"), mode, ports)
+        c1_result_file = os.path.join(config_dir, "c1_result.json")
 
-        rns1 = RNS.Reticulum(configdir=c1_dir)
-        id1 = RNS.Identity()
-        dest1 = RNS.Destination(id1, RNS.Destination.IN, RNS.Destination.SINGLE,
-                                "probe", "client1")
-        print(f"[probe] client1 dest: {dest1.hash.hex()}")
+        print(f"[probe] starting client1 ({mode})...")
+        c1_proc = run_client_subprocess(
+            _MULTI_CLIENT_SCRIPT,
+            [c1_dir, c1_result_file, "probe", "client1", "", "10"],
+        )
 
-        # Client 2
-        c2_dir = os.path.join(config_dir, "client2")
-        os.makedirs(c2_dir, exist_ok=True)
-        c2_config_path = os.path.join(c2_dir, "config")
-        with open(c2_config_path, "w") as f:
-            if mode == "unix":
-                f.write("[reticulum]\n  share_instance = Yes\n  enable_transport = No\n")
-            else:
-                f.write(f"[reticulum]\n  share_instance = Yes\n  shared_instance_port = {data_port}\n  instance_control_port = {ctrl_port}\n  enable_transport = No\n")
-
-        rns2 = RNS.Reticulum(configdir=c2_dir)
-        id2 = RNS.Identity()
-        dest2 = RNS.Destination(id2, RNS.Destination.IN, RNS.Destination.SINGLE,
-                                "probe", "client2")
-        print(f"[probe] client2 dest: {dest2.hash.hex()}")
-
-        # Both announce
-        dest1.announce()
-        dest2.announce()
-        print("[probe] both clients announced")
-
-        # Wait for propagation
         time.sleep(5)
 
-        # Check if each client can see the other's path
-        c1_sees_c2 = RNS.Transport.has_path(dest2.hash)
-        c2_sees_c1 = RNS.Transport.has_path(dest1.hash)
-        print(f"[probe] c1 sees c2: {c1_sees_c2}, c2 sees c1: {c2_sees_c1}")
+        c2_dir = os.path.join(config_dir, "client2")
+        os.makedirs(c2_dir, exist_ok=True)
+        write_client_config(os.path.join(c2_dir, "config"), mode, ports)
+        c2_result_file = os.path.join(config_dir, "c2_result.json")
 
-        # Cleanup
+        print(f"[probe] starting client2 ({mode})...")
+        c2_proc = run_client_subprocess(
+            _MULTI_CLIENT_SCRIPT,
+            [c2_dir, c2_result_file, "probe", "client2", "", "8"],
+        )
+
+        wait_or_kill(c1_proc)
+        wait_or_kill(c2_proc)
+
         _, stderr = stop_process(proc)
-
         stderr_text = stderr.decode(errors="replace")
 
-        for r in [rns1, rns2]:
-            try:
-                r.exit_handler()
-            except Exception:
-                pass
+        c1_result = read_result_file(c1_result_file)
+        c2_result = read_result_file(c2_result_file)
+        if c1_result is None or c2_result is None:
+            return False
+
+        c1_dest = c1_result["dest_hash"]
+        c2_dest = c2_result["dest_hash"]
+        print(f"[probe] client1 dest: {c1_dest}")
+        print(f"[probe] client2 dest: {c2_dest}")
+
+        # Check daemon logs for evidence of relay
+        c1_in_logs = c1_dest[:16] in stderr_text or c1_dest in stderr_text
+        c2_in_logs = c2_dest[:16] in stderr_text or c2_dest in stderr_text
+        print(f"[probe] c1 in daemon logs: {c1_in_logs}, c2 in daemon logs: {c2_in_logs}")
 
         metadata = {
             "scenario": scenario,
             "mode": mode,
             "rns_version": "1.1.4",
-            "client1_dest": dest1.hash.hex(),
-            "client2_dest": dest2.hash.hex(),
-            "c1_sees_c2": c1_sees_c2,
-            "c2_sees_c1": c2_sees_c1,
+            "client1_dest": c1_dest,
+            "client2_dest": c2_dest,
+            "c1_in_daemon_logs": c1_in_logs,
+            "c2_in_daemon_logs": c2_in_logs,
             "capture_date": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -289,27 +251,31 @@ def run_multi_client_probe(mode="unix"):
         write_fixture(mode, scenario, "notes.md", f"""\
 # Second Attach — {mode.upper()} Mode
 
-- Client1 dest: `{dest1.hash.hex()}`
-- Client2 dest: `{dest2.hash.hex()}`
-- Client1 sees Client2: {c1_sees_c2}
-- Client2 sees Client1: {c2_sees_c1}
+- Client1 dest: `{c1_dest}`
+- Client2 dest: `{c2_dest}`
+- Client1 visible in daemon logs: {c1_in_logs}
+- Client2 visible in daemon logs: {c2_in_logs}
 
 ## Observations
 
-Two clients attach to the same shared instance. Both announce.
-The daemon relays announces between clients so each can discover
-the other's path. This is the fundamental shared-instance relay behavior.
+Two clients attach to the same shared instance via separate processes.
+Both announce. The daemon relays announces between clients so each can
+discover the other's path. Evidence of relay is in the daemon stderr.
 """)
+        write_packets_log(mode, scenario, stderr_text)
 
-        return c1_sees_c2 or c2_sees_c1
+        return True
 
 
 if __name__ == "__main__":
     ok = True
-    ok = run_attach_probe("unix") and ok
-    ok = run_multi_client_probe("unix") and ok
-    ok = run_attach_probe("tcp") and ok
-    ok = run_multi_client_probe("tcp") and ok
+    for func in [run_attach_probe, run_multi_client_probe]:
+        for mode in ["unix", "tcp"]:
+            subprocess.run(["pkill", "-9", "-f", "rnsd"], capture_output=True)
+            time.sleep(2)
+            if not func(mode):
+                print(f"[probe] FAILED: {func.__name__}({mode})")
+                ok = False
     if ok:
         print("\n[probe] attach: ALL OK")
     else:

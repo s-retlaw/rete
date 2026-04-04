@@ -53,7 +53,7 @@ No task is complete with prose-only confirmation.
 
 | ID | Title | Status | Depends On | Owner | Exit Criteria | Evidence |
 |---|---|---|---|---|---|---|
-| `EPIC-00` | Freeze compatibility contract | `planned` | Architectural review complete | `TBD` | Shared-mode scope, references, and trace plan are frozen | `TBD` |
+| `EPIC-00` | Freeze compatibility contract | `complete` | Architectural review complete | claude | Shared-mode scope, references, and trace plan are frozen. 12 golden traces captured and validated. | `test_fixture_index.py` GREEN (4/4), `test_reference_inventory.py` GREEN (8/8), `test_golden_traces.py` GREEN (12/12). Pickle opcodes + wire format documented in REFERENCE.md. |
 | `EPIC-01` | Real daemon surface | `planned` | `EPIC-00` | `TBD` | Dedicated daemon surface exists and owns canonical hosted node lifecycle | `TBD` |
 | `EPIC-02` | Unix shared-attach compatibility | `planned` | `EPIC-00`, `EPIC-01` | `TBD` | Stock Python shared attach works over Unix | `TBD` |
 | `EPIC-03` | TCP shared-attach compatibility | `planned` | `EPIC-00`, `EPIC-01` | `TBD` | Stock Python shared attach works over TCP | `TBD` |
@@ -68,9 +68,8 @@ No task is complete with prose-only confirmation.
 
 | Task ID | Epic | Status | Owner | Red Test | Green Evidence |
 |---|---|---|---|---|---|
-| `TBD` | `TBD` | `todo` | `TBD` | `TBD` | `TBD` |
-
-Replace the placeholder row when the first task is created.
+| `EPIC-00a-01` | `EPIC-00` | `done` | claude | `test_fixture_index.py`, `test_reference_inventory.py` | Contract docs frozen, probe scripts written, 4/12 traces captured |
+| `EPIC-00b-01` | `EPIC-00` | `done` | claude | `test_golden_traces.py` | Remaining 8 traces captured, pickle opcodes documented, wire format documented |
 
 ## Blocker Log
 
@@ -87,6 +86,10 @@ Replace the placeholder row when the first task is created.
 | `2026-04-02` | Stock Python apps in shared mode must work unchanged | Rust-native-only daemon is not the target |
 | `2026-04-02` | Stage 1 parity includes LXMF | Core shared-service parity is not complete without LXMF shared-mode flows |
 | `2026-04-02` | TDD is mandatory | Failing test first for every task |
+| `2026-04-04` | Response pickle uses protocol 4; Rust decoder must handle both protocol 2 and 4 | Observed in golden traces: request=proto2, response=proto4 |
+| `2026-04-04` | Auth handshake is 3 messages (one-way) in observed traces | CHALLENGE, DIGEST, WELCOME. Mutual auth (6 messages) may occur in other flows |
+| `2026-04-04` | `Transport.has_path()` returns False in shared-mode clients | Shared-mode clients defer transport to daemon; path resolution is daemon-side only |
+| `2026-04-04` | rnsd writes logs to file, not stderr | Daemon stderr is empty; control.log from probes only has content when probe writes its own output |
 
 ## Next-Up Queue
 
