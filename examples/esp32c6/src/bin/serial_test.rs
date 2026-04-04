@@ -30,6 +30,7 @@ use esp_backtrace as _;
 use esp_hal::uart::{self, Uart};
 use esp_hal::{clock::CpuClock, ram, timer::timg::TimerGroup};
 use esp_println::println;
+use rete_core::DestHash;
 use rete_embassy::{
     EmbassyHdlcInterface, EmbassyNode, EmbeddedNodeCore, NodeEvent, OutboundPacket,
     PacketRouting, ProofStrategy,
@@ -41,8 +42,9 @@ use rng::EspRng;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-fn hex4(b: &[u8]) -> [u8; 8] {
+fn hex4(b: impl AsRef<[u8]>) -> [u8; 8] {
     let mut out = [0u8; 8];
+    let b = b.as_ref();
     for (i, &byte) in b[..4].iter().enumerate() {
         let hi = byte >> 4;
         let lo = byte & 0x0f;
@@ -116,7 +118,7 @@ async fn main(_spawner: Spawner) -> ! {
     );
 
     println!("[serial-test] running (full handler mode)");
-    let mut last_peer: Option<[u8; 16]> = None;
+    let mut last_peer: Option<DestHash> = None;
     node.run_with_handler(&mut iface, &mut rng, |event, core, rng| {
         handle_event(event, core, rng, &mut last_peer)
     })
@@ -132,7 +134,7 @@ fn handle_event(
     event: NodeEvent,
     core: &mut EmbeddedNodeCore,
     rng: &mut EspRng,
-    last_peer: &mut Option<[u8; 16]>,
+    last_peer: &mut Option<DestHash>,
 ) -> Vec<OutboundPacket> {
     let now = Instant::now().as_secs();
     let mut out = Vec::new();
@@ -378,6 +380,38 @@ fn handle_event(
                     expired_paths, closed_links,
                 );
             }
+        }
+
+        NodeEvent::ResourceRejected { link_id, resource_hash } => {
+            let lh = hex4(&link_id);
+            let rh = hex4(&resource_hash);
+            println!(
+                "[serial-test] RESOURCE_REJECTED link={} hash={}",
+                core::str::from_utf8(&lh).unwrap_or("????"),
+                core::str::from_utf8(&rh).unwrap_or("????"),
+            );
+        }
+
+        NodeEvent::RequestFailed { link_id, request_id, reason } => {
+            let lh = hex4(&link_id);
+            let rh = hex4(&request_id);
+            println!(
+                "[serial-test] REQUEST_FAILED link={} req={} reason={:?}",
+                core::str::from_utf8(&lh).unwrap_or("????"),
+                core::str::from_utf8(&rh).unwrap_or("????"),
+                reason,
+            );
+        }
+
+        NodeEvent::RequestProgress { link_id, request_id, current, total } => {
+            let lh = hex4(&link_id);
+            let rh = hex4(&request_id);
+            println!(
+                "[serial-test] REQUEST_PROGRESS link={} req={} {}/{}",
+                core::str::from_utf8(&lh).unwrap_or("????"),
+                core::str::from_utf8(&rh).unwrap_or("????"),
+                current, total,
+            );
         }
 
         NodeEvent::LinkIdentified { link_id, identity_hash, .. } => {
