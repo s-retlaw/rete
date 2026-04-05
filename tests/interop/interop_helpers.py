@@ -117,8 +117,8 @@ class InteropTest:
 
         parser = argparse.ArgumentParser(description=f"rete {name} interop test")
         parser.add_argument(
-            "--rust-binary", default="../../target/debug/rete-linux",
-            help="Path to the rete-linux binary",
+            "--rust-binary", default="../../target/debug/rete",
+            help="Path to the rete binary",
         )
         parser.add_argument(
             "--port", type=int, default=default_port, help="TCP port for rnsd",
@@ -145,7 +145,7 @@ class InteropTest:
         self.rust_binary = os.path.abspath(self.args.rust_binary)
         if not os.path.exists(self.rust_binary):
             print(f"FAIL: Rust binary not found at {self.rust_binary}")
-            print("  Build it with: cargo build -p rete-example-linux")
+            print("  Build it with: cargo build -p rete")
             sys.exit(1)
 
         self.tmpdir = tempfile.mkdtemp(prefix=f"rete_{name.replace('-', '_')}_")
@@ -567,7 +567,7 @@ class InteropTest:
         )
         if not os.path.exists(bridge_bin):
             self._log(f"FAIL: Rust serial bridge not found at {bridge_bin}")
-            self._log("  Build it with: cargo build -p rete-example-linux")
+            self._log("  Build it with: cargo build -p rete")
             sys.exit(1)
 
         cmd = [

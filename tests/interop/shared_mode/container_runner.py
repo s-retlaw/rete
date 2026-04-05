@@ -2,7 +2,7 @@
 """Run shared-mode E2E tests inside isolated Docker containers.
 
 Each test runs in its own container with a dedicated network namespace,
-eliminating port conflicts entirely. The rete-shared binary and test
+eliminating port conflicts entirely. The rete binary and test
 scripts are bind-mounted into the container.
 
 Usage:
@@ -19,7 +19,7 @@ Usage:
     uv run python shared_mode/container_runner.py --all
 
     # Custom binary path
-    uv run python shared_mode/container_runner.py --rust-binary path/to/rete-shared unix/data.py
+    uv run python shared_mode/container_runner.py --rust-binary path/to/rete unix/data.py
 """
 
 import argparse
@@ -36,9 +36,9 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _INTEROP_DIR = os.path.dirname(_THIS_DIR)
 _REPO_ROOT = os.path.abspath(os.path.join(_INTEROP_DIR, "..", ".."))
 _DOCKERFILE = os.path.join(_REPO_ROOT, "tests", "docker", "shared-mode-e2e.Dockerfile")
-_DEFAULT_BINARY = os.path.join(_REPO_ROOT, "target", "debug", "rete-shared")
+_DEFAULT_BINARY = os.path.join(_REPO_ROOT, "target", "debug", "rete")
 
-IMAGE_TAG = "rete-shared-e2e:latest"
+IMAGE_TAG = "rete-e2e:latest"
 
 # ---------------------------------------------------------------------------
 # Test discovery
@@ -125,16 +125,16 @@ def run_test(test_path, rust_binary, timeout=120):
     cmd = [
         "docker", "run", "--rm",
         # Bind-mount the binary
-        "-v", f"{binary}:/opt/rete/rete-shared:ro",
+        "-v", f"{binary}:/opt/rete/rete:ro",
         # Bind-mount the entire interop test tree
         "-v", f"{_INTEROP_DIR}:/opt/tests:ro",
         # Environment: tell helpers we're containerized
         "-e", "RETE_CONTAINERIZED=1",
-        "-e", "RETE_BINARY=/opt/rete/rete-shared",
+        "-e", "RETE_BINARY=/opt/rete/rete",
         # Image and command
         IMAGE_TAG,
         f"/opt/tests/{test_file}",
-        "--rust-binary", "/opt/rete/rete-shared",
+        "--rust-binary", "/opt/rete/rete",
     ]
 
     t0 = time.monotonic()
@@ -160,7 +160,7 @@ def main():
     parser.add_argument("--suite", choices=["unix", "tcp", "robustness", "soak", "cutover"],
                         help="Run all tests in a suite")
     parser.add_argument("--all", action="store_true", help="Run all tests")
-    parser.add_argument("--rust-binary", default=_DEFAULT_BINARY, help="Path to rete-shared binary")
+    parser.add_argument("--rust-binary", default=_DEFAULT_BINARY, help="Path to rete binary")
     parser.add_argument("--timeout", type=int, default=120, help="Per-test timeout in seconds")
     args = parser.parse_args()
 
@@ -185,8 +185,8 @@ def main():
 
     # Verify binary exists
     if not os.path.isfile(args.rust_binary):
-        print(f"[container_runner] ERROR: rete-shared not found at {args.rust_binary}")
-        print("  Build it with: cargo build -p rete-daemon --bin rete-shared")
+        print(f"[container_runner] ERROR: rete not found at {args.rust_binary}")
+        print("  Build it with: cargo build -p rete")
         sys.exit(1)
 
     # Build image

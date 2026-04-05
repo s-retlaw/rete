@@ -7,7 +7,7 @@ RUN apt-get update \
 RUN pip install --no-cache-dir rns lxmf
 
 # Binaries are bind-mounted at runtime:
-#   /opt/rete/rete-linux    (original interop tests)
+#   /opt/rete/rete    (original interop tests)
 #   /opt/rete/rete-shared   (shared-mode tests)
 # Test scripts are bind-mounted at /opt/tests/ at runtime.
 WORKDIR /opt/tests

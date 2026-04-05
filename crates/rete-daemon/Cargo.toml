@@ -26,9 +26,5 @@ hmac           = { workspace = true }
 toml           = "0.8"
 libbz2-rs-sys  = { version = "0.2.2", default-features = false, features = ["rust-allocator"] }
 
-[[bin]]
-name = "rete-shared"
-path = "src/bin/rete-shared.rs"
-
 [dev-dependencies]
 tempfile = "3"

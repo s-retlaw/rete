@@ -55,93 +55,93 @@ test-unit:
 
 # E2E interop against Python RNS (Docker-isolated containers)
 test-e2e:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_live_interop.py
 
 # E2E relay interop (3-node topology, Docker)
 test-e2e-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_relay_interop.py
 
 # E2E transport relay interop (Rust as multi-interface transport relay, Docker)
 test-e2e-transport-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_transport_relay_interop.py
 
 # E2E path request interop (Rust responds to path requests, Docker)
 test-e2e-path-request:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_path_request_interop.py
 
 # E2E proof routing interop (proofs route back through Rust relay, Docker)
 test-e2e-proof-routing:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_proof_routing_interop.py
 
 # E2E link interop (Python establishes Link to Rust, Docker)
 test-e2e-link:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_link_interop.py
 
 # E2E channel interop (Python sends Channel messages to Rust via Link, Docker)
 test-e2e-channel:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_channel_interop.py
 
 # E2E resource interop (Python transfers Resource to/from Rust via Link, Docker)
 test-e2e-resource:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_resource_interop.py
 
 # E2E IFAC interop (Interface Access Control, Docker)
 test-e2e-ifac:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_ifac_interop.py
 
 # E2E local IPC interop (shared instance Unix socket — subprocess, no Docker)
 test-e2e-local-ipc:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python local_ipc_interop.py
 
 # E2E robustness interop (malformed packets, Docker)
 test-e2e-robustness:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_robustness_interop.py
 
 # E2E auto interface interop (mDNS peer discovery, Docker)
 test-e2e-auto:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python docker_auto_interop.py
 
 # Shared-mode daemon: Unix robustness
 test-shared-robustness-unix:
-    cargo build -p rete-daemon --bin rete-shared --features test-output
-    cd tests/interop/shared_mode && uv run python unix/robustness.py --rust-binary ../../../target/debug/rete-shared --timeout 120
+    cargo build -p rete --features test-output
+    cd tests/interop/shared_mode && uv run python unix/robustness.py --rust-binary ../../../target/debug/rete --timeout 120
 
 # Shared-mode daemon: TCP robustness
 test-shared-robustness-tcp:
-    cargo build -p rete-daemon --bin rete-shared --features test-output
-    cd tests/interop/shared_mode && uv run python tcp/robustness.py --rust-binary ../../../target/debug/rete-shared --timeout 120
+    cargo build -p rete --features test-output
+    cd tests/interop/shared_mode && uv run python tcp/robustness.py --rust-binary ../../../target/debug/rete --timeout 120
 
 # Shared-mode daemon: Unix soak
 test-shared-soak-unix:
-    cargo build -p rete-daemon --bin rete-shared --features test-output
-    cd tests/interop/shared_mode && uv run python unix/soak.py --rust-binary ../../../target/debug/rete-shared --timeout 180
+    cargo build -p rete --features test-output
+    cd tests/interop/shared_mode && uv run python unix/soak.py --rust-binary ../../../target/debug/rete --timeout 180
 
 # Shared-mode daemon: TCP soak
 test-shared-soak-tcp:
-    cargo build -p rete-daemon --bin rete-shared --features test-output
-    cd tests/interop/shared_mode && uv run python tcp/soak.py --rust-binary ../../../target/debug/rete-shared --timeout 180
+    cargo build -p rete --features test-output
+    cd tests/interop/shared_mode && uv run python tcp/soak.py --rust-binary ../../../target/debug/rete --timeout 180
 
 # Shared-mode daemon: Unix cutover
 test-shared-cutover-unix:
-    cargo build -p rete-daemon --bin rete-shared --features test-output
-    cd tests/interop/shared_mode && uv run python unix/cutover.py --rust-binary ../../../target/debug/rete-shared --timeout 120
+    cargo build -p rete --features test-output
+    cd tests/interop/shared_mode && uv run python unix/cutover.py --rust-binary ../../../target/debug/rete --timeout 120
 
 # Shared-mode daemon: TCP cutover
 test-shared-cutover-tcp:
-    cargo build -p rete-daemon --bin rete-shared --features test-output
-    cd tests/interop/shared_mode && uv run python tcp/cutover.py --rust-binary ../../../target/debug/rete-shared --timeout 120
+    cargo build -p rete --features test-output
+    cd tests/interop/shared_mode && uv run python tcp/cutover.py --rust-binary ../../../target/debug/rete --timeout 120
 
 # All shared-mode daemon E2E tests
 test-shared-all: test-shared-robustness-unix test-shared-robustness-tcp test-shared-soak-unix test-shared-soak-tcp test-shared-cutover-unix test-shared-cutover-tcp
@@ -152,167 +152,167 @@ test-shared-all: test-shared-robustness-unix test-shared-robustness-tcp test-sha
 
 # E2E link initiation (Rust initiates Link to Python)
 test-e2e-link-initiate:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python link_initiate_interop.py
 
 # E2E link initiation via relay (Rust initiates Link through relay)
 test-e2e-link-initiate-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python link_initiate_relay_interop.py
 
 # E2E link with Rust as relay node
 test-e2e-link-rust-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python link_rust_relay_interop.py
 
-# E2E link through 2-relay chain (rnsd_1 + rete-linux as second relay)
+# E2E link through 2-relay chain (rnsd_1 + rete as second relay)
 test-e2e-link-3node-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python link_3node_relay_interop.py
 
 # E2E link relay (Python-to-Python link through Rust relay)
 test-e2e-link-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python link_relay_interop.py
 
 # E2E link burst transfer
 test-e2e-link-burst:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python link_burst_interop.py
 
 # E2E link teardown race conditions
 test-e2e-link-teardown-race:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python link_teardown_race_interop.py
 
 # E2E concurrent links
 test-e2e-concurrent-links:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python concurrent_links_interop.py
 
 # E2E keepalive tuning
 test-e2e-keepalive:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python keepalive_interop.py
 
 # E2E LXMF opportunistic delivery
 test-e2e-lxmf-opportunistic:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python lxmf_opportunistic_interop.py
 
 # E2E LXMF direct delivery
 test-e2e-lxmf-direct:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python lxmf_direct_interop.py
 
 # E2E LXMF bidirectional delivery
 test-e2e-lxmf-bidirectional:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python lxmf_bidirectional_interop.py
 
 # E2E LXMF propagation node
 test-e2e-lxmf-propagation:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python lxmf_propagation_interop.py
 
 # E2E LXMF store-and-forward
 test-e2e-lxmf-store-forward:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python lxmf_store_forward_interop.py
 
 # E2E LXMF auto-forward
 test-e2e-lxmf-auto-forward:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python lxmf_auto_forward_interop.py
 
 # E2E LXMF message retrieval
 test-e2e-lxmf-retrieval:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python lxmf_retrieval_interop.py
 
 # E2E IFAC mismatch rejection
 test-e2e-ifac-mismatch:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python ifac_mismatch_interop.py
 
 # E2E IFAC relay
 test-e2e-ifac-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python ifac_relay_interop.py
 
 # E2E IFAC link
 test-e2e-ifac-link:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python ifac_link_interop.py
 
 # E2E IFAC large packet
 test-e2e-ifac-large-packet:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python ifac_large_packet_interop.py
 
 # E2E auto interface data exchange
 test-e2e-auto-data:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python auto_data_interop.py
 
 # E2E auto interface group isolation
 test-e2e-auto-group-isolation:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python auto_group_isolation_interop.py
 
 # E2E announce with app_data
 test-e2e-announce-appdata:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python announce_appdata_interop.py
 
 # E2E announce deduplication
 test-e2e-announce-dedup:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python announce_dedup_e2e_interop.py
 
 # E2E TCP disconnect recovery
 test-e2e-tcp-disconnect:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python tcp_disconnect_interop.py
 
 # E2E HDLC recovery
 test-e2e-hdlc-recovery:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python hdlc_recovery_interop.py
 
 # E2E dual interface
 test-e2e-dual-interface:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python dual_interface_interop.py
 
 # E2E multi-hop relay
 test-e2e-multi-hop-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python multi_hop_relay_interop.py
 
 # E2E concurrent resource transfers
 test-e2e-resource-concurrent:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python resource_concurrent_interop.py
 
 # E2E resource multi-segment transfer (2-3 segments, both directions)
 test-e2e-resource-multiseg:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python resource_multiseg_interop.py
 
 # E2E resource multi-window transfer
 test-e2e-resource-multiwindow:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python resource_multiwindow_interop.py
 
 # E2E 1.5MB split resource transfer (bidirectional)
 test-e2e-resource-1mb:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python resource_1mb_interop.py --timeout 240
 
 # E2E stability (long-running)
 test-e2e-stability:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python stability_interop.py
 
 # Python-to-Python baseline: channel messages through rnsd relay (no Rust)
@@ -325,17 +325,17 @@ test-e2e-py-resource-baseline:
 
 # E2E channel messages through rnsd relay (Python -> rnsd -> Rust)
 test-e2e-channel-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python channel_relay_interop.py
 
 # E2E resource transfer through rnsd relay (Python -> rnsd -> Rust)
 test-e2e-resource-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python resource_relay_interop.py
 
 # E2E Rust-initiates resource through rnsd relay (Rust -> rnsd -> Python)
 test-e2e-resource-initiate-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python resource_initiate_relay_interop.py
 
 # Audit: compare all Python RNS constants against Rust values
@@ -344,19 +344,19 @@ test-audit-constants:
 
 # E2E stats/metrics interop
 test-e2e-stats:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python stats_interop.py
 
 # All E2E tests in isolated Docker containers (no port conflicts)
 test-e2e-containerized:
-    cargo build -p rete-example-linux --features test-output
-    cargo build -p rete-daemon --bin rete-shared --features test-output 2>/dev/null || true
+    cargo build -p rete --features test-output
+    cargo build -p rete --features test-output 2>/dev/null || true
     cd tests/interop && uv run python container_runner.py --all
 
 # Parallel E2E tests in containers (4 concurrent)
 test-e2e-containerized-parallel:
-    cargo build -p rete-example-linux --features test-output
-    cargo build -p rete-daemon --bin rete-shared --features test-output 2>/dev/null || true
+    cargo build -p rete --features test-output
+    cargo build -p rete --features test-output 2>/dev/null || true
     cd tests/interop && uv run python container_runner.py --all --parallel 4
 
 # All software tests (unit + E2E, no hardware)
@@ -374,7 +374,7 @@ test-all:
     # any previously-built binaries.  Rebuild both here.
     echo ""
     echo "Rebuilding E2E binaries with test-output..."
-    cargo build -p rete-example-linux --features test-output 2>&1
+    cargo build -p rete --features test-output 2>&1
     echo ""
 
     # --- Prune stale Docker resources from prior runs ---
@@ -441,7 +441,10 @@ test-all:
         s=$(echo "$output" | grep -oP '\d+(?= skipped)' | tail -1 || echo "0")
         t=${t:-0}; f=$((t - p)); s=${s:-0}
         eval "${label}_PASS=$p"; eval "${label}_FAIL=$f"; eval "${label}_SKIP=$s"
-        [ "$rc" -ne 0 ] && E2E_ANY_FAIL=1
+        if [ "$rc" -ne 0 ]; then
+            E2E_ANY_FAIL=1
+            echo "  [WARN] $label exited with rc=$rc"
+        fi
         echo ""
     }
 
@@ -449,7 +452,7 @@ test-all:
     run_shared_e2e() {
         local label="$1" script="$2"
         local output rc
-        output=$(cd tests/interop/shared_mode && uv run python "$script" --rust-binary ../../../target/debug/rete-shared --timeout 120 2>&1)
+        output=$(cd tests/interop/shared_mode && uv run python "$script" --rust-binary ../../../target/debug/rete --timeout 120 2>&1)
         rc=$?
         sleep 1
         echo "$output"
@@ -459,7 +462,10 @@ test-all:
         p=${p:-0}; t=${t:-0}
         local f=$((t - p))
         eval "${label}_PASS=$p"; eval "${label}_FAIL=$f"; eval "${label}_SKIP=0"
-        [ "$rc" -ne 0 ] && E2E_ANY_FAIL=1
+        if [ "$rc" -ne 0 ]; then
+            E2E_ANY_FAIL=1
+            echo "  [WARN] $label exited with rc=$rc"
+        fi
         echo ""
     }
 
@@ -563,10 +569,7 @@ test-all:
     run_e2e MIXSTRESS mixed_stress_interop.py
     run_e2e PROOFCHAIN proof_chain_interop.py
 
-    # Shared-mode daemon (6) — build rete-shared AFTER cargo test to avoid
-    # feature flag clobbering (cargo test --workspace recompiles without test-output)
-    echo "Building rete-shared with test-output..."
-    cargo build -p rete-daemon --bin rete-shared --features test-output 2>&1
+    # Shared-mode daemon (6) — rete binary already rebuilt with test-output above
     run_shared_e2e SMUNXROBUST unix/robustness.py
     run_shared_e2e SMTCPROBUST tcp/robustness.py
     run_shared_e2e SMUNXSOAK unix/soak.py
@@ -852,11 +855,11 @@ build-esp32-all: build-esp32c3 build-esp32c6 build-esp32s3
 
 # Run the Linux node over serial (talks to flashed ESP32-C6)
 run-linux-serial *ARGS:
-    cargo run -p rete-example-linux -- --serial {{serial_port}} {{ARGS}}
+    cargo run -p rete -- --serial {{serial_port}} {{ARGS}}
 
 # Run the Linux node over TCP (talks to rnsd)
 run-linux-tcp *ARGS:
-    cargo run -p rete-example-linux -- --connect ${RNSD_ADDR:-127.0.0.1:4242} {{ARGS}}
+    cargo run -p rete -- --connect ${RNSD_ADDR:-127.0.0.1:4242} {{ARGS}}
 
 # --------------------------------------------------------------------------
 # End-to-end test: ESP32-C6 <-> Linux over serial
@@ -867,7 +870,7 @@ e2e-esp32c6: build-esp32c6
     #!/usr/bin/env bash
     set -euo pipefail
     # Pre-build Linux binary so it starts instantly after flash
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     # Flash ESP32
     espflash flash --port {{serial_port}} \
         {{esp32c6_dir}}/target/{{esp32c6_target}}/release/rete-esp32c6-serial
@@ -878,7 +881,7 @@ e2e-esp32c6: build-esp32c6
     # Start Linux node immediately — catches ESP32 boot + initial announce.
     # HDLC decoder ignores bootloader/log output on serial.
     sleep 0.5
-    OUTPUT=$(timeout 30 cargo run -p rete-example-linux -- \
+    OUTPUT=$(timeout 30 cargo run -p rete -- \
         --serial {{serial_port}} --auto-reply-ping \
         2>&1 || true)
     echo "$OUTPUT"
@@ -905,30 +908,30 @@ e2e-esp32c6: build-esp32c6
 
 # ESP32 link test (ESP32 as responder, Topology A)
 test-esp32c6-link: flash-esp32c6-test
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python esp32c6_link_interop.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port {{serial_port}} --timeout 30
 
 # ESP32 resource transfer test (Topology A)
 test-esp32c6-resource: flash-esp32c6-test
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python esp32c6_resource_interop.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port {{serial_port}} --timeout 30
 
 # ESP32 proof of delivery test (Topology A)
 test-esp32c6-proof: flash-esp32c6-test
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python esp32c6_proof_interop.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port {{serial_port}} --timeout 30
 
 # ESP32 link initiation test (ESP32 as initiator, Topology A)
 test-esp32c6-link-initiate: flash-esp32c6-test
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python esp32c6_link_initiate_interop.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port {{serial_port}} --timeout 30
 
 # ESP32 Python announce exchange (Topology B via bridge)
@@ -953,37 +956,37 @@ test-esp32c6-py-data: flash-esp32c6-test
 
 # ESP32 request/response test (Topology A)
 test-esp32c6-request: flash-esp32c6-test
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python esp32c6_request_interop.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port {{serial_port}} --timeout 30
 
 # ESP32 link teardown + slot reuse test (Topology A)
 test-esp32c6-teardown: flash-esp32c6-test
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python esp32c6_teardown_interop.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port {{serial_port}} --timeout 30
 
-# 3-node ESP32 relay test (Python <-> rete-linux <-> ESP32)
+# 3-node ESP32 relay test (Python <-> rete <-> ESP32)
 test-esp32c6-3node: flash-esp32c6-test
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python esp32c6_3node_relay_interop.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port {{serial_port}} --timeout 120
 
 # Flash once, run all ESP32-C6 hardware tests (Topology A + B + C)
 test-esp32c6-all: flash-esp32c6-test
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     echo "Waiting for ESP32 to boot..."
     sleep 3
-    # Topology A tests (rete-linux <-> ESP32 serial): no-link first, then link tests with cleanup
+    # Topology A tests (rete <-> ESP32 serial): no-link first, then link tests with cleanup
     TOPO_A=(proof link resource request teardown link_initiate)
     # Topology B tests (Python RNS <-> ESP32 via serial bridge): no --rust-binary
     TOPO_B=(py_announce py_data py_link py_channel)
-    # Topology C tests (Python <-> rete-linux relay <-> ESP32): needs --rust-binary + --serial-port, longer timeout
+    # Topology C tests (Python <-> rete relay <-> ESP32): needs --rust-binary + --serial-port, longer timeout
     # 4 checks use check_known_fail (Python RNS TCP reconnect + serial contention)
     TOPO_C=(3node_relay)
     SUITE_PASS=0; SUITE_FAIL=0
@@ -1021,7 +1024,7 @@ test-esp32c6-all: flash-esp32c6-test
         echo ""
         echo "=== esp32c6_${t}_interop (Topology A) ==="
         run_esp32_test "$t" "Topo A" \
-            --rust-binary ../../target/debug/rete-linux \
+            --rust-binary ../../target/debug/rete \
             --serial-port {{serial_port}} --timeout 30
     done
     for t in "${TOPO_B[@]}"; do
@@ -1034,14 +1037,14 @@ test-esp32c6-all: flash-esp32c6-test
         echo ""
         echo "=== esp32c6_${t}_interop (Topology C) ==="
         run_esp32_test "$t" "Topo C" \
-            --rust-binary ../../target/debug/rete-linux \
+            --rust-binary ../../target/debug/rete \
             --serial-port {{serial_port}} --timeout 120
     done
     echo ""
     echo "═══════════════════════════════════════════════════"
     echo "  ESP32-C6 Hardware Test Summary"
     echo "───────────────────────────────────────────────────"
-    echo "  Topology A (rete-linux <-> ESP32 serial):"
+    echo "  Topology A (rete <-> ESP32 serial):"
     for line in "${SUMMARY_LINES[@]}"; do
         if echo "$line" | grep -q "Topo A"; then echo "$line"; fi
     done
@@ -1051,7 +1054,7 @@ test-esp32c6-all: flash-esp32c6-test
         if echo "$line" | grep -q "Topo B"; then echo "$line"; fi
     done
     echo ""
-    echo "  Topology C (Python <-> rete-linux relay <-> ESP32):"
+    echo "  Topology C (Python <-> rete relay <-> ESP32):"
     for line in "${SUMMARY_LINES[@]}"; do
         if echo "$line" | grep -q "Topo C"; then echo "$line"; fi
     done
@@ -1084,9 +1087,9 @@ test-esp32c6-diag-channel:
 
 # Diagnostic: ESP32 3-node relay with packet capture (Topology C)
 test-esp32c6-diag-relay:
-    cargo build -p rete-example-linux --features test-output
+    cargo build -p rete --features test-output
     cd tests/interop && uv run python esp32c6_diag_relay.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port {{serial_port}} --timeout 120
 
 # --------------------------------------------------------------------------

@@ -922,6 +922,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rete"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rand",
+ "rete-core",
+ "rete-daemon",
+ "rete-iface-auto",
+ "rete-iface-serial",
+ "rete-iface-tcp",
+ "rete-lxmf",
+ "rete-stack",
+ "rete-tokio",
+ "rete-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-serial",
+ "tracing",
+]
+
+[[package]]
 name = "rete-core"
 version = "0.1.0"
 dependencies = [
@@ -977,28 +999,6 @@ dependencies = [
  "rete-stack",
  "rete-transport",
  "tokio",
-]
-
-[[package]]
-name = "rete-example-linux"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rand",
- "rete-core",
- "rete-daemon",
- "rete-iface-auto",
- "rete-iface-serial",
- "rete-iface-tcp",
- "rete-lxmf",
- "rete-stack",
- "rete-tokio",
- "rete-transport",
- "serde",
- "serde_json",
- "tokio",
- "tokio-serial",
- "tracing",
 ]
 
 [[package]]

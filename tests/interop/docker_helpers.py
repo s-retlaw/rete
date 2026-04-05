@@ -49,10 +49,10 @@ class DockerTopologyTest:
             sys.exit(1)
 
         # Verify binary exists
-        binary = os.path.join(_REPO_ROOT, "target", "debug", "rete-linux")
+        binary = os.path.join(_REPO_ROOT, "target", "debug", "rete")
         if not os.path.exists(binary):
-            print(f"FAIL: rete-linux binary not found at {binary}")
-            print("  Build it with: cargo build -p rete-example-linux")
+            print(f"FAIL: rete binary not found at {binary}")
+            print("  Build it with: cargo build -p rete")
             sys.exit(1)
 
     def __enter__(self):

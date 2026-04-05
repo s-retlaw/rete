@@ -39,8 +39,8 @@ import time
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
 _DOCKERFILE = os.path.join(_REPO_ROOT, "tests", "docker", "e2e-unified.Dockerfile")
-_DEFAULT_RETE_LINUX = os.path.join(_REPO_ROOT, "target", "debug", "rete-linux")
-_DEFAULT_RETE_SHARED = os.path.join(_REPO_ROOT, "target", "debug", "rete-shared")
+_DEFAULT_RETE_LINUX = os.path.join(_REPO_ROOT, "target", "debug", "rete")
+_DEFAULT_RETE_SHARED = os.path.join(_REPO_ROOT, "target", "debug", "rete")
 
 IMAGE_TAG = "rete-e2e-unified:latest"
 
@@ -184,10 +184,10 @@ def run_test(test_path, rete_linux, rete_shared, timeout=120):
     # Pick the right binary
     if is_shared:
         binary = os.path.abspath(rete_shared)
-        container_binary = "/opt/rete/rete-shared"
+        container_binary = "/opt/rete/rete"
     else:
         binary = os.path.abspath(rete_linux)
-        container_binary = "/opt/rete/rete-linux"
+        container_binary = "/opt/rete/rete"
 
     if not os.path.isfile(binary):
         print(f"[runner] ERROR: binary not found: {binary}")
@@ -251,12 +251,12 @@ def main():
     )
     parser.add_argument("--all", action="store_true", help="Run all tests")
     parser.add_argument(
-        "--rete-linux", default=_DEFAULT_RETE_LINUX,
-        help="Path to rete-linux binary (for original interop tests)",
+        "--rete", default=_DEFAULT_RETE_LINUX,
+        help="Path to rete binary (for original interop tests)",
     )
     parser.add_argument(
-        "--rete-shared", default=_DEFAULT_RETE_SHARED,
-        help="Path to rete-shared binary (for shared-mode tests)",
+        "--rete", default=_DEFAULT_RETE_SHARED,
+        help="Path to rete binary (for shared-mode tests)",
     )
     parser.add_argument(
         "--timeout", type=int, default=120,
@@ -290,13 +290,13 @@ def main():
     needs_shared = any(_is_shared_mode_test(t) for t in tests)
 
     if needs_linux and not os.path.isfile(args.rete_linux):
-        print(f"[runner] ERROR: rete-linux not found at {args.rete_linux}")
-        print("  Build it with: cargo build -p rete-example-linux")
+        print(f"[runner] ERROR: rete not found at {args.rete_linux}")
+        print("  Build it with: cargo build -p rete")
         sys.exit(1)
 
     if needs_shared and not os.path.isfile(args.rete_shared):
-        print(f"[runner] ERROR: rete-shared not found at {args.rete_shared}")
-        print("  Build it with: cargo build -p rete-daemon --bin rete-shared")
+        print(f"[runner] ERROR: rete not found at {args.rete_shared}")
+        print("  Build it with: cargo build -p rete-daemon --bin rete")
         sys.exit(1)
 
     # Build image

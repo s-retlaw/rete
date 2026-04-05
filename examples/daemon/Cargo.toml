@@ -1,11 +1,11 @@
 [package]
-name    = "rete-example-linux"
+name    = "rete"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "rete-linux"
+name = "rete"
 path = "src/main.rs"
 
 [[bin]]

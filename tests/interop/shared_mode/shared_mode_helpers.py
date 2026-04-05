@@ -1,4 +1,4 @@
-"""Helpers for shared-mode E2E tests against the Rust rete-shared daemon."""
+"""Helpers for shared-mode E2E tests against the Rust rete daemon."""
 
 import json
 import os
@@ -19,7 +19,7 @@ import time
 DEFAULT_RUST_BINARY = os.environ.get(
     "RETE_BINARY",
     os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "target", "debug", "rete-shared"
+        os.path.dirname(__file__), "..", "..", "..", "target", "debug", "rete"
     ),
 )
 DAEMON_READY = "DAEMON_READY"
@@ -45,17 +45,18 @@ def start_rete_shared(
     port=None,
     control_port=None,
 ):
-    """Start rete-shared and wait for DAEMON_READY.
+    """Start rete in shared-instance mode and wait for DAEMON_READY.
 
     Returns the subprocess.Popen object.
     Raises RuntimeError if daemon fails to start within timeout_secs.
     """
     binary = rust_binary or DEFAULT_RUST_BINARY
     if not os.path.isfile(binary):
-        raise FileNotFoundError(f"rete-shared binary not found: {binary}")
+        raise FileNotFoundError(f"rete binary not found: {binary}")
 
     cmd = [
         binary,
+        "--shared-instance",
         "--data-dir", data_dir,
         "--instance-name", instance_name,
         "--shared-instance-type", instance_type,
@@ -78,7 +79,7 @@ def start_rete_shared(
         if proc.poll() is not None:
             _, stderr = proc.communicate()
             raise RuntimeError(
-                f"rete-shared exited early (rc={proc.returncode}): "
+                f"rete exited early (rc={proc.returncode}): "
                 f"{stderr.decode(errors='replace')[-500:]}"
             )
         line = _readline_timeout(proc.stdout, deadline - time.monotonic())
@@ -88,7 +89,7 @@ def start_rete_shared(
     proc.kill()
     _, stderr = proc.communicate()
     raise RuntimeError(
-        f"rete-shared did not emit DAEMON_READY within {timeout_secs}s: "
+        f"rete did not emit DAEMON_READY within {timeout_secs}s: "
         f"{stderr.decode(errors='replace')[-500:]}"
     )
 
@@ -452,7 +453,7 @@ def request_handler(path, data, request_id, link_id, remote_identity, requested_
     with lock:
         state["request_received"] = True
         state["request_path"] = path
-    return {"echo": data, "server": "rete-shared"}
+    return {"echo": data, "server": "rete"}
 
 def resource_started(resource):
     pass

@@ -13,7 +13,7 @@ members = [
     "crates/rete-lxmf-core",
     "crates/rete-lxmf",
     "crates/rete-daemon",
-    "examples/linux",
+    "examples/daemon",
 ]
 
 # Hardware examples require target-specific toolchains — build explicitly:

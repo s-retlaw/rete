@@ -17,7 +17,7 @@ cargo test --workspace
 
 # E2E interop tests (from tests/interop/)
 cd tests/interop && for test in live_interop link_interop channel_interop resource_interop relay_interop transport_relay_interop path_request_interop proof_routing_interop ifac_interop robustness_interop; do
-  uv run python ${test}.py --rust-binary ../../target/debug/rete-linux --timeout 45
+  uv run python ${test}.py --rust-binary ../../target/debug/rete --timeout 45
 done
 ```
 
@@ -235,7 +235,7 @@ Start here — do not skip ahead:
    ```bash
    pip install rns
    rnsd &   # run Python reference node
-   cargo run -p rete-example-linux -- --tcp 127.0.0.1:4242
+   cargo run -p rete -- --tcp 127.0.0.1:4242
    ```
 
 7. **Hardware examples** — ESP32-S3 and RP2040

@@ -1,6 +1,6 @@
-# Rollback Checklist: Rust rete-shared → Python rnsd
+# Rollback Checklist: Rust rete --shared-instance → Python rnsd
 
-This checklist guides operators through reverting from the Rust `rete-shared`
+This checklist guides operators through reverting from the Rust `rete --shared-instance`
 daemon back to Python `rnsd`.
 
 ## Pre-rollback
@@ -9,7 +9,7 @@ daemon back to Python `rnsd`.
   ```bash
   python3 -c "import RNS; print(RNS.__version__)"
   ```
-- [ ] Note current rete-shared config (instance type, ports)
+- [ ] Note current rete --shared-instance config (instance type, ports)
 - [ ] Verify rnsd config still exists
   ```bash
   cat ~/.reticulum/config
@@ -20,10 +20,10 @@ daemon back to Python `rnsd`.
 1. **Stop Rust daemon**
    ```bash
    # If running as systemd service:
-   sudo systemctl stop rete-shared
+   sudo systemctl stop rete
 
    # If running in foreground:
-   kill $(pgrep rete-shared)
+   kill $(pgrep -f "rete --shared-instance")
    ```
 
 2. **Wait for socket release** (1-2 seconds for Unix, 3-5 seconds for TCP)

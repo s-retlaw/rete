@@ -1,19 +1,19 @@
-# Cutover Checklist: Python rnsd → Rust rete-shared
+# Cutover Checklist: Python rnsd → Rust rete --shared-instance
 
 This checklist guides operators through replacing Python `rnsd` with the Rust
-`rete-shared` daemon as the system shared instance.
+`rete --shared-instance` daemon as the system shared instance.
 
 ## Pre-cutover
 
-- [ ] Verify `rete-shared` binary is built and accessible
+- [ ] Verify `rete --shared-instance` binary is built and accessible
   ```bash
-  rete-shared --help
+  rete --help
   ```
 - [ ] Note current rnsd config (instance type, ports, transport mode)
   ```bash
   cat ~/.reticulum/config
   ```
-- [ ] Prepare rete-shared data directory (default: `~/.rete`)
+- [ ] Prepare rete --shared-instance data directory (default: `~/.rete`)
   ```bash
   mkdir -p ~/.rete
   ```
@@ -43,12 +43,12 @@ This checklist guides operators through replacing Python `rnsd` with the Rust
 
    Unix mode (default):
    ```bash
-   rete-shared --transport
+   rete --shared-instance --transport
    ```
 
    TCP mode:
    ```bash
-   rete-shared --shared-instance-type tcp \
+   rete --shared-instance --shared-instance-type tcp \
                --shared-instance-port 37428 \
                --instance-control-port 37429 \
                --transport
@@ -56,13 +56,13 @@ This checklist guides operators through replacing Python `rnsd` with the Rust
 
    Custom data directory:
    ```bash
-   rete-shared --data-dir /path/to/data --transport
+   rete --shared-instance --data-dir /path/to/data --transport
    ```
 
 4. **Verify daemon is running**
    ```bash
    # Check process
-   pgrep rete-shared
+   pgrep -f "rete --shared-instance"
 
    # Check with rnstatus (stock Python tool)
    rnstatus
@@ -77,12 +77,12 @@ This checklist guides operators through replacing Python `rnsd` with the Rust
 - [ ] Monitor daemon logs for errors:
   ```bash
   # stderr contains tracing output
-  journalctl -u rete-shared -f   # if using systemd
+  journalctl -u rete -f   # if using systemd
   ```
 
 ## Known Differences
 
-- Identity files are NOT shared between Python rnsd and Rust rete-shared.
+- Identity files are NOT shared between Python rnsd and Rust rete --shared-instance.
   Each daemon generates its own identity on first start.
 - Snapshot/state file formats differ. Each daemon starts with a fresh
   routing table after cutover (paths will be re-learned from announces).

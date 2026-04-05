@@ -1,24 +1,29 @@
-//! Linux/hosted example — Reticulum node on desktop or Raspberry Pi.
+//! rete — Reticulum Network Stack daemon.
 //!
-//! Connects to Python rnsd over TCP for interop testing, or directly to
-//! an ESP32 over serial. Also supports local shared instance IPC and
-//! AutoInterface for LAN peer discovery.
+//! Hosted daemon for desktop, server, and Raspberry Pi. Connects to peers
+//! over TCP, serial, AutoInterface (mDNS), or as a shared instance (replacing
+//! Python rnsd). Supports LXMF messaging, propagation, and Prometheus monitoring.
 //!
 //! Usage:
-//!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242
-//!   cargo run -p rete-example-linux -- --serial /dev/ttyACM0
-//!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242 --local-server default
-//!   cargo run -p rete-example-linux -- --local-client default
-//!   cargo run -p rete-example-linux -- --auto
-//!   cargo run -p rete-example-linux -- --auto --auto-group mynetwork
-//!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242 --propagation
-//!   cargo run -p rete-example-linux -- --listen 0.0.0.0:4242 --transport
-//!   cargo run -p rete-example-linux -- --connect 127.0.0.1:4242 --monitoring 127.0.0.1:9100
+//!   cargo run -p rete -- --connect 127.0.0.1:4242
+//!   cargo run -p rete -- --serial /dev/ttyACM0
+//!   cargo run -p rete -- --auto
+//!   cargo run -p rete -- --shared-instance --transport
+//!   cargo run -p rete -- --shared-instance --shared-instance-type tcp --transport
+//!   cargo run -p rete -- --connect 127.0.0.1:4242 --local-server default
+//!   cargo run -p rete -- --local-client default
+//!   cargo run -p rete -- --connect 127.0.0.1:4242 --propagation
+//!   cargo run -p rete -- --listen 0.0.0.0:4242 --transport
+//!   cargo run -p rete -- --connect 127.0.0.1:4242 --monitoring 127.0.0.1:9100
 
 use rete_daemon::{
     command::{spawn_signal_handler, spawn_stdin_reader},
     compression::AppHooks,
-    config::{generate_default_config, load_config, parse_cli_args},
+    config::{
+        generate_default_config, has_flag, load_config, parse_cli_args, value_of,
+        SharedInstanceType,
+    },
+    daemon::SharedDaemonBuilder,
     event::{handle_lxmf_command, on_event},
     file_store::AnyMessageStore,
     identity::{default_data_dir, load_or_create_identity, JsonFileStore},
@@ -90,6 +95,12 @@ async fn async_main() {
             std::process::exit(1);
         }
     };
+
+    // --shared-instance: run as a shared-instance daemon (replaces Python rnsd)
+    if args.iter().any(|a| a == "--shared-instance") {
+        run_shared_instance(&args, data_dir).await;
+        return;
+    }
 
     // Merge CLI args with TOML config
     let c = parse_cli_args(&args, &cfg);
@@ -422,4 +433,62 @@ async fn async_main() {
     rete_daemon::rete_event::ReteEvent::ShutdownComplete.emit();
     // Force exit to avoid blocking on the stdin reader thread.
     std::process::exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Shared-instance mode (replaces Python rnsd)
+// ---------------------------------------------------------------------------
+
+async fn run_shared_instance(
+    args: &[String],
+    data_dir: PathBuf,
+) {
+    // Load config from TOML (if present), then apply CLI overrides.
+    let config_path = data_dir.join("config.toml");
+    let cfg = match load_config(&config_path) {
+        Ok(Some(c)) => c,
+        Ok(None) => Default::default(),
+        Err(e) => {
+            tracing::error!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let mut shared = cfg.shared_instance;
+
+    if let Some(name) = value_of(args, "--instance-name") {
+        shared.instance_name = name;
+    }
+    if let Some(t) = value_of(args, "--shared-instance-type") {
+        shared.shared_instance_type = match t.as_str() {
+            "unix" => SharedInstanceType::Unix,
+            "tcp" => SharedInstanceType::Tcp,
+            other => {
+                tracing::error!("invalid shared_instance_type: {other}");
+                std::process::exit(1);
+            }
+        };
+    }
+    if let Some(p) = value_of(args, "--shared-instance-port") {
+        shared.shared_instance_port = p.parse().expect("invalid port number");
+    }
+    if let Some(p) = value_of(args, "--instance-control-port") {
+        shared.instance_control_port = p.parse().expect("invalid control port number");
+    }
+
+    let transport = has_flag(args, "--transport");
+
+    let builder = SharedDaemonBuilder::new(shared)
+        .data_dir(&data_dir)
+        .transport_mode(transport);
+
+    let (daemon, run_future) = match builder.start().await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!("fatal: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    spawn_signal_handler(daemon.command_sender());
+    run_future.await;
 }
