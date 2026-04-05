@@ -113,6 +113,39 @@ test-e2e-auto:
     cargo build -p rete-example-linux --features test-output
     cd tests/interop && uv run python docker_auto_interop.py
 
+# Shared-mode daemon: Unix robustness
+test-shared-robustness-unix:
+    cargo build -p rete-daemon --bin rete-shared --features test-output
+    cd tests/interop/shared_mode && uv run python unix/robustness.py --rust-binary ../../../target/debug/rete-shared --timeout 120
+
+# Shared-mode daemon: TCP robustness
+test-shared-robustness-tcp:
+    cargo build -p rete-daemon --bin rete-shared --features test-output
+    cd tests/interop/shared_mode && uv run python tcp/robustness.py --rust-binary ../../../target/debug/rete-shared --timeout 120
+
+# Shared-mode daemon: Unix soak
+test-shared-soak-unix:
+    cargo build -p rete-daemon --bin rete-shared --features test-output
+    cd tests/interop/shared_mode && uv run python unix/soak.py --rust-binary ../../../target/debug/rete-shared --timeout 180
+
+# Shared-mode daemon: TCP soak
+test-shared-soak-tcp:
+    cargo build -p rete-daemon --bin rete-shared --features test-output
+    cd tests/interop/shared_mode && uv run python tcp/soak.py --rust-binary ../../../target/debug/rete-shared --timeout 180
+
+# Shared-mode daemon: Unix cutover
+test-shared-cutover-unix:
+    cargo build -p rete-daemon --bin rete-shared --features test-output
+    cd tests/interop/shared_mode && uv run python unix/cutover.py --rust-binary ../../../target/debug/rete-shared --timeout 120
+
+# Shared-mode daemon: TCP cutover
+test-shared-cutover-tcp:
+    cargo build -p rete-daemon --bin rete-shared --features test-output
+    cd tests/interop/shared_mode && uv run python tcp/cutover.py --rust-binary ../../../target/debug/rete-shared --timeout 120
+
+# All shared-mode daemon E2E tests
+test-shared-all: test-shared-robustness-unix test-shared-robustness-tcp test-shared-soak-unix test-shared-soak-tcp test-shared-cutover-unix test-shared-cutover-tcp
+
 # CONVENTION: When adding a new interop test:
 #   1. Add an individual recipe (test-e2e-<name>)
 #   2. Add it to the run_e2e calls AND summary printf in test-all
@@ -334,6 +367,7 @@ test-all:
     # --- Build everything upfront ---
     echo "Building..."
     cargo build -p rete-example-linux --features test-output 2>&1
+    cargo build -p rete-daemon --bin rete-shared --features test-output 2>&1
     echo ""
 
     # --- Prune stale Docker resources from prior runs ---
@@ -405,6 +439,24 @@ test-all:
         s=$(echo "$output" | grep -oP '\d+(?= skipped)' | tail -1 || echo "0")
         t=${t:-0}; f=$((t - p)); s=${s:-0}
         eval "${label}_PASS=$p"; eval "${label}_FAIL=$f"; eval "${label}_SKIP=$s"
+        [ "$rc" -ne 0 ] && E2E_ANY_FAIL=1
+        echo ""
+    }
+
+    # Helper to run a shared-mode E2E test (different output format: "N/N checks passed")
+    run_shared_e2e() {
+        local label="$1" script="$2"
+        local output rc
+        output=$(cd tests/interop/shared_mode && uv run python "$script" --rust-binary ../../../target/debug/rete-shared --timeout 120 2>&1)
+        rc=$?
+        sleep 1
+        echo "$output"
+        local p t
+        p=$(echo "$output" | grep -oP '\d+(?=/\d+ checks passed)' | tail -1 || echo "0")
+        t=$(echo "$output" | grep -oP '(?<=/)(\d+)(?= checks passed)' | tail -1 || echo "0")
+        p=${p:-0}; t=${t:-0}
+        local f=$((t - p))
+        eval "${label}_PASS=$p"; eval "${label}_FAIL=$f"; eval "${label}_SKIP=0"
         [ "$rc" -ne 0 ] && E2E_ANY_FAIL=1
         echo ""
     }
@@ -509,6 +561,14 @@ test-all:
     run_e2e MIXSTRESS mixed_stress_interop.py
     run_e2e PROOFCHAIN proof_chain_interop.py
 
+    # Shared-mode daemon (6)
+    run_shared_e2e SMUNXROBUST unix/robustness.py
+    run_shared_e2e SMTCPROBUST tcp/robustness.py
+    run_shared_e2e SMUNXSOAK unix/soak.py
+    run_shared_e2e SMTCPSOAK tcp/soak.py
+    run_shared_e2e SMUNXCUTOVER unix/cutover.py
+    run_shared_e2e SMTCPCUTOVER tcp/cutover.py
+
     # --- Combined summary ---
     echo ""
     echo "═══════════════════════════════════════════════════"
@@ -597,6 +657,13 @@ test-all:
     printf "  %-30s %s passed, %s failed\n" "resource-large-interop" "$RESLARGE_PASS" "$RESLARGE_FAIL"
     printf "  %-30s %s passed, %s failed\n" "mixed-stress-interop" "$MIXSTRESS_PASS" "$MIXSTRESS_FAIL"
     printf "  %-30s %s passed, %s failed\n" "proof-chain-interop" "$PROOFCHAIN_PASS" "$PROOFCHAIN_FAIL"
+    echo "    Shared-mode daemon:"
+    printf "  %-30s %s passed, %s failed\n" "sm-unix-robustness" "$SMUNXROBUST_PASS" "$SMUNXROBUST_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "sm-tcp-robustness" "$SMTCPROBUST_PASS" "$SMTCPROBUST_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "sm-unix-soak" "$SMUNXSOAK_PASS" "$SMUNXSOAK_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "sm-tcp-soak" "$SMTCPSOAK_PASS" "$SMTCPSOAK_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "sm-unix-cutover" "$SMUNXCUTOVER_PASS" "$SMUNXCUTOVER_FAIL"
+    printf "  %-30s %s passed, %s failed\n" "sm-tcp-cutover" "$SMTCPCUTOVER_PASS" "$SMTCPCUTOVER_FAIL"
     E2E_PASS=$((LIVE_PASS + LINK_PASS + CHANNEL_PASS + RELAY_PASS + PATHREQ_PASS + PROOF_PASS + ROBUSTNESS_PASS \
         + LINKINIT_PASS + LINKRELAY_PASS + LINKRUSTRELAY_PASS + LINK3NODERELAY_PASS + LINKINITRELAY_PASS + LINKBURST_PASS + CONCURRENT_PASS + TEARDOWN_PASS \
         + IFAC_PASS + IFACMISMATCH_PASS + IFACRELAY_PASS + IFACLINK_PASS + IFACLARGE_PASS \
@@ -611,7 +678,8 @@ test-all:
         + KEEPALIVE_PASS + STABILITY_PASS \
         + LINKSTALE_PASS + LINKCYCLE_PASS + DATAINTEG_PASS + MTUBOUND_PASS + MALANN_PASS + ANNFLOOD_PASS \
         + CHANORDER_PASS + CONCTRAF_PASS + PATHEXP_PASS + RESCANCEL_PASS \
-        + RESLARGE_PASS + MIXSTRESS_PASS + PROOFCHAIN_PASS))
+        + RESLARGE_PASS + MIXSTRESS_PASS + PROOFCHAIN_PASS \
+        + SMUNXROBUST_PASS + SMTCPROBUST_PASS + SMUNXSOAK_PASS + SMTCPSOAK_PASS + SMUNXCUTOVER_PASS + SMTCPCUTOVER_PASS))
     E2E_FAIL=$((LIVE_FAIL + LINK_FAIL + CHANNEL_FAIL + RELAY_FAIL + PATHREQ_FAIL + PROOF_FAIL + ROBUSTNESS_FAIL \
         + LINKINIT_FAIL + LINKRELAY_FAIL + LINKRUSTRELAY_FAIL + LINK3NODERELAY_FAIL + LINKINITRELAY_FAIL + LINKBURST_FAIL + CONCURRENT_FAIL + TEARDOWN_FAIL \
         + IFAC_FAIL + IFACMISMATCH_FAIL + IFACRELAY_FAIL + IFACLINK_FAIL + IFACLARGE_FAIL \
@@ -626,13 +694,14 @@ test-all:
         + KEEPALIVE_FAIL + STABILITY_FAIL \
         + LINKSTALE_FAIL + LINKCYCLE_FAIL + DATAINTEG_FAIL + MTUBOUND_FAIL + MALANN_FAIL + ANNFLOOD_FAIL \
         + CHANORDER_FAIL + CONCTRAF_FAIL + PATHEXP_FAIL + RESCANCEL_FAIL \
-        + RESLARGE_FAIL + MIXSTRESS_FAIL + PROOFCHAIN_FAIL))
+        + RESLARGE_FAIL + MIXSTRESS_FAIL + PROOFCHAIN_FAIL \
+        + SMUNXROBUST_FAIL + SMTCPROBUST_FAIL + SMUNXSOAK_FAIL + SMTCPSOAK_FAIL + SMUNXCUTOVER_FAIL + SMTCPCUTOVER_FAIL))
     echo ""
     DOCKER_SKIP_STR=""
     if [ "$DOCKER_SKIPPED" -gt 0 ]; then
         DOCKER_SKIP_STR=" ($DOCKER_SKIPPED docker suites skipped)"
     fi
-    printf "  %-30s %s passed, %s failed%s\n" "e2e total (63 suites)" "$E2E_PASS" "$E2E_FAIL" "$DOCKER_SKIP_STR"
+    printf "  %-30s %s passed, %s failed%s\n" "e2e total (69 suites)" "$E2E_PASS" "$E2E_FAIL" "$DOCKER_SKIP_STR"
     echo "───────────────────────────────────────────────────"
     ALL_PASS=$((UNIT_PASS + E2E_PASS))
     ALL_FAIL=$((UNIT_FAIL + E2E_FAIL))
