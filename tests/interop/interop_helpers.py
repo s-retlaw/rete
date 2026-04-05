@@ -413,7 +413,7 @@ class InteropTest:
 
     # -- output collection --
 
-    def collect_rust_stderr(self, last_chars=1000):
+    def collect_rust_stderr(self, last_chars=4000):
         """Terminate the Rust node and return its stderr (last *last_chars*)."""
         if not self._rust_proc:
             return ""

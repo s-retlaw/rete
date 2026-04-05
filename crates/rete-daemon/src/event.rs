@@ -1,5 +1,5 @@
 //! Node event handling: routes NodeEvent through the LXMF router and emits
-//! structured stdout markers that the E2E test harness parses.
+//! structured events via [`ReteEvent`].
 
 use std::cell::RefCell;
 
@@ -10,6 +10,7 @@ use rete_transport::SnapshotStore as _;
 
 use crate::file_store::AnyMessageStore;
 use crate::identity::JsonFileStore;
+use crate::rete_event::ReteEvent;
 
 /// Maximum age of propagation messages before pruning. Matches Python RNS default (30 days).
 const PROPAGATION_TTL_SECS: u64 = 2_592_000;
@@ -33,8 +34,6 @@ pub fn on_event(
         }
 
         // Save snapshot every ~5 minutes (60 ticks × 5s interval).
-        // Process-global: if multiple daemon instances run in-process (uncommon),
-        // they share this counter and may save slightly off-schedule.
         use std::sync::atomic::{AtomicU64, Ordering};
         static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
         let ticks = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
@@ -76,67 +75,44 @@ pub fn on_event(
     let now = rete_tokio::current_time_secs();
     let lxmf_event = lxmf_router.borrow_mut().handle_event_mut(event, now);
     match lxmf_event {
-        LxmfEvent::MessageReceived { message, method } => {
-            let source = hex::encode(message.source_hash);
-            let title = String::from_utf8_lossy(&message.title);
-            let content = String::from_utf8_lossy(&message.content);
-            tracing::info!(
-                %source, method = ?method, %title, %content,
-                "LXMF message received",
-            );
-            tracing::info!(target: "rete::test_event", event = "LXMF_RECEIVED", %source, %title, %content);
+        LxmfEvent::MessageReceived { message, .. } => {
+            ReteEvent::LxmfReceived {
+                source: hex::encode(message.source_hash),
+                title: String::from_utf8_lossy(&message.title).into_owned(),
+                content: String::from_utf8_lossy(&message.content).into_owned(),
+            }.emit();
         }
-        LxmfEvent::PeerAnnounced {
-            dest_hash,
-            display_name,
-        } => {
-            let name = display_name
-                .as_deref()
-                .map(|n| String::from_utf8_lossy(n).to_string())
-                .unwrap_or_default();
-            tracing::info!(
-                dest = %hex::encode(dest_hash),
-                %name,
-                "LXMF peer announced",
-            );
-            tracing::info!(target: "rete::test_event", event = "LXMF_PEER", dest = %hex::encode(dest_hash), %name);
+        LxmfEvent::PeerAnnounced { dest_hash, display_name } => {
+            ReteEvent::LxmfPeer {
+                dest: hex::encode(dest_hash),
+                name: display_name
+                    .as_deref()
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .unwrap_or_default(),
+            }.emit();
         }
-        LxmfEvent::PropagationDeposit {
-            dest_hash,
-            message_hash,
-        } => {
-            tracing::info!(
-                dest = %hex::encode(dest_hash),
-                msg_hash = %hex::encode(message_hash),
-                "propagation deposit",
-            );
-            tracing::info!(target: "rete::test_event", event = "PROP_DEPOSIT", dest = %hex::encode(dest_hash), msg_hash = %hex::encode(message_hash));
+        LxmfEvent::PropagationDeposit { dest_hash, message_hash } => {
+            ReteEvent::PropDeposit {
+                dest: hex::encode(dest_hash),
+                msg_hash: hex::encode(message_hash),
+            }.emit();
         }
         LxmfEvent::PropagationRetrievalRequest {
-            link_id,
-            request_id,
-            dest_hash,
-            result,
+            link_id, request_id, dest_hash, result,
         } => {
             let count = result.message_hashes.len();
-            tracing::info!(
-                link = %hex::encode(link_id),
-                dest = %hex::encode(dest_hash),
+            ReteEvent::PropRetrievalRequest {
+                link: hex::encode(link_id),
+                dest: hex::encode(dest_hash),
                 count,
-                "propagation retrieval request",
-            );
-            tracing::info!(target: "rete::test_event", event = "PROP_RETRIEVAL_REQUEST", link = %hex::encode(link_id), dest = %hex::encode(dest_hash), count);
+            }.emit();
 
             let mut packets = Vec::new();
-
-            // Send the response (count of messages)
             if let Ok(resp_pkt) =
                 core.send_response(&link_id, &request_id, &result.response_data, rng)
             {
                 packets.push(resp_pkt);
             }
-
-            // Start sending messages as Resources via retrieval job
             if !result.message_hashes.is_empty() {
                 let hashes = result.message_hashes;
                 let retrieval_pkts = lxmf_router
@@ -144,32 +120,24 @@ pub fn on_event(
                     .start_retrieval_send(&link_id, hashes, core, rng);
                 packets.extend(retrieval_pkts);
             }
-
-            flush_stdout();
             return packets;
         }
         LxmfEvent::PropagationForward { dest_hash, count } => {
-            tracing::info!(
-                dest = %hex::encode(dest_hash),
+            ReteEvent::PropForward {
+                dest: hex::encode(dest_hash),
                 count,
-                "propagation forward",
-            );
-            tracing::info!(target: "rete::test_event", event = "PROP_FORWARD", dest = %hex::encode(dest_hash), count);
+            }.emit();
 
-            // Auto-forward: initiate a link to the destination
             let mut router = lxmf_router.borrow_mut();
             if !router.has_forward_job_for(&dest_hash) {
                 let now = rete_tokio::current_time_secs();
                 if let Some((pkt, link_id)) =
                     router.start_propagation_forward(&dest_hash, core, rng, now)
                 {
-                    tracing::info!(
-                        dest = %hex::encode(dest_hash),
-                        link = %hex::encode(link_id),
-                        "propagation forward link initiated",
-                    );
-                    tracing::info!(target: "rete::test_event", event = "PROP_FORWARD_LINK", dest = %hex::encode(dest_hash), link = %hex::encode(link_id));
-                    flush_stdout();
+                    ReteEvent::PropForwardLink {
+                        dest: hex::encode(dest_hash),
+                        link: hex::encode(link_id),
+                    }.emit();
                     return vec![pkt];
                 } else {
                     tracing::warn!(
@@ -179,81 +147,46 @@ pub fn on_event(
                 }
             }
         }
-        LxmfEvent::PeerDiscovered {
-            dest_hash,
-            identity_hash,
-        } => {
-            tracing::info!(
-                dest = %hex::encode(dest_hash),
-                identity = %hex::encode(identity_hash),
-                "peer discovered",
-            );
-            tracing::info!(target: "rete::test_event", event = "PEER_DISCOVERED", dest = %hex::encode(dest_hash), identity = %hex::encode(identity_hash));
+        LxmfEvent::PeerDiscovered { dest_hash, identity_hash } => {
+            ReteEvent::PeerDiscovered {
+                dest: hex::encode(dest_hash),
+                identity: hex::encode(identity_hash),
+            }.emit();
         }
-        LxmfEvent::PeerSyncComplete {
-            dest_hash,
-            messages_sent,
-        } => {
-            tracing::info!(
-                dest = %hex::encode(dest_hash),
+        LxmfEvent::PeerSyncComplete { dest_hash, messages_sent } => {
+            ReteEvent::PeerSyncComplete {
+                dest: hex::encode(dest_hash),
                 messages_sent,
-                "peer sync complete",
-            );
-            tracing::info!(target: "rete::test_event", event = "PEER_SYNC_COMPLETE", dest = %hex::encode(dest_hash), messages_sent);
+            }.emit();
         }
-        LxmfEvent::PeerOfferReceived {
-            link_id,
-            request_id,
-            response_data,
-        } => {
-            tracing::info!(
-                link = %hex::encode(link_id),
-                response_len = response_data.len(),
-                "peer offer received",
-            );
-            tracing::info!(target: "rete::test_event", event = "PEER_OFFER_RECEIVED", link = %hex::encode(link_id));
+        LxmfEvent::PeerOfferReceived { link_id, request_id, response_data } => {
+            ReteEvent::PeerOfferReceived {
+                link: hex::encode(link_id),
+            }.emit();
 
-            // Send the response back
             if let Ok(pkt) = core.send_response(&link_id, &request_id, &response_data, rng) {
-                flush_stdout();
                 return vec![pkt];
             }
         }
-        LxmfEvent::MessageDelivered {
-            message_hash,
-            dest_hash,
-        } => {
-            tracing::info!(target: "rete::test_event", event = "LXMF_DELIVERED", msg_hash = %hex::encode(&message_hash[..8]), dest = %hex::encode(dest_hash));
-            tracing::info!(
-                msg_hash = %hex::encode(&message_hash[..8]),
-                dest = %hex::encode(dest_hash),
-                "message delivered",
-            );
+        LxmfEvent::MessageDelivered { message_hash, dest_hash } => {
+            ReteEvent::LxmfDelivered {
+                msg_hash: hex::encode(&message_hash[..8]),
+                dest: hex::encode(dest_hash),
+            }.emit();
         }
-        LxmfEvent::MessageFailed {
-            message_hash,
-            dest_hash,
-        } => {
-            tracing::info!(target: "rete::test_event", event = "LXMF_FAILED", msg_hash = %hex::encode(&message_hash[..8]), dest = %hex::encode(dest_hash));
-            tracing::error!(
-                msg_hash = %hex::encode(&message_hash[..8]),
-                dest = %hex::encode(dest_hash),
-                "message failed",
-            );
+        LxmfEvent::MessageFailed { message_hash, dest_hash } => {
+            ReteEvent::LxmfFailed {
+                msg_hash: hex::encode(&message_hash[..8]),
+                dest: hex::encode(dest_hash),
+            }.emit();
         }
-        LxmfEvent::MessageRejectedStamp {
-            source_hash,
-            message_hash,
-        } => {
-            tracing::info!(target: "rete::test_event", event = "LXMF_REJECTED_STAMP", source = %hex::encode(source_hash), msg_hash = %hex::encode(&message_hash[..8]));
-            tracing::warn!(
-                source = %hex::encode(source_hash),
-                msg_hash = %hex::encode(&message_hash[..8]),
-                "message rejected (invalid stamp)",
-            );
+        LxmfEvent::MessageRejectedStamp { source_hash, message_hash } => {
+            ReteEvent::LxmfRejectedStamp {
+                source: hex::encode(source_hash),
+                msg_hash: hex::encode(&message_hash[..8]),
+            }.emit();
         }
         LxmfEvent::Other(event) => {
-            // Check if this is a link event that advances a forward or sync job
             match &event {
                 NodeEvent::LinkEstablished { link_id } => {
                     // Try forward jobs
@@ -261,12 +194,9 @@ pub fn on_event(
                         .borrow_mut()
                         .advance_forward_on_link_established(link_id, core, rng);
                     if !pkts.is_empty() {
-                        tracing::info!(
-                            link = %hex::encode(link_id),
-                            pkts = pkts.len(),
-                            "propagation forward sending",
-                        );
-                        tracing::info!(target: "rete::test_event", event = "PROP_FORWARD_SENDING", link = %hex::encode(link_id));
+                        ReteEvent::PropForwardSending {
+                            link: hex::encode(link_id),
+                        }.emit();
                         on_node_event(event);
                         return pkts;
                     }
@@ -283,10 +213,7 @@ pub fn on_event(
 
                     // Try sync jobs
                     let pkts = lxmf_router.borrow_mut().advance_sync_on_link_established(
-                        link_id,
-                        core,
-                        rng,
-                        rete_tokio::current_time_secs(),
+                        link_id, core, rng, rete_tokio::current_time_secs(),
                     );
                     if !pkts.is_empty() {
                         tracing::debug!(link = %hex::encode(link_id), "peer sync identifying");
@@ -294,10 +221,7 @@ pub fn on_event(
                         return pkts;
                     }
                 }
-                NodeEvent::ResponseReceived {
-                    link_id, ref data, ..
-                } => {
-                    // Advance sync job on offer response
+                NodeEvent::ResponseReceived { link_id, ref data, .. } => {
                     let now = rete_tokio::current_time_secs();
                     let pkts = lxmf_router
                         .borrow_mut()
@@ -308,12 +232,7 @@ pub fn on_event(
                         return pkts;
                     }
                 }
-                NodeEvent::ResourceComplete {
-                    link_id,
-                    resource_hash,
-                    ref data,
-                } => {
-                    // Try advancing forward jobs first
+                NodeEvent::ResourceComplete { link_id, resource_hash, ref data } => {
                     let pkts = lxmf_router
                         .borrow_mut()
                         .advance_forward_on_resource_complete(link_id, resource_hash, core, rng);
@@ -322,56 +241,40 @@ pub fn on_event(
                         return pkts;
                     }
 
-                    // Try advancing retrieval jobs
                     let pkts = lxmf_router
                         .borrow_mut()
                         .advance_retrieval_on_resource_complete(link_id, resource_hash, core, rng);
                     if !pkts.is_empty() {
-                        tracing::info!(
-                            link = %hex::encode(link_id),
-                            pkts = pkts.len(),
-                            "propagation retrieval sending",
-                        );
-                        tracing::info!(target: "rete::test_event", event = "PROP_RETRIEVAL_SENDING", link = %hex::encode(link_id));
+                        ReteEvent::PropRetrievalSending {
+                            link: hex::encode(link_id),
+                        }.emit();
                         on_node_event(event);
                         return pkts;
                     }
 
-                    // Try advancing sync jobs (outbound)
                     let now = rete_tokio::current_time_secs();
                     let (pkts, sync_event) = lxmf_router
                         .borrow_mut()
                         .advance_sync_on_resource_complete(link_id, core, rng, now);
                     if let Some(evt) = sync_event {
-                        match &evt {
-                            LxmfEvent::PeerSyncComplete {
-                                dest_hash,
-                                messages_sent,
-                            } => {
-                                tracing::info!(
-                                    dest = %hex::encode(dest_hash),
-                                    messages_sent,
-                                    "peer sync complete",
-                                );
-                                tracing::info!(target: "rete::test_event", event = "PEER_SYNC_COMPLETE", dest = %hex::encode(dest_hash), messages_sent);
-                            }
-                            _ => {}
+                        if let LxmfEvent::PeerSyncComplete { dest_hash, messages_sent } = &evt {
+                            ReteEvent::PeerSyncComplete {
+                                dest: hex::encode(dest_hash),
+                                messages_sent: *messages_sent,
+                            }.emit();
                         }
                         on_node_event(event);
                         return pkts;
                     }
 
-                    // Try depositing as inbound sync resource
                     if lxmf_router.borrow().has_sync_job_for_link(link_id) {
                         let deposited = lxmf_router.borrow_mut().deposit_sync_resource(data, now);
                         if !deposited.is_empty() {
                             for (dest, hash) in &deposited {
-                                tracing::info!(
-                                    dest = %hex::encode(dest),
-                                    msg_hash = %hex::encode(hash),
-                                    "peer sync deposit",
-                                );
-                                tracing::info!(target: "rete::test_event", event = "PEER_SYNC_DEPOSIT", dest = %hex::encode(dest), msg_hash = %hex::encode(hash));
+                                ReteEvent::PeerSyncDeposit {
+                                    dest: hex::encode(dest),
+                                    msg_hash: hex::encode(hash),
+                                }.emit();
                             }
                             on_node_event(event);
                             return Vec::new();
@@ -379,234 +282,136 @@ pub fn on_event(
                     }
                 }
                 NodeEvent::LinkClosed { link_id } => {
-                    lxmf_router
-                        .borrow_mut()
-                        .cleanup_forward_jobs_for_link(link_id);
+                    lxmf_router.borrow_mut().cleanup_forward_jobs_for_link(link_id);
                     lxmf_router.borrow_mut().cleanup_sync_jobs_for_link(link_id);
                 }
                 _ => {}
             }
-            // Fall through to normal event handling
             on_node_event(event);
         }
     }
-    // Flush stdout so piped readers see LXMF output immediately.
-    flush_stdout();
     Vec::new()
 }
 
 pub fn on_node_event(event: NodeEvent) {
     match event {
-        NodeEvent::AnnounceReceived {
-            dest_hash,
-            identity_hash,
-            hops,
-            app_data,
-        } => {
-            tracing::info!(
-                dest = %hex::encode(dest_hash),
-                identity = %hex::encode(identity_hash),
+        NodeEvent::AnnounceReceived { dest_hash, identity_hash, hops, app_data } => {
+            ReteEvent::Announce {
+                dest: hex::encode(dest_hash),
+                identity: hex::encode(identity_hash),
                 hops,
-                app_data = app_data
-                    .as_ref()
-                    .map(|d| {
-                        match std::str::from_utf8(d) {
-                            Ok(s) => s.to_string(),
-                            Err(_) => hex::encode(d),
-                        }
-                    })
-                    .as_deref(),
-                "announce received",
-            );
-            if let Some(ref ad) = app_data {
-                tracing::info!(target: "rete::test_event", event = "ANNOUNCE", dest = %hex::encode(dest_hash), identity = %hex::encode(identity_hash), hops, app_data = %hex::encode(ad));
-            } else {
-                tracing::info!(target: "rete::test_event", event = "ANNOUNCE", dest = %hex::encode(dest_hash), identity = %hex::encode(identity_hash), hops);
-            }
+                app_data: app_data.as_ref().map(|d| hex::encode(d)),
+            }.emit();
         }
         NodeEvent::DataReceived { dest_hash, payload } => {
-            match std::str::from_utf8(&payload) {
-                Ok(text) => {
-                    tracing::info!(
-                        dest = %hex::encode(dest_hash),
-                        len = payload.len(),
-                        %text,
-                        "data received",
-                    );
-                    tracing::info!(target: "rete::test_event", event = "DATA", dest = %hex::encode(dest_hash), payload = %text);
-                }
-                Err(_) => {
-                    tracing::info!(
-                        dest = %hex::encode(dest_hash),
-                        len = payload.len(),
-                        hex = %hex::encode(&payload),
-                        "data received",
-                    );
-                    tracing::info!(target: "rete::test_event", event = "DATA", dest = %hex::encode(dest_hash), payload = %hex::encode(&payload));
-                }
-            }
+            let payload_str = match std::str::from_utf8(&payload) {
+                Ok(text) => text.to_string(),
+                Err(_) => hex::encode(&payload),
+            };
+            ReteEvent::Data {
+                dest: hex::encode(dest_hash),
+                payload: payload_str,
+            }.emit();
         }
         NodeEvent::ProofReceived { packet_hash } => {
-            tracing::info!(
-                packet_hash = %hex::encode(packet_hash),
-                "proof received",
-            );
-            tracing::info!(target: "rete::test_event", event = "PROOF_RECEIVED", packet_hash = %hex::encode(packet_hash));
+            ReteEvent::ProofReceived {
+                packet_hash: hex::encode(packet_hash),
+            }.emit();
         }
         NodeEvent::LinkEstablished { link_id } => {
-            tracing::info!(link = %hex::encode(link_id), "link established");
-            tracing::info!(target: "rete::test_event", event = "LINK_ESTABLISHED", link = %hex::encode(link_id));
+            ReteEvent::LinkEstablished {
+                link: hex::encode(link_id),
+            }.emit();
         }
-        NodeEvent::LinkData {
-            link_id,
-            data,
-            context,
-        } => {
-            tracing::debug!(
-                link = %hex::encode(link_id),
-                context = format_args!("{:#04x}", context),
-                len = data.len(),
-                "link data received",
-            );
-            match std::str::from_utf8(&data) {
-                Ok(text) => tracing::info!(target: "rete::test_event", event = "LINK_DATA", link = %hex::encode(link_id), payload = %text),
-                Err(_) => tracing::info!(target: "rete::test_event", event = "LINK_DATA", link = %hex::encode(link_id), payload = %hex::encode(&data)),
-            }
+        NodeEvent::LinkData { link_id, data, .. } => {
+            let payload = match std::str::from_utf8(&data) {
+                Ok(text) => text.to_string(),
+                Err(_) => hex::encode(&data),
+            };
+            ReteEvent::LinkData {
+                link: hex::encode(link_id),
+                payload,
+            }.emit();
         }
         NodeEvent::ChannelMessages { link_id, messages } => {
-            tracing::debug!(
-                link = %hex::encode(link_id),
-                count = messages.len(),
-                "channel messages received",
-            );
             for (msg_type, payload) in &messages {
-                tracing::debug!(msg_type = format_args!("0x{:04x}", msg_type), len = payload.len(), "channel message");
-                match std::str::from_utf8(payload) {
-                    Ok(text) => tracing::info!(target: "rete::test_event", event = "CHANNEL_MSG", link = %hex::encode(link_id), msg_type = format_args!("{:#06x}", msg_type), payload = %text),
-                    Err(_) => tracing::info!(target: "rete::test_event", event = "CHANNEL_MSG", link = %hex::encode(link_id), msg_type = format_args!("{:#06x}", msg_type), payload = %hex::encode(payload)),
-                }
+                let payload_str = match std::str::from_utf8(payload) {
+                    Ok(text) => text.to_string(),
+                    Err(_) => hex::encode(payload),
+                };
+                ReteEvent::ChannelMsg {
+                    link: hex::encode(link_id),
+                    msg_type: format!("{:#06x}", msg_type),
+                    payload: payload_str,
+                }.emit();
             }
         }
-        NodeEvent::RequestReceived {
-            link_id,
-            request_id,
-            path_hash,
-            data,
-        } => {
-            tracing::info!(
-                link = %hex::encode(link_id),
-                request_id = %hex::encode(request_id),
-                path_hash = %hex::encode(path_hash),
-                data_len = data.len(),
-                "request received",
-            );
-            tracing::info!(target: "rete::test_event", event = "REQUEST_RECEIVED", link = %hex::encode(link_id), request_id = %hex::encode(request_id), path_hash = %hex::encode(path_hash), data_len = data.len());
+        NodeEvent::RequestReceived { link_id, request_id, path_hash, data } => {
+            ReteEvent::RequestReceived {
+                link: hex::encode(link_id),
+                request_id: hex::encode(request_id),
+                path_hash: hex::encode(path_hash),
+                data_len: data.len(),
+            }.emit();
         }
-        NodeEvent::ResponseReceived {
-            link_id,
-            request_id,
-            data,
-        } => {
-            tracing::info!(
-                link = %hex::encode(link_id),
-                request_id = %hex::encode(request_id),
-                data_len = data.len(),
-                "response received",
-            );
-            tracing::info!(target: "rete::test_event", event = "RESPONSE_RECEIVED", link = %hex::encode(link_id), request_id = %hex::encode(request_id), data_len = data.len());
+        NodeEvent::ResponseReceived { link_id, request_id, data } => {
+            ReteEvent::ResponseReceived {
+                link: hex::encode(link_id),
+                request_id: hex::encode(request_id),
+                data_len: data.len(),
+            }.emit();
         }
         NodeEvent::LinkClosed { link_id } => {
-            tracing::info!(link = %hex::encode(link_id), "link closed");
-            tracing::info!(target: "rete::test_event", event = "LINK_CLOSED", link = %hex::encode(link_id));
+            ReteEvent::LinkClosed {
+                link: hex::encode(link_id),
+            }.emit();
         }
-        NodeEvent::ResourceOffered {
-            link_id,
-            resource_hash,
-            total_size,
-        } => {
-            tracing::info!(
-                link = %hex::encode(link_id),
-                resource_hash = %hex::encode(resource_hash),
+        NodeEvent::ResourceOffered { link_id, resource_hash, total_size } => {
+            ReteEvent::ResourceOffered {
+                link: hex::encode(link_id),
+                resource_hash: hex::encode(resource_hash),
                 total_size,
-                "resource offered",
-            );
-            tracing::info!(target: "rete::test_event", event = "RESOURCE_OFFERED", link = %hex::encode(link_id), resource_hash = %hex::encode(resource_hash), total_size);
-            tracing::debug!("RESOURCE_OFFERED event processed");
+            }.emit();
         }
-        NodeEvent::ResourceProgress {
-            link_id,
-            resource_hash,
-            current,
-            total,
-        } => {
-            tracing::debug!(
-                link = %hex::encode(link_id),
-                resource_hash = %hex::encode(resource_hash),
-                current,
-                total,
-                "resource progress",
-            );
+        NodeEvent::ResourceProgress { .. } => {
+            // Debug-level only, not a structured event
         }
-        NodeEvent::ResourceComplete {
-            link_id,
-            resource_hash,
-            ref data,
-        } => {
-            let data_display = match std::str::from_utf8(data) {
+        NodeEvent::ResourceComplete { link_id, resource_hash, ref data } => {
+            let payload = match std::str::from_utf8(data) {
                 Ok(text) => text.to_string(),
                 Err(_) => hex::encode(data),
             };
-            tracing::info!(
-                link = %hex::encode(link_id),
-                resource_hash = %hex::encode(resource_hash),
-                len = data.len(),
-                "resource complete",
-            );
-            tracing::info!(target: "rete::test_event", event = "RESOURCE_COMPLETE", link = %hex::encode(link_id), resource_hash = %hex::encode(resource_hash), payload = %data_display);
+            ReteEvent::ResourceComplete {
+                link: hex::encode(link_id),
+                resource_hash: hex::encode(resource_hash),
+                payload,
+            }.emit();
         }
-        NodeEvent::ResourceFailed {
-            link_id,
-            resource_hash,
-        } => {
-            tracing::error!(
-                link = %hex::encode(link_id),
-                resource_hash = %hex::encode(resource_hash),
-                "resource failed",
-            );
-            tracing::info!(target: "rete::test_event", event = "RESOURCE_FAILED", link = %hex::encode(link_id), resource_hash = %hex::encode(resource_hash));
+        NodeEvent::ResourceFailed { link_id, resource_hash } => {
+            ReteEvent::ResourceFailed {
+                link: hex::encode(link_id),
+                resource_hash: hex::encode(resource_hash),
+            }.emit();
+        }
+        NodeEvent::ResourceRejected { link_id, resource_hash } => {
+            ReteEvent::ResourceRejected {
+                link: hex::encode(link_id),
+                resource_hash: hex::encode(resource_hash),
+            }.emit();
         }
         NodeEvent::Tick { expired_paths, .. } => {
             if expired_paths > 0 {
                 tracing::debug!(expired_paths, "tick: expired paths");
             }
         }
-        NodeEvent::LinkIdentified {
-            link_id,
-            identity_hash,
-            ..
-        } => {
+        NodeEvent::LinkIdentified { link_id, identity_hash, .. } => {
             tracing::debug!(
                 link = %hex::encode(&link_id.as_bytes()[..4]),
                 peer = %hex::encode(&identity_hash.as_bytes()[..4]),
                 "link identified",
             );
         }
-        NodeEvent::ResourceRejected {
-            link_id,
-            resource_hash,
-        } => {
-            tracing::warn!(
-                link = %hex::encode(&link_id.as_bytes()[..4]),
-                resource_hash = %hex::encode(&resource_hash[..4]),
-                "resource rejected",
-            );
-            tracing::info!(target: "rete::test_event", event = "RESOURCE_REJECTED", link = %hex::encode(link_id), resource_hash = %hex::encode(resource_hash));
-        }
-        NodeEvent::RequestFailed {
-            link_id,
-            request_id,
-            reason,
-        } => {
+        NodeEvent::RequestFailed { link_id, request_id, reason } => {
             tracing::error!(
                 link = %hex::encode(&link_id.as_bytes()[..4]),
                 request_id = %hex::encode(&request_id.as_bytes()[..4]),
@@ -614,23 +419,10 @@ pub fn on_node_event(event: NodeEvent) {
                 "request failed",
             );
         }
-        NodeEvent::RequestProgress {
-            link_id,
-            request_id,
-            current,
-            total,
-        } => {
-            tracing::debug!(
-                link = %hex::encode(&link_id.as_bytes()[..4]),
-                request_id = %hex::encode(&request_id.as_bytes()[..4]),
-                current,
-                total,
-                "request progress",
-            );
+        NodeEvent::RequestProgress { .. } => {
+            // Debug-level only, not a structured event
         }
     }
-    // Flush stdout so piped readers (test harnesses) see output immediately.
-    flush_stdout();
 }
 
 pub fn handle_lxmf_command(
@@ -640,10 +432,7 @@ pub fn handle_lxmf_command(
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
 ) -> Option<Vec<OutboundPacket>> {
     let NodeCommand::AppCommand {
-        name,
-        dest_hash,
-        link_id: _,
-        payload,
+        name, dest_hash, link_id: _, payload,
     } = cmd
     else {
         return None;
@@ -654,10 +443,7 @@ pub fn handle_lxmf_command(
             let now = rete_tokio::current_time_secs();
             let stats = core.stats(now);
             match serde_json::to_string(&stats) {
-                Ok(json) => {
-                    tracing::info!(target: "rete::test_event", event = "STATS", payload = %json);
-                    flush_stdout();
-                }
+                Ok(json) => ReteEvent::Stats { payload: json }.emit(),
                 Err(e) => tracing::error!(error = %e, "stats: serialize error"),
             }
             None
@@ -671,11 +457,8 @@ pub fn handle_lxmf_command(
             let mut router = lxmf_router.borrow_mut();
             let source_hash = *router.delivery_dest_hash();
             let msg = match LXMessage::new(
-                dest_hash,
-                source_hash,
-                core.identity(),
-                b"",
-                &payload,
+                dest_hash, source_hash, core.identity(),
+                b"", &payload,
                 std::collections::BTreeMap::new(),
                 now_secs as f64,
             ) {
@@ -686,15 +469,10 @@ pub fn handle_lxmf_command(
                 }
             };
 
-            let message_hash = router.handle_outbound(msg, now_secs, rng);
-            tracing::info!(
-                dest = %hex::encode(dest_hash),
-                msg_hash = %hex::encode(&message_hash[..8]),
-                "LXMF queued",
-            );
-            tracing::info!(target: "rete::test_event", event = "LXMF_SENT", dest = %hex::encode(dest_hash));
-            flush_stdout();
-            // The actual send happens in process_outbound on next tick
+            let _message_hash = router.handle_outbound(msg, now_secs, rng);
+            ReteEvent::LxmfSent {
+                dest: hex::encode(dest_hash),
+            }.emit();
             None
         }
         "lxmf-announce" => {
@@ -723,9 +501,4 @@ pub fn handle_lxmf_command(
             None
         }
     }
-}
-
-fn flush_stdout() {
-    use std::io::Write;
-    std::io::stdout().flush().ok();
 }

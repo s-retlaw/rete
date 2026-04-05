@@ -13,7 +13,6 @@ use rete_stack::OutboundPacket;
 use rete_tokio::hub::ClientEvent;
 use rete_tokio::{InterfaceSlot, NodeCommand, NodeEvent, TokioNode};
 
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -240,8 +239,7 @@ impl SharedDaemonBuilder {
             }
         };
 
-        tracing::info!(target: "rete::test_event", event = "DAEMON_READY");
-        let _ = std::io::stdout().flush();
+        crate::rete_event::ReteEvent::DaemonReady.emit();
 
         let daemon = SharedDaemon {
             cmd_tx: cmd_tx.clone(),
@@ -351,8 +349,7 @@ impl SharedDaemonBuilder {
                     }
                 }
 
-                tracing::info!(target: "rete::test_event", event = "DAEMON_SHUTDOWN");
-                let _ = std::io::stdout().flush();
+                crate::rete_event::ReteEvent::DaemonShutdown.emit();
             }),
         };
 

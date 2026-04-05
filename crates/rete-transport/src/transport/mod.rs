@@ -11,7 +11,7 @@ pub use resource::ResourceOptions;
 macro_rules! relay_log {
     ($($arg:tt)*) => {
         #[cfg(feature = "relay-debug")]
-        tracing::debug!($($arg)*);
+        tracing::trace!($($arg)*);
     };
 }
 

@@ -364,8 +364,16 @@ test-all:
     #!/usr/bin/env bash
     set -o pipefail
 
-    # --- Build rete-linux upfront (E2E interop tests need it) ---
-    echo "Building..."
+    # --- Unit tests first (may recompile crates without test-output feature) ---
+    UNIT_OUTPUT=$(cargo test --workspace 2>&1)
+    UNIT_RC=$?
+    echo "$UNIT_OUTPUT"
+
+    # --- Rebuild binaries WITH test-output after cargo test ---
+    # cargo test --workspace recompiles libs without test-output, clobbering
+    # any previously-built binaries.  Rebuild both here.
+    echo ""
+    echo "Rebuilding E2E binaries with test-output..."
     cargo build -p rete-example-linux --features test-output 2>&1
     echo ""
 
@@ -373,11 +381,6 @@ test-all:
     docker container prune -f 2>/dev/null || true
     docker image prune -f 2>/dev/null || true
     echo ""
-
-    # --- Unit tests ---
-    UNIT_OUTPUT=$(cargo test --workspace 2>&1)
-    UNIT_RC=$?
-    echo "$UNIT_OUTPUT"
 
     # Parse unit results
     UNIT_PASS=0; UNIT_FAIL=0; UNIT_IGN=0; UNIT_SUITES=""

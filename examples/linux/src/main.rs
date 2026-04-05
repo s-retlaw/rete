@@ -43,8 +43,28 @@ const DEFAULT_ADDR: &str = "127.0.0.1:4242";
 const APP_NAME: &str = "rete";
 const ASPECTS: &[&str] = &["example", "v1"];
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Debug builds materialise large structs (TokioNode, LxmfRouter) on the
+    // stack before moving to the heap.  The default 8 MB thread stack can
+    // overflow, so we run on a thread with 16 MB stack.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()
+                .unwrap()
+                .block_on(async_main())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn async_main() {
+    // init_tracing installs the tracing subscriber (stderr + TestEventLayer).
+    // Temporarily testing: skip it to see if tracing overhead causes resource failures.
     rete_daemon::init_tracing();
     let args: Vec<String> = std::env::args().collect();
 
@@ -152,7 +172,9 @@ async fn main() {
 
     tracing::info!("destination hash: {}", hex::encode(node.core.dest_hash()));
     // Emit structured test event for interop test discovery.
-    tracing::info!(target: "rete::test_event", event = "IDENTITY", hash = %hex::encode(node.core.dest_hash()));
+    rete_daemon::rete_event::ReteEvent::Identity {
+        hash: hex::encode(node.core.dest_hash()),
+    }.emit();
 
     // Register /test/echo request handler
     {
@@ -397,7 +419,7 @@ async fn main() {
             tracing::info!("final snapshot saved ({} paths, {} identities)", snap.paths.len(), snap.identities.len());
         }
     }
-    tracing::info!(target: "rete::test_event", event = "SHUTDOWN_COMPLETE");
+    rete_daemon::rete_event::ReteEvent::ShutdownComplete.emit();
     // Force exit to avoid blocking on the stdin reader thread.
     std::process::exit(0);
 }

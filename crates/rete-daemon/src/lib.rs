@@ -17,42 +17,26 @@ pub mod file_store;
 pub mod identity;
 pub mod monitoring;
 pub mod pickle;
+pub mod rete_event;
 pub mod session;
-pub mod test_subscriber;
-
-/// Target string for structured test protocol events.
-///
-/// Tracing events emitted with this target are captured by
-/// [`test_subscriber::TestEventLayer`] and formatted as `EVENT:field1:field2`
-/// lines on stdout for the Python E2E test harness.
-pub const TEST_EVENT_TARGET: &str = "rete::test_event";
+pub mod subscriber;
 
 /// Initialize the tracing subscriber for hosted binaries.
 ///
-/// Installs a stderr formatter (no ANSI, filterable via `RUST_LOG`) and,
-/// when the `test-output` feature is enabled, adds the [`TestEventLayer`]
-/// that writes structured test protocol events to stdout.
+/// Installs a lightweight stderr subscriber filtered by `RUST_LOG` env var
+/// (default: `info`).  Test protocol output goes directly to stdout via
+/// [`rete_event::ReteEvent::emit`], not through the subscriber.
 pub fn init_tracing() {
-    use tracing_subscriber::prelude::*;
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .with_ansi(false);
-    #[cfg(feature = "test-output")]
-    let subscriber = tracing_subscriber::registry()
-        .with(
-            stderr_layer.with_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "rete=info".parse().unwrap()),
-            ),
-        )
-        .with(test_subscriber::TestEventLayer);
-    #[cfg(not(feature = "test-output"))]
-    let subscriber = tracing_subscriber::registry().with(
-        stderr_layer.with_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rete=info".parse().unwrap()),
-        ),
-    );
-    tracing::subscriber::set_global_default(subscriber).ok();
+    let level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "trace" => Some(tracing::Level::TRACE),
+            "debug" => Some(tracing::Level::DEBUG),
+            "info" => Some(tracing::Level::INFO),
+            "warn" | "warning" => Some(tracing::Level::WARN),
+            "error" => Some(tracing::Level::ERROR),
+            _ => None,
+        })
+        .unwrap_or(tracing::Level::INFO);
+    tracing::subscriber::set_global_default(subscriber::ReteSubscriber::new(level)).ok();
 }

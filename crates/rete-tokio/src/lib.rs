@@ -450,7 +450,12 @@ impl TokioNode {
                     tracing::warn!("initial send failed: {:?}", e);
                 } else {
                     tracing::debug!("sent initial DATA to {}: {}", hex::encode(dest), String::from_utf8_lossy(&data));
-                    tracing::info!(target: "rete::test_event", event = "DATA_SENT", dest = %hex::encode(dest), payload = %String::from_utf8_lossy(&data));
+                    // Test protocol — direct stdout (rete-tokio can't use ReteEvent).
+                    println!("DATA_SENT:{}:{}", hex::encode(dest), String::from_utf8_lossy(&data));
+                    {
+                        use std::io::Write as _;
+                        std::io::stdout().flush().ok();
+                    }
                 }
             } else {
                 tracing::warn!("initial send failed: peer not registered");
