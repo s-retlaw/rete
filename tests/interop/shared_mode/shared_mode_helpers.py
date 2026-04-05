@@ -936,3 +936,139 @@ def parse_args():
     parser.add_argument("--rust-binary", default=DEFAULT_RUST_BINARY)
     parser.add_argument("--timeout", type=int, default=30)
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Robustness / soak helpers
+# ---------------------------------------------------------------------------
+
+def raw_tcp_connect(host, port):
+    """Open a raw TCP socket (no HDLC, no auth). Returns socket object."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect((host, port))
+    return s
+
+
+def raw_unix_connect(socket_path):
+    """Open a raw Unix domain socket. Returns socket object."""
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(socket_path)
+    return s
+
+
+def get_rss_kb(pid):
+    """Read VmRSS from /proc/{pid}/status. Returns KB or None."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (FileNotFoundError, PermissionError, ValueError):
+        return None
+    return None
+
+
+def start_python_rnsd(data_dir, instance_type="unix", port=None,
+                      control_port=None, timeout_secs=10):
+    """Start Python rnsd and wait for it to be ready.
+
+    Returns the subprocess.Popen object.
+    Raises RuntimeError if rnsd fails to start within timeout_secs.
+    """
+    config_dir = os.path.join(data_dir, "rnsd_config")
+    os.makedirs(config_dir, exist_ok=True)
+
+    # Write rnsd config
+    config_path = os.path.join(config_dir, "config")
+    if instance_type == "unix":
+        content = (
+            "[reticulum]\n"
+            "  share_instance = Yes\n"
+            "  enable_transport = Yes\n"
+        )
+    else:
+        data_port = port or 37428
+        ctrl_port = control_port or 37429
+        content = (
+            f"[reticulum]\n"
+            f"  share_instance = Yes\n"
+            f"  shared_instance_type = tcp\n"
+            f"  shared_instance_port = {data_port}\n"
+            f"  instance_control_port = {ctrl_port}\n"
+            f"  enable_transport = Yes\n"
+        )
+    with open(config_path, "w") as f:
+        f.write(content)
+
+    cmd = [sys.executable, "-m", "RNS.Utilities.rnsd", "--config", config_dir]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # rnsd doesn't emit a ready marker — wait for the socket/port to become
+    # available.
+    import socket as _socket
+    deadline = time.monotonic() + timeout_secs
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            _, stderr = proc.communicate()
+            raise RuntimeError(
+                f"rnsd exited early (rc={proc.returncode}): "
+                f"{stderr.decode(errors='replace')[-500:]}"
+            )
+        try:
+            if instance_type == "unix":
+                # Check for abstract socket
+                s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                s.settimeout(1)
+                s.connect("\0rns/default")
+                s.close()
+                return proc
+            else:
+                s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                s.settimeout(1)
+                s.connect(("127.0.0.1", data_port))
+                s.close()
+                return proc
+        except (ConnectionRefusedError, FileNotFoundError, OSError):
+            time.sleep(0.3)
+
+    proc.kill()
+    proc.wait()
+    raise RuntimeError(f"rnsd did not become ready within {timeout_secs}s")
+
+
+def daemon_is_alive(proc):
+    """Check if a daemon process is still running."""
+    return proc.poll() is None
+
+
+def read_wire_message(s):
+    """Read a 4-byte big-endian length-prefixed message from a socket."""
+    import struct
+    hdr = b""
+    while len(hdr) < 4:
+        chunk = s.recv(4 - len(hdr))
+        if not chunk:
+            raise ConnectionError("EOF")
+        hdr += chunk
+    length = struct.unpack(">I", hdr)[0]
+    data = b""
+    while len(data) < length:
+        chunk = s.recv(length - len(data))
+        if not chunk:
+            raise ConnectionError("EOF")
+        data += chunk
+    return data
+
+
+def write_wire_message(s, payload):
+    """Write a 4-byte big-endian length-prefixed message to a socket."""
+    import struct
+    s.sendall(struct.pack(">I", len(payload)) + payload)

@@ -70,7 +70,22 @@ TCP_TESTS = [
     "tcp/lxmf_propagation.py",
 ]
 
-ALL_TESTS = UNIX_TESTS + TCP_TESTS
+ROBUSTNESS_TESTS = [
+    "unix/robustness.py",
+    "tcp/robustness.py",
+]
+
+SOAK_TESTS = [
+    "unix/soak.py",
+    "tcp/soak.py",
+]
+
+CUTOVER_TESTS = [
+    "unix/cutover.py",
+    "tcp/cutover.py",
+]
+
+ALL_TESTS = UNIX_TESTS + TCP_TESTS + ROBUSTNESS_TESTS + SOAK_TESTS + CUTOVER_TESTS
 
 # ---------------------------------------------------------------------------
 # Docker helpers
@@ -142,7 +157,8 @@ def run_test(test_path, rust_binary, timeout=120):
 def main():
     parser = argparse.ArgumentParser(description="Run shared-mode E2E tests in Docker containers")
     parser.add_argument("test", nargs="?", help="Test file relative to shared_mode/ (e.g. unix/announce.py)")
-    parser.add_argument("--suite", choices=["unix", "tcp"], help="Run all tests in a suite")
+    parser.add_argument("--suite", choices=["unix", "tcp", "robustness", "soak", "cutover"],
+                        help="Run all tests in a suite")
     parser.add_argument("--all", action="store_true", help="Run all tests")
     parser.add_argument("--rust-binary", default=_DEFAULT_BINARY, help="Path to rete-shared binary")
     parser.add_argument("--timeout", type=int, default=120, help="Per-test timeout in seconds")
@@ -155,6 +171,12 @@ def main():
         tests = UNIX_TESTS
     elif args.suite == "tcp":
         tests = TCP_TESTS
+    elif args.suite == "robustness":
+        tests = ROBUSTNESS_TESTS
+    elif args.suite == "soak":
+        tests = SOAK_TESTS
+    elif args.suite == "cutover":
+        tests = CUTOVER_TESTS
     elif args.test:
         tests = [args.test]
     else:
