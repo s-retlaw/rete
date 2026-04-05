@@ -9,11 +9,11 @@ pub mod tcp_server;
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    /// Run a test on a thread with 4 MB stack to avoid overflow from large
-    /// structs (HdlcDecoder, HostedTransport) in debug builds.
+    /// Run a test on a thread with 16 MB stack to avoid overflow from large
+    /// structs (TokioNode, HdlcDecoder) in debug builds.
     pub fn big_stack_test(f: fn()) {
         std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024)
+            .stack_size(16 * 1024 * 1024)
             .spawn(f)
             .unwrap()
             .join()

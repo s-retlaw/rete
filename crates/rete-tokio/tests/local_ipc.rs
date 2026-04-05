@@ -3,31 +3,15 @@
 //! Validates that a LocalServer correctly relays packets between
 //! LocalClient instances and the TokioNode transport layer.
 
-use rete_core::{Identity, Packet, PacketType, MTU};
+mod common;
+
+use common::{big_stack_test, make_node};
+use rete_core::{Packet, PacketType, MTU};
 use rete_stack::ReteInterface;
 use rete_tokio::local::{LocalClient, LocalServer};
-use rete_tokio::{InboundMsg, TokioNode};
+use rete_tokio::InboundMsg;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
-
-/// Run an async test on a thread with 16MB stack.
-///
-/// In debug builds `Box::new(T::new())` may materialise the struct on the
-/// stack before moving it to the heap, so we need a generous stack.
-fn big_stack_test(f: fn()) {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(f)
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-/// Box-allocate a TokioNode to avoid stack overflow.
-fn make_node(seed: &[u8]) -> Box<TokioNode> {
-    let identity = Identity::from_seed(seed).unwrap();
-    Box::new(TokioNode::new(identity, "rete", &["example", "v1"]).unwrap())
-}
 
 // ---------------------------------------------------------------------------
 // Test: two clients connected to a server with a running node. Client1 sends

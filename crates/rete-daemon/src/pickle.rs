@@ -3,8 +3,6 @@
 //! Only the ~20 opcodes observed in RNS shared-instance RPC traffic are
 //! implemented.  This is **not** a general-purpose pickle library.
 
-use std::collections::HashMap;
-
 // ── Pickle opcodes ──────────────────────────────────────────────────────────
 
 const PROTO: u8 = 0x80;
@@ -139,7 +137,7 @@ enum StackItem {
 pub fn decode(data: &[u8]) -> Result<PickleValue, DecodeError> {
     let mut pos = 0;
     let mut stack: Vec<StackItem> = Vec::new();
-    let mut memo: HashMap<usize, PickleValue> = HashMap::new();
+    let mut memo: Vec<Option<PickleValue>> = Vec::new();
     let mut memo_counter: usize = 0;
 
     loop {
@@ -317,19 +315,22 @@ pub fn decode(data: &[u8]) -> Result<PickleValue, DecodeError> {
                 let idx = data[pos] as usize;
                 pos += 1;
                 if let Some(StackItem::Value(v)) = stack.last() {
-                    memo.insert(idx, v.clone());
+                    memo_set(&mut memo, idx, v.clone());
                 }
             }
             BINGET => {
                 need(data, pos, 1)?;
                 let idx = data[pos] as usize;
                 pos += 1;
-                let v = memo.get(&idx).ok_or(DecodeError::StackUnderflow)?.clone();
+                let v = memo.get(idx)
+                    .and_then(Option::as_ref)
+                    .ok_or(DecodeError::StackUnderflow)?
+                    .clone();
                 stack.push(StackItem::Value(v));
             }
             MEMOIZE => {
                 if let Some(StackItem::Value(v)) = stack.last() {
-                    memo.insert(memo_counter, v.clone());
+                    memo_set(&mut memo, memo_counter, v.clone());
                     memo_counter += 1;
                 }
             }
@@ -373,6 +374,13 @@ fn top_value_mut(stack: &mut [StackItem]) -> Result<&mut PickleValue, DecodeErro
     }
 }
 
+fn memo_set(memo: &mut Vec<Option<PickleValue>>, idx: usize, val: PickleValue) {
+    if memo.len() <= idx {
+        memo.resize_with(idx + 1, || None);
+    }
+    memo[idx] = Some(val);
+}
+
 fn pop_to_mark(stack: &mut Vec<StackItem>) -> Result<Vec<PickleValue>, DecodeError> {
     let mut items = Vec::new();
     loop {
@@ -393,7 +401,7 @@ fn pop_to_mark(stack: &mut Vec<StackItem>) -> Result<Vec<PickleValue>, DecodeErr
 pub fn encode(value: &PickleValue) -> Vec<u8> {
     let mut body = Vec::new();
     let mut memo_counter: usize = 0;
-    encode_value(value, &mut body, &mut memo_counter);
+    encode_value(value, &mut body, &mut memo_counter, PickleProto::V4);
     body.push(STOP);
 
     // Protocol 4 wraps in PROTO + FRAME header.
@@ -412,76 +420,24 @@ pub fn encode_proto2(value: &PickleValue) -> Vec<u8> {
     out.push(PROTO);
     out.push(2);
 
-    let mut memo_counter: u8 = 0;
-    encode_value_proto2(value, &mut out, &mut memo_counter);
+    let mut memo_counter: usize = 0;
+    encode_value(value, &mut out, &mut memo_counter, PickleProto::V2);
     out.push(STOP);
     out
 }
 
-fn encode_value(value: &PickleValue, out: &mut Vec<u8>, memo: &mut usize) {
-    match value {
-        PickleValue::None => out.push(NONE),
-        PickleValue::Bool(true) => out.push(NEWTRUE),
-        PickleValue::Bool(false) => out.push(NEWFALSE),
-        PickleValue::Int(n) => {
-            if *n >= 0 && *n <= 255 {
-                out.push(BININT1);
-                out.push(*n as u8);
-            } else {
-                out.push(BININT);
-                out.extend_from_slice(&(*n as i32).to_le_bytes());
-            }
-        }
-        PickleValue::Float(f) => {
-            out.push(BINFLOAT);
-            out.extend_from_slice(&f.to_be_bytes());
-        }
-        PickleValue::Bytes(b) => {
-            debug_assert!(b.len() <= 255, "SHORT_BINBYTES limited to 255 bytes");
-            out.push(SHORT_BINBYTES);
-            out.push(b.len() as u8);
-            out.extend_from_slice(b);
-        }
-        PickleValue::String(s) => {
-            debug_assert!(s.len() <= 255, "SHORT_BINUNICODE limited to 255 bytes");
-            out.push(SHORT_BINUNICODE);
-            out.push(s.len() as u8);
-            out.extend_from_slice(s.as_bytes());
-        }
-        PickleValue::List(items) => {
-            out.push(EMPTY_LIST);
-            out.push(MEMOIZE);
-            *memo += 1;
-            for item in items {
-                encode_value(item, out, memo);
-                out.push(APPEND);
-            }
-        }
-        PickleValue::Dict(pairs) => {
-            out.push(EMPTY_DICT);
-            out.push(MEMOIZE);
-            *memo += 1;
-            if !pairs.is_empty() {
-                out.push(MARK);
-                for (k, v) in pairs {
-                    encode_value(k, out, memo);
-                    encode_value(v, out, memo);
-                }
-                out.push(SETITEMS);
-            }
-        }
+#[derive(Clone, Copy)]
+enum PickleProto { V2, V4 }
+
+fn emit_memo(out: &mut Vec<u8>, memo: &mut usize, proto: PickleProto) {
+    match proto {
+        PickleProto::V4 => out.push(MEMOIZE),
+        PickleProto::V2 => { out.push(BINPUT); out.push(*memo as u8); }
     }
-    // Memoize strings and bytes (Python does this for dedup).
-    match value {
-        PickleValue::String(_) | PickleValue::Bytes(_) => {
-            out.push(MEMOIZE);
-            *memo += 1;
-        }
-        _ => {}
-    }
+    *memo += 1;
 }
 
-fn encode_value_proto2(value: &PickleValue, out: &mut Vec<u8>, memo: &mut u8) {
+fn encode_value(value: &PickleValue, out: &mut Vec<u8>, memo: &mut usize, proto: PickleProto) {
     match value {
         PickleValue::None => out.push(NONE),
         PickleValue::Bool(true) => out.push(NEWTRUE),
@@ -506,37 +462,57 @@ fn encode_value_proto2(value: &PickleValue, out: &mut Vec<u8>, memo: &mut u8) {
             out.extend_from_slice(b);
         }
         PickleValue::String(s) => {
-            out.push(BINUNICODE);
-            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            out.extend_from_slice(s.as_bytes());
-        }
-        PickleValue::Dict(pairs) => {
-            out.push(EMPTY_DICT);
-            out.push(BINPUT);
-            out.push(*memo);
-            *memo += 1;
-            for (k, v) in pairs {
-                encode_value_proto2(k, out, memo);
-                encode_value_proto2(v, out, memo);
-                out.push(SETITEM);
+            match proto {
+                PickleProto::V4 => {
+                    debug_assert!(s.len() <= 255, "SHORT_BINUNICODE limited to 255 bytes");
+                    out.push(SHORT_BINUNICODE);
+                    out.push(s.len() as u8);
+                }
+                PickleProto::V2 => {
+                    out.push(BINUNICODE);
+                    out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                }
             }
+            out.extend_from_slice(s.as_bytes());
         }
         PickleValue::List(items) => {
             out.push(EMPTY_LIST);
-            out.push(BINPUT);
-            out.push(*memo);
-            *memo += 1;
+            emit_memo(out, memo, proto);
             for item in items {
-                encode_value_proto2(item, out, memo);
+                encode_value(item, out, memo, proto);
                 out.push(APPEND);
             }
         }
+        PickleValue::Dict(pairs) => {
+            out.push(EMPTY_DICT);
+            emit_memo(out, memo, proto);
+            match proto {
+                PickleProto::V4 if !pairs.is_empty() => {
+                    out.push(MARK);
+                    for (k, v) in pairs {
+                        encode_value(k, out, memo, proto);
+                        encode_value(v, out, memo, proto);
+                    }
+                    out.push(SETITEMS);
+                }
+                PickleProto::V2 => {
+                    for (k, v) in pairs {
+                        encode_value(k, out, memo, proto);
+                        encode_value(v, out, memo, proto);
+                        out.push(SETITEM);
+                    }
+                }
+                _ => {} // V4 with empty pairs — nothing to emit
+            }
+        }
     }
-    // Memoize strings (Python pickler does BINPUT after each string).
-    if matches!(value, PickleValue::String(_)) {
-        out.push(BINPUT);
-        out.push(*memo);
-        *memo += 1;
+    // Post-value memoization: V4 memoizes String+Bytes, V2 only String.
+    let should_memo = match proto {
+        PickleProto::V4 => matches!(value, PickleValue::String(_) | PickleValue::Bytes(_)),
+        PickleProto::V2 => matches!(value, PickleValue::String(_)),
+    };
+    if should_memo {
+        emit_memo(out, memo, proto);
     }
 }
 

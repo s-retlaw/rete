@@ -9,8 +9,11 @@
 //! Note: In debug builds `Box::new(T::new())` may materialise the struct on
 //! the stack before moving to heap, so tests run on a thread with enlarged stack.
 
+mod common;
+
+use common::{big_stack_test, make_node};
 use rete_core::{
-    DestType, HeaderType, Identity, Packet, PacketBuilder, PacketType, MTU,
+    DestType, HeaderType, Packet, PacketBuilder, PacketType, MTU,
     TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
 };
 use rete_tokio::{InboundMsg, InterfaceSlot, TokioNode};
@@ -52,12 +55,6 @@ fn build_header2_data(
     buf[..n].to_vec()
 }
 
-/// Box-allocate a TokioNode to avoid debug-build stack overflow.
-fn make_node(seed: &[u8]) -> Box<TokioNode> {
-    let identity = Identity::from_seed(seed).unwrap();
-    Box::new(TokioNode::new(identity, "rete", &["example", "v1"]).unwrap())
-}
-
 /// Run `run_multi` with prepared inbound messages and collect outbound per interface.
 async fn run_multi_with_inbound(
     node: &mut TokioNode,
@@ -94,19 +91,6 @@ async fn run_multi_with_inbound(
         result.push(packets);
     }
     result
-}
-
-/// Run an async test on a thread with 16MB stack.
-///
-/// In debug builds `Box::new(T::new())` may materialise the struct on the
-/// stack before moving it to the heap, so we need a generous stack.
-fn big_stack_test(f: fn()) {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(f)
-        .unwrap()
-        .join()
-        .unwrap();
 }
 
 // ---------------------------------------------------------------------------
