@@ -6,11 +6,11 @@ Topology:
 
 Tests that channel messages work through a relay when Python initiates a link
 to the Rust node through rnsd. Rust echoes channel messages back (esp32-test
-firmware behavior replicated by rete-linux's echo mode).
+firmware behavior replicated by rete's echo mode).
 
 Usage:
   cd tests/interop
-  uv run python channel_relay_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python channel_relay_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time

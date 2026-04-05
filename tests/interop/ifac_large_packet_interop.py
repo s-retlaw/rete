@@ -13,7 +13,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python ifac_large_packet_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python ifac_large_packet_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time

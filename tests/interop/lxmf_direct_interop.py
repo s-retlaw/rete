@@ -13,7 +13,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python lxmf_direct_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python lxmf_direct_interop.py --rust-binary ../../target/debug/rete
 
 Requires:
   pip install rns lxmf

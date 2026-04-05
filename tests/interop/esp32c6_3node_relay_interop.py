@@ -17,14 +17,14 @@
 #     [00:20:03] Released 1 link                              ← link_table gone
 #
 #   The reset happens during heavy announce retransmission traffic (ESP32
-#   re-announces every 10s, each retransmitted by rete-linux and rnsd).
+#   re-announces every 10s, each retransmitted by rete and rnsd).
 #   When rnsd tears down the old client interface on reconnect, it also
 #   releases the link_table entry that was routing link traffic.  After
 #   that, echo responses / request responses / resource data from ESP32
 #   can no longer be forwarded through rnsd to Python.
 #
 #   This is confirmed to NOT be a rete relay bug.  Full packet logging
-#   on rete-linux shows all link data (greeting, echo, keepalive) is
+#   on rete shows all link data (greeting, echo, keepalive) is
 #   correctly forwarded in both directions through the link_table.  The
 #   greeting (channel seq=0) arrives and is delivered to Python.  The
 #   failure only occurs after rnsd drops the link_table entry.
@@ -48,11 +48,11 @@
 #   timeout.  The serial interface is the bottleneck — all 4 links share
 #   a single UART.  This is not a relay logic bug.
 #
-"""ESP32-C6 3-node relay interop — Topology C (Python RNS <-> rete-linux relay <-> ESP32).
+"""ESP32-C6 3-node relay interop — Topology C (Python RNS <-> rete relay <-> ESP32).
 
 Tests multi-hop relay through the Rust node:
 
-  Python RNS <-TCP-> rnsd (transport) <-TCP-> rete-linux (--transport) <-serial-> ESP32
+  Python RNS <-TCP-> rnsd (transport) <-TCP-> rete (--transport) <-serial-> ESP32
 
 Phases:
   1. Announce propagation (ESP32 -> Python through relay)
@@ -69,7 +69,7 @@ Phases:
 Usage:
   cd tests/interop
   uv run python esp32c6_3node_relay_interop.py \
-      --rust-binary ../../target/debug/rete-linux \
+      --rust-binary ../../target/debug/rete \
       --serial-port /dev/ttyUSB0 --timeout 120
 """
 
@@ -109,7 +109,7 @@ def main():
         # 1. Start rnsd (transport relay)
         t.start_rnsd(port=RNSD_PORT)
 
-        # 2. Start Python RNS FIRST so it's connected to rnsd before rete-linux
+        # 2. Start Python RNS FIRST so it's connected to rnsd before rete
         #    sends the synthetic peer announce (which rnsd will forward to Python).
         py_tmpdir = tempfile.mkdtemp(prefix="rete_3node_py_")
         py_config_path = os.path.join(py_tmpdir, "config")
@@ -144,14 +144,14 @@ def main():
         except Exception as e:
             t._log(f"DTR reset skipped: {e}")
 
-        # 4. Start rete-linux with TCP + serial (multi-interface, transport mode).
+        # 4. Start rete with TCP + serial (multi-interface, transport mode).
         #    The real ESP32 announce propagates naturally.
         rust_lines = t.start_rust_dual(
             port=RNSD_PORT,
             extra_args=["--transport"],
         )
 
-        # Read rete-linux's own dest hash from stdout (for filtering during discovery)
+        # Read rete's own dest hash from stdout (for filtering during discovery)
         rust_dest_hex = t.wait_for_line(rust_lines, "IDENTITY:", timeout=10) or ""
         rust_dest_hash = bytes.fromhex(rust_dest_hex) if rust_dest_hex else None
         t._log(f"Rust transport dest hash: {rust_dest_hex}")
@@ -163,7 +163,7 @@ def main():
                                     APP_NAME, *ASPECTS)
 
         # Snapshot known non-ESP32 hashes BEFORE the ESP32 announce window.
-        # These are rnsd, rete-linux, and our own — exclude them during discovery.
+        # These are rnsd, rete, and our own — exclude them during discovery.
         exclude_hashes = set()
         exclude_hashes.add(our_dest.hash)
         if rust_dest_hash:
@@ -173,9 +173,9 @@ def main():
 
         # Wait for ESP32 announce to propagate: ESP32 re-announces when it
         # detects data on serial (idle-gap trigger in rete-embassy).
-        # Flow: ESP32 -> serial -> rete-linux -> TCP -> rnsd -> TCP -> Python
+        # Flow: ESP32 -> serial -> rete -> TCP -> rnsd -> TCP -> Python
         time.sleep(8.0)
-        t._log("rete-linux started, waiting for real ESP32 announce")
+        t._log("rete started, waiting for real ESP32 announce")
 
         # Discover ESP32 dynamically from path_table since ESP32 generates
         # a random identity on each boot.
@@ -209,12 +209,12 @@ def main():
             via_hex = via.hex() if via else "DIRECT"
             hops_val = path_entry[2] if len(path_entry) > 2 else "?"
             t._log(f"  path via={via_hex} hops={hops_val}")
-            t._log(f"  rete-linux identity = {rust_dest_hex}")
+            t._log(f"  rete identity = {rust_dest_hex}")
             if via and rust_dest_hex and via.hex() == rust_dest_hex:
-                t._log("  WARNING: via=rete-linux, rnsd is NOT the relay!")
+                t._log("  WARNING: via=rete, rnsd is NOT the relay!")
                 t._log("  This means LINKREQUEST will bypass rnsd link_table")
             elif via:
-                t._log("  OK: via != rete-linux, rnsd should be the relay")
+                t._log("  OK: via != rete, rnsd should be the relay")
         else:
             t._log("  WARNING: no path_table entry found!")
 
@@ -239,7 +239,7 @@ def main():
         t.check(RNS.Transport.has_path(esp32_dest_hash),
                 "Python received ESP32 announce through relay")
 
-        # Check hops (announce went: ESP32 -> serial -> rete-linux -> TCP -> rnsd -> TCP -> Python)
+        # Check hops (announce went: ESP32 -> serial -> rete -> TCP -> rnsd -> TCP -> Python)
         hops = RNS.Transport.hops_to(esp32_dest_hash)
         t.check(hops >= 1, f"Announce hops >= 1 (got {hops})")
 
@@ -327,7 +327,7 @@ def main():
             link_established[0] = True
         link.set_link_established_callback(link_established_with_channel)
 
-        # Wait for link establishment (relay path adds latency: Python → rnsd → rete-linux → serial → ESP32)
+        # Wait for link establishment (relay path adds latency: Python → rnsd → rete → serial → ESP32)
         deadline = time.time() + 40
         while time.time() < deadline and not link_established[0]:
             time.sleep(0.3)
@@ -520,7 +520,7 @@ def main():
 
         rust_stderr = t.collect_rust_stderr(last_chars=5000)
         has_panic = "panic" in rust_stderr.lower() or "SIGSEGV" in rust_stderr
-        t.check(not has_panic, "No crash in rete-linux stderr",
+        t.check(not has_panic, "No crash in rete stderr",
                 detail=rust_stderr[-200:] if has_panic else None)
 
         # Dump diagnostics

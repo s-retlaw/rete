@@ -3,7 +3,7 @@
 
 Topology (Docker Compose):
   rnsd:        Python rnsd transport node (TCP server on 0.0.0.0:4242)
-  rust-node:   rete-linux --connect rnsd:4242 --auto-reply "hello from rust"
+  rust-node:   rete --connect rnsd:4242 --auto-reply "hello from rust"
   python-node: tcp_node.py --host rnsd --port 4242
 
 Each node runs in its own container on a shared Docker bridge network.

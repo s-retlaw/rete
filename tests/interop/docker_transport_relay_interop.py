@@ -4,7 +4,7 @@
 Topology (Docker Compose):
   rnsd-1:         Python rnsd transport node
   rnsd-2:         Python rnsd transport node
-  rust-transport:  rete-linux --connect rnsd-1:4242 --connect rnsd-2:4242 --transport
+  rust-transport:  rete --connect rnsd-1:4242 --connect rnsd-2:4242 --transport
   python-a:       relay_node.py --host rnsd-1 (connected to subnet 1)
   python-b:       relay_node.py --host rnsd-2 (connected to subnet 2)
 

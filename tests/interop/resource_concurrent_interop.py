@@ -17,7 +17,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python resource_concurrent_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python resource_concurrent_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time

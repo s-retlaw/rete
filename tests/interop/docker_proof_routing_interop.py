@@ -4,7 +4,7 @@
 Topology (Docker Compose):
   rnsd-1:          Python rnsd transport node
   rnsd-2:          Python rnsd transport node
-  rust-transport:  rete-linux --connect rnsd-1:4242 --connect rnsd-2:4242 --transport
+  rust-transport:  rete --connect rnsd-1:4242 --connect rnsd-2:4242 --transport
   python-a:        proof_sender.py --host rnsd-1 (sends DATA, waits for proof)
   python-b:        proof_receiver.py --host rnsd-2 (PROVE_ALL, receives DATA)
 

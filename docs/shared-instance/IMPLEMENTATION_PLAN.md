@@ -12,7 +12,7 @@
 - `crates/rete-tokio/src/tcp_server.rs` — `TcpServer` with HDLC + IFAC + multi-client. **Works.**
 - `crates/rete-tokio/src/lib.rs` — `TokioNode` event loop, multi-interface dispatch. **Works.**
 - `crates/rete-daemon/` — Building blocks (config, command, identity, monitoring, event, file_store, compression). **Library only, no binary.**
-- `examples/linux/src/main.rs` — Full hosted node (402 lines). **Example-only, not a supported daemon surface.**
+- `examples/daemon/src/main.rs` — Full hosted node (402 lines). **Example-only, not a supported daemon surface.**
 - `tests/interop/local_ipc_interop.py` — Rust-to-Rust Unix IPC test. **Proves data plane relay works between Rust nodes.**
 
 **What is missing:**
@@ -541,7 +541,7 @@ Every session must end with:
 3. The existing E2E interop suite still passes (no regressions):
    ```bash
    cd tests/interop && for test in live_interop link_interop channel_interop resource_interop relay_interop transport_relay_interop path_request_interop proof_routing_interop ifac_interop robustness_interop; do
-     uv run python ${test}.py --rust-binary ../../target/debug/rete-linux --timeout 45
+     uv run python ${test}.py --rust-binary ../../target/debug/rete --timeout 45
    done
    ```
 4. Any new shared-mode E2E tests pass

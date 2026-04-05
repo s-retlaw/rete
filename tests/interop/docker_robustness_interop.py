@@ -3,7 +3,7 @@
 
 Topology (Docker Compose):
   rnsd:          Python rnsd transport node (port published to host)
-  rust-node:     rete-linux --connect rnsd:4242
+  rust-node:     rete --connect rnsd:4242
   python-valid:  robustness_valid.py (announces on stdin command)
 
 The test injects malformed packets via raw TCP socket connected to

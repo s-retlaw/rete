@@ -15,7 +15,7 @@ Topology:
 
 Usage:
   cd tests/interop
-  uv run python resource_1mb_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python resource_1mb_interop.py --rust-binary ../../target/debug/rete
 """
 
 import hashlib

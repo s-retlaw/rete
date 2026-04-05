@@ -15,7 +15,7 @@ Assertions (soft-fail):
 
 Usage:
   cd tests/interop
-  uv run python auto_data_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python auto_data_interop.py --rust-binary ../../target/debug/rete
 """
 
 import os

@@ -15,7 +15,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python announce_appdata_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python announce_appdata_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time

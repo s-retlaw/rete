@@ -18,10 +18,10 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python resource_multiwindow_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python resource_multiwindow_interop.py --rust-binary ../../target/debug/rete
 
 Or build first:
-  cargo build -p rete-example-linux
+  cargo build -p rete
   cd tests/interop && uv run python resource_multiwindow_interop.py
 """
 

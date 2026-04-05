@@ -3,7 +3,7 @@
 
 Topology (Docker Compose):
   rnsd:            Python rnsd transport node
-  rust-transport:  rete-linux --connect rnsd:4242 --transport
+  rust-transport:  rete --connect rnsd:4242 --transport
   python-a:        path_a_node.py (announces, then exits)
   python-c:        path_c_node.py (late-join, requests path to A)
 

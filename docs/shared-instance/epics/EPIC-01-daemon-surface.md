@@ -126,7 +126,7 @@ Required daemon-level E2E before closing the epic:
 - [../contracts/SCOPE.md](../contracts/SCOPE.md)
 - [../contracts/REFERENCE.md](../contracts/REFERENCE.md)
 - [../../ARCHITECTURAL_REVIEW_2026-04-01.md](../../ARCHITECTURAL_REVIEW_2026-04-01.md)
-- [../../../examples/linux/src/main.rs](../../../examples/linux/src/main.rs)
+- [../../../examples/daemon/src/main.rs](../../../examples/daemon/src/main.rs)
 - [../../../crates/rete-tokio/src/local.rs](../../../crates/rete-tokio/src/local.rs)
 - <https://github.com/markqvist/Reticulum/blob/master/RNS/Utilities/rnsd.py>
 

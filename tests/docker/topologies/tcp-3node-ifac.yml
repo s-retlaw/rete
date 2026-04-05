@@ -26,7 +26,7 @@ services:
     networks:
       - rete-lan
     volumes:
-      - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
+      - ../../../target/debug/rete:/opt/rete/rete:ro
     command: ${RUST_ARGS:---data-dir /tmp/rete --connect rnsd:4242}
     depends_on:
       rnsd:

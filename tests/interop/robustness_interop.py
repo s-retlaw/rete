@@ -22,10 +22,10 @@ Tests:
 
 Usage:
   cd tests/interop
-  uv run python robustness_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python robustness_interop.py --rust-binary ../../target/debug/rete
 
 Or build first:
-  cargo build -p rete-example-linux
+  cargo build -p rete
   cd tests/interop && uv run python robustness_interop.py
 """
 

@@ -3,7 +3,7 @@
 
 Topology (Docker Compose):
   rnsd:        Python rnsd transport node
-  rust-node:   rete-linux --connect rnsd:4242 (stdin_open for resource commands)
+  rust-node:   rete --connect rnsd:4242 (stdin_open for resource commands)
   python-node: resource_node.py --host rnsd --port 4242
 
 Assertions:

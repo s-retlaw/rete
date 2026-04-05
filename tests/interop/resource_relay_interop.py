@@ -9,7 +9,7 @@ link to Rust through rnsd, sends a resource, and verifies RESOURCE_COMPLETE.
 
 Usage:
   cd tests/interop
-  uv run python resource_relay_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python resource_relay_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time

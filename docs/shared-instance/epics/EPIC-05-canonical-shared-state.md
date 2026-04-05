@@ -129,7 +129,7 @@ Required shared-mode E2E:
 - [../contracts/REFERENCE.md](../contracts/REFERENCE.md)
 - [../../../crates/rete-tokio/src/local.rs](../../../crates/rete-tokio/src/local.rs)
 - [../../../crates/rete-tokio/src/hub.rs](../../../crates/rete-tokio/src/hub.rs)
-- [../../../examples/linux/src/main.rs](../../../examples/linux/src/main.rs)
+- [../../../examples/daemon/src/main.rs](../../../examples/daemon/src/main.rs)
 - <https://github.com/markqvist/Reticulum/blob/master/RNS/Reticulum.py>
 - <https://github.com/markqvist/Reticulum/blob/master/RNS/Transport.py>
 

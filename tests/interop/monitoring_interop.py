@@ -12,7 +12,7 @@ Endpoints tested:
 
 Usage:
   cd tests/interop
-  uv run python monitoring_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python monitoring_interop.py --rust-binary ../../target/debug/rete
 """
 
 import json

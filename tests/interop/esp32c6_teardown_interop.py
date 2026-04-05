@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ESP32-C6 link teardown interop test — Topology A (rete-linux <-> ESP32 over serial).
+"""ESP32-C6 link teardown interop test — Topology A (rete <-> ESP32 over serial).
 
 Tests that LINKCLOSE frees ESP32 link slots:
 1. Establish link, verify LINK_ESTABLISHED
@@ -17,7 +17,7 @@ from interop_helpers import InteropTest
 
 def main():
     with InteropTest("esp32c6-teardown", default_port=0, default_timeout=30.0) as t:
-        # Start rete-linux connected to ESP32 over serial
+        # Start rete connected to ESP32 over serial
         rust_lines = t.start_rust_serial()
 
         # Discover ESP32 destination hash from its announce

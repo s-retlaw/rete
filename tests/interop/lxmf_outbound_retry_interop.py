@@ -17,7 +17,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python lxmf_outbound_retry_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python lxmf_outbound_retry_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time

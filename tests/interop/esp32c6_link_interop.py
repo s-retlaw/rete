@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ESP32-C6 link interop test — Topology A (rete-linux <-> ESP32 over serial).
+"""ESP32-C6 link interop test — Topology A (rete <-> ESP32 over serial).
 
 Tests link handshake with ESP32 as responder:
-1. rete-linux initiates link to ESP32 (dest hash discovered via announce)
+1. rete initiates link to ESP32 (dest hash discovered via announce)
 2. Verify LINK_ESTABLISHED
 3. Verify ESP32 sends greeting channel message
 4. Send channel message, verify echo
@@ -17,7 +17,7 @@ from interop_helpers import InteropTest
 
 def main():
     with InteropTest("esp32c6-link", default_port=0, default_timeout=30.0) as t:
-        # Start rete-linux connected to ESP32 over serial
+        # Start rete connected to ESP32 over serial
         rust_lines = t.start_rust_serial()
 
         # Discover ESP32 destination hash from its announce

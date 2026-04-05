@@ -2,7 +2,7 @@
 """Docker-isolated AutoInterface interop test.
 
 Topology (Docker Compose):
-  rust-node:   rete-linux with --auto --auto-group docker_autotest
+  rust-node:   rete with --auto --auto-group docker_autotest
   python-node: Python RNS with AutoInterface (same group)
   Both on a shared IPv6-enabled Docker bridge network.
 

@@ -191,7 +191,7 @@ possible way to get someone onto the mesh.
 
 | Layer | Technology | Rationale |
 |-------|-----------|-----------|
-| **Server** | axum + tokio | Already used by rete-linux, mature, async WS support via `axum::extract::ws` |
+| **Server** | axum + tokio | Already used by rete, mature, async WS support via `axum::extract::ws` |
 | **Frontend framework** | SvelteKit | Best ecosystem for maps/charts/3D, fast, small bundles, easy WASM interop |
 | **WASM protocol engine** | rete-core + rete-transport + rete-stack compiled to `wasm32-unknown-unknown` | Already `no_std`, crypto crates have WASM support |
 | **WASM bindings** | wasm-bindgen + wasm-pack | Standard Rust→JS bridge |

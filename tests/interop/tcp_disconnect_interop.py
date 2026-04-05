@@ -18,7 +18,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python tcp_disconnect_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python tcp_disconnect_interop.py --rust-binary ../../target/debug/rete
 """
 
 import os

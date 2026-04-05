@@ -189,7 +189,7 @@ class InteropTest:
         return proc
 
     def start_rust(self, port=None, extra_args=None):
-        """Start the Rust rete-linux node and return its stdout line list.
+        """Start the Rust rete node and return its stdout line list.
 
         Args:
             port: TCP port to connect to (defaults to ``self.port``).
@@ -287,11 +287,11 @@ class InteropTest:
         return None
 
     def discover_esp32_dest(self, rust_lines, timeout=15):
-        """Wait for an ANNOUNCE line in rete-linux stdout and return the dest hash.
+        """Wait for an ANNOUNCE line in rete stdout and return the dest hash.
 
-        rete-linux logs ``ANNOUNCE:<dest_hash>:<identity_hash>:<hops>`` to stdout
+        rete logs ``ANNOUNCE:<dest_hash>:<identity_hash>:<hops>`` to stdout
         when it receives an announce from a peer. This method returns the first
-        announce dest_hash that is NOT the rete-linux node's own destination.
+        announce dest_hash that is NOT the rete node's own destination.
         """
         own_dest = None
         for line in rust_lines:
@@ -463,7 +463,7 @@ class InteropTest:
             sys.exit(0)
 
     def start_rust_dual(self, port=None, serial_port=None, extra_args=None):
-        """Start rete-linux with both --connect (TCP) and --serial (multi-interface).
+        """Start rete with both --connect (TCP) and --serial (multi-interface).
 
         Args:
             port: TCP port to connect to (defaults to ``self.port``).
@@ -589,7 +589,7 @@ class InteropTest:
         return proc
 
     def start_rust_serial(self, serial_port=None, extra_args=None):
-        """Start the Rust rete-linux node with --serial and return its stdout line list.
+        """Start the Rust rete node with --serial and return its stdout line list.
 
         Args:
             serial_port: Serial port to connect to (defaults to ``--serial-port`` arg).

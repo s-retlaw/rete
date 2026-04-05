@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""ESP32-C6 resource interop test — Topology A (rete-linux <-> ESP32 over serial).
+"""ESP32-C6 resource interop test — Topology A (rete <-> ESP32 over serial).
 
 Tests small resource transfer to ESP32:
 1. Establish link
 2. Send a small resource (<500 bytes, single segment, no compression)
-3. Verify RESOURCE_COMPLETE on rete-linux stdout (ESP32 received it)
+3. Verify RESOURCE_COMPLETE on rete stdout (ESP32 received it)
 """
 
 import sys
@@ -15,7 +15,7 @@ from interop_helpers import InteropTest
 
 def main():
     with InteropTest("esp32c6-resource", default_port=0, default_timeout=60.0) as t:
-        # Start rete-linux connected to ESP32 over serial
+        # Start rete connected to ESP32 over serial
         rust_lines = t.start_rust_serial()
 
         # Discover ESP32 destination hash from its announce
@@ -34,7 +34,7 @@ def main():
 
         # Send a small resource
         t._log("sending resource...")
-        test_payload = "Hello from rete-linux resource transfer!"
+        test_payload = "Hello from rete resource transfer!"
         t.send_rust(f"resource {link_id} {test_payload}")
 
         # Poll for RESOURCE_COMPLETE instead of fixed sleep.

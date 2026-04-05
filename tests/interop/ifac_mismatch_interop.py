@@ -15,7 +15,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python ifac_mismatch_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python ifac_mismatch_interop.py --rust-binary ../../target/debug/rete
 """
 
 import os

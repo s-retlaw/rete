@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Transparent TCP proxy that logs every HDLC-framed RNS packet.
 
-Sits between two RNS nodes (e.g. rete-linux and rnsd), forwarding all
+Sits between two RNS nodes (e.g. rete and rnsd), forwarding all
 bytes transparently while decoding and logging each HDLC frame as a
 parsed RNS packet.
 
 Usage:
     python rns_proxy.py --listen 4292 --target 4291
 
-    client (rete-linux) --TCP--> :4292 (proxy) --TCP--> :4291 (rnsd)
+    client (rete) --TCP--> :4292 (proxy) --TCP--> :4291 (rnsd)
 
 Programmatic:
     from rns_proxy import start_tcp_proxy

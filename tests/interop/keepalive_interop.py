@@ -18,7 +18,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python keepalive_interop.py --rust-binary ../../target/debug/rete-linux --timeout 60
+  uv run python keepalive_interop.py --rust-binary ../../target/debug/rete --timeout 60
 """
 
 import time

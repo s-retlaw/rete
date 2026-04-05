@@ -392,7 +392,7 @@ Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>
 - `crates/rete-stack/src/node_core/mod.rs` — `hooks` field replaces 4 fn pointer fields, `set_hooks()`/`clear_hooks()` replace 4 setters
 - `crates/rete-stack/src/node_core/ingest.rs` — 5 call sites updated
 - `crates/rete-stack/src/lib.rs` — re-exports updated
-- `examples/linux/src/main.rs` — `AppHooks` struct, `handler_fn()` usage
+- `examples/daemon/src/main.rs` — `AppHooks` struct, `handler_fn()` usage
 
 ### Verified
 
@@ -421,7 +421,7 @@ Replaced all 5 fn pointer callbacks with trait-based hooks using `Box<dyn Trait>
 
 4. **TransportStorage trait** — maps now use semantic key types: `PathMap<DestHash, Path>`, `LinkMap<LinkId, Link>`, etc. Three maps remain `[u8; TRUNCATED_HASH_LEN]` (ReverseMap, ReceiptMap, ChannelReceiptMap — keyed by truncated packet hashes, not one of the 5 semantic types).
 
-5. **All struct fields, method signatures, and event variants** updated across all 8 crates: rete-core, rete-transport, rete-stack, rete-lxmf-core, rete-lxmf, rete-tokio, rete-embassy, examples/linux.
+5. **All struct fields, method signatures, and event variants** updated across all 8 crates: rete-core, rete-transport, rete-stack, rete-lxmf-core, rete-lxmf, rete-tokio, rete-embassy, examples/daemon.
 
 6. **`Packet<'a>` unchanged** — zero-copy parser keeps `destination_hash: &'a [u8]`. Conversion to newtypes happens at extraction sites.
 
@@ -474,16 +474,16 @@ Completed in two passes:
 
 ### Problem
 
-`examples/linux/src/main.rs` is 2000+ lines mixing identity persistence, config loading, interface bring-up, monitoring, IPC, LXMF orchestration, command parsing, and runtime policy. It's a product, not an example.
+`examples/daemon/src/main.rs` is 2000+ lines mixing identity persistence, config loading, interface bring-up, monitoring, IPC, LXMF orchestration, command parsing, and runtime policy. It's a product, not an example.
 
 ### Key Files
 
-- `examples/linux/src/main.rs` — the whole file
+- `examples/daemon/src/main.rs` — the whole file
 
 ### What to Do
 
 1. **Extract reusable hosted logic** into `rete-tokio` or a new `rete-daemon` crate.
-2. **Keep `examples/linux`** as a thin example demonstrating the library API.
+2. **Keep `examples/daemon`** as a thin example demonstrating the library API.
 3. **Move config loading, identity persistence, monitoring** into library code.
 
 ### Solution
@@ -496,13 +496,13 @@ New `crates/rete-daemon` crate with 7 modules:
 4. **`command`** — `parse_command()` (~20 commands), hex helpers, `spawn_signal_handler/stdin_reader`.
 5. **`monitoring`** — HTTP `/health`/`/stats`/`/metrics` server, `format_prometheus()`.
 6. **`event`** — `on_event()`, `on_node_event()`, `handle_lxmf_command()`. All stdout markers preserved verbatim.
-7. **`file_store`** — `FileMessageStore` + `AnyMessageStore` moved from `examples/linux/src/file_store.rs`.
+7. **`file_store`** — `FileMessageStore` + `AnyMessageStore` moved from `examples/daemon/src/file_store.rs`.
 
 ### Key Files
 
 - `crates/rete-daemon/src/` — all 7 modules with 57 unit tests
-- `examples/linux/src/main.rs` — thin orchestration, 402 lines (was 2172)
-- `examples/linux/Cargo.toml` — adds `rete-daemon`, removes `toml` and `libbz2-rs-sys` (now transitive)
+- `examples/daemon/src/main.rs` — thin orchestration, 402 lines (was 2172)
+- `examples/daemon/Cargo.toml` — adds `rete-daemon`, removes `toml` and `libbz2-rs-sys` (now transitive)
 
 ### Verified
 

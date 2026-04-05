@@ -16,7 +16,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python link_burst_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python link_burst_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time

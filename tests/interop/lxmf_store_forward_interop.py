@@ -20,7 +20,7 @@ test can be extended to verify actual delivery.
 
 Usage:
   cd tests/interop
-  uv run python lxmf_store_forward_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python lxmf_store_forward_interop.py --rust-binary ../../target/debug/rete
 """
 
 import os

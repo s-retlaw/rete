@@ -26,7 +26,7 @@ services:
       - rete-lan
     stdin_open: true
     volumes:
-      - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
+      - ../../../target/debug/rete:/opt/rete/rete:ro
     command: ["--data-dir", "/tmp/rete-a", "--connect", "rnsd:4242", "--propagation", "--autopeer", "--lxmf-name", "NodeA", "--lxmf-announce"]
     depends_on:
       rnsd:
@@ -40,7 +40,7 @@ services:
       - rete-lan
     stdin_open: true
     volumes:
-      - ../../../target/debug/rete-linux:/opt/rete/rete-linux:ro
+      - ../../../target/debug/rete:/opt/rete/rete:ro
     command: ["--data-dir", "/tmp/rete-b", "--connect", "rnsd:4242", "--propagation", "--autopeer", "--lxmf-name", "NodeB", "--lxmf-announce"]
     depends_on:
       rnsd:

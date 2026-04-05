@@ -13,7 +13,7 @@ Flow:
 
 Usage:
   cd tests/interop
-  uv run python serial_interop.py --rust-binary ../../target/debug/rete-linux \\
+  uv run python serial_interop.py --rust-binary ../../target/debug/rete \\
       --port /dev/ttyUSB0 --baud 115200
 """
 

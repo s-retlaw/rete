@@ -3,7 +3,7 @@
 
 Topology (Docker Compose):
   rnsd:        Python rnsd transport relay (TCP 0.0.0.0:4242)
-  rust-node:   rete-linux --connect rnsd:4242 --auto-reply "hello from rust via relay"
+  rust-node:   rete --connect rnsd:4242 --auto-reply "hello from rust via relay"
   python-node: tcp_node.py --host rnsd --port 4242
 
 All traffic between Python and Rust is relayed through rnsd.

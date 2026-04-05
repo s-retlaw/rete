@@ -3,7 +3,7 @@
 
 Topology (Docker Compose):
   rnsd:        Python rnsd transport node (TCP server on 0.0.0.0:4242)
-  rust-node:   rete-linux --connect rnsd:4242 --monitoring 0.0.0.0:9100
+  rust-node:   rete --connect rnsd:4242 --monitoring 0.0.0.0:9100
   python-node: tcp_node.py --host rnsd --port 4242 (generates traffic)
   prometheus:  prom/prometheus scraping rust-node:9100
 

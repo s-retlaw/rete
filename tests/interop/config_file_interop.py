@@ -9,7 +9,7 @@ Tests:
 
 Usage:
   cd tests/interop
-  uv run python config_file_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python config_file_interop.py --rust-binary ../../target/debug/rete
 """
 
 import json

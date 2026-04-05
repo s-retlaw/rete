@@ -23,10 +23,10 @@ Assertions (8):
 
 Usage:
   cd tests/interop
-  uv run python stability_interop.py --rust-binary ../../target/debug/rete-linux --timeout 90
+  uv run python stability_interop.py --rust-binary ../../target/debug/rete --timeout 90
 
 Or build first:
-  cargo build -p rete-example-linux
+  cargo build -p rete
   cd tests/interop && uv run python stability_interop.py
 """
 

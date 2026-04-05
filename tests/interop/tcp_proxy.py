@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TCP MITM proxy that logs decoded Reticulum packets with timestamps.
 
-Sits between two TCP endpoints (e.g. Rust rete-linux and rnsd), passing
+Sits between two TCP endpoints (e.g. Rust rete and rnsd), passing
 all bytes transparently while parsing and logging HDLC-framed Reticulum
 packets.
 

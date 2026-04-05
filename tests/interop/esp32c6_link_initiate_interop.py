@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""ESP32-C6 link initiation interop — Topology A (rete-linux <-> ESP32 over serial).
+"""ESP32-C6 link initiation interop — Topology A (rete <-> ESP32 over serial).
 
 Tests ESP32 as link initiator:
-1. rete-linux announces with app_data "LINK_ME" via stdin
+1. rete announces with app_data "LINK_ME" via stdin
 2. ESP32 firmware detects marker, calls initiate_link()
-3. Verify LINK_ESTABLISHED on rete-linux
+3. Verify LINK_ESTABLISHED on rete
 4. ESP32 sends channel message on establishment
-5. Verify channel message received by rete-linux
+5. Verify channel message received by rete
 """
 
 import sys
@@ -17,10 +17,10 @@ from interop_helpers import InteropTest
 
 def main():
     with InteropTest("esp32c6-link-initiate", default_port=0, default_timeout=30.0) as t:
-        # Start rete-linux connected to ESP32 over serial
+        # Start rete connected to ESP32 over serial
         rust_lines = t.start_rust_serial()
 
-        # Wait for rete-linux to start up
+        # Wait for rete to start up
         time.sleep(2.0)
 
         # Send an announce with "LINK_ME" app_data via stdin
@@ -28,7 +28,7 @@ def main():
         t._log("sending announce with LINK_ME app_data...")
         t.send_rust("announce LINK_ME")
 
-        # Wait for LINK_ESTABLISHED (ESP32 initiates, rete-linux is responder)
+        # Wait for LINK_ESTABLISHED (ESP32 initiates, rete is responder)
         t._log("waiting for ESP32 to initiate link (triggered by LINK_ME)...")
         link_line = t.wait_for_line(rust_lines, "LINK_ESTABLISHED", timeout=20)
         t.check(link_line is not None, "Link established (ESP32 initiated)")

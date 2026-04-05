@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""ESP32-C6 proof interop test — Topology A (rete-linux <-> ESP32 over serial).
+"""ESP32-C6 proof interop test — Topology A (rete <-> ESP32 over serial).
 
 Tests proof of delivery:
-1. rete-linux receives ESP32 announce, sends auto-reply ping
+1. rete receives ESP32 announce, sends auto-reply ping
 2. ESP32 (with ProveAll strategy) generates and sends back a proof
-3. Verify PROOF_RECEIVED in rete-linux stdout
+3. Verify PROOF_RECEIVED in rete stdout
 4. Verify echoed DATA received
 """
 
@@ -16,13 +16,13 @@ from interop_helpers import InteropTest
 
 def main():
     with InteropTest("esp32c6-proof", default_port=0, default_timeout=30.0) as t:
-        # Start rete-linux connected to ESP32 over serial
+        # Start rete connected to ESP32 over serial
         # --auto-reply-ping sends a ping DATA packet when it receives an announce
         rust_lines = t.start_rust_serial(
             extra_args=["--auto-reply-ping"],
         )
 
-        # Wait for ESP32 announce (rete-linux discovers ESP32, then auto-sends ping)
+        # Wait for ESP32 announce (rete discovers ESP32, then auto-sends ping)
         t._log("waiting for ESP32 announce...")
         esp32_dest = t.discover_esp32_dest(rust_lines, timeout=15)
         t.check(esp32_dest is not None, "ESP32 announce received")

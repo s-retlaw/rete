@@ -118,7 +118,7 @@ Required shared-mode E2E:
 - [../contracts/SCOPE.md](../contracts/SCOPE.md)
 - [../contracts/REFERENCE.md](../contracts/REFERENCE.md)
 - [../../ARCHITECTURAL_REVIEW_2026-04-01.md](../../ARCHITECTURAL_REVIEW_2026-04-01.md)
-- [../../../examples/linux/src/main.rs](../../../examples/linux/src/main.rs)
+- [../../../examples/daemon/src/main.rs](../../../examples/daemon/src/main.rs)
 - <https://reticulum.network/manual/using.html>
 - <https://github.com/markqvist/Reticulum/blob/master/RNS/Reticulum.py>
 - <https://github.com/markqvist/Reticulum/blob/master/RNS/Utilities/rnsd.py>

@@ -12,7 +12,7 @@ initiates). Together they cover both initiation directions through relay.
 
 Usage:
   cd tests/interop
-  uv run python resource_initiate_relay_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python resource_initiate_relay_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time

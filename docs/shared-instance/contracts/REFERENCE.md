@@ -116,7 +116,7 @@ Current relevant local code and docs:
 - Shared attach starting point:
   - [../../../crates/rete-tokio/src/local.rs](../../../crates/rete-tokio/src/local.rs)
 - Hosted example current surface:
-  - [../../../examples/linux/src/main.rs](../../../examples/linux/src/main.rs)
+  - [../../../examples/daemon/src/main.rs](../../../examples/daemon/src/main.rs)
 - Architectural prerequisite:
   - [../../ARCHITECTURAL_REVIEW_2026-04-01.md](../../ARCHITECTURAL_REVIEW_2026-04-01.md)
 

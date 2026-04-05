@@ -28,7 +28,7 @@ I reviewed the workspace manifests, major crate entry points, and the largest im
 - `crates/rete-lxmf-core`
 - `crates/rete-lxmf`
 - `crates/rete-tokio`
-- `examples/linux`
+- `examples/daemon`
 
 I also compared the current Rust surface against the official Reticulum API reference, the Reticulum shared-instance documentation, and the upstream LXMF README:
 
@@ -610,7 +610,7 @@ At minimum:
 
 #### Problem
 
-`examples/linux/src/main.rs` is over 2,000 lines and mixes:
+`examples/daemon/src/main.rs` is over 2,000 lines and mixes:
 
 - identity persistence,
 - config loading,
@@ -646,7 +646,7 @@ The Rust code has pieces of this in `rete-tokio` and the Linux example, but not 
 Promote the hosted application surface into a supported crate or binary:
 
 - `rete-daemon` or similar for the shared instance / IPC / monitoring story,
-- keep `examples/linux` as a thin example on top of that,
+- keep `examples/daemon` as a thin example on top of that,
 - make `rete-tokio` about runtime harnessing, not about also being the deployment surface.
 
 This is especially important if seamless interaction with Python Reticulum processes on desktop is a real goal.

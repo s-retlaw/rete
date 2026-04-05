@@ -13,7 +13,7 @@ This reveals:
 
 Usage:
   cd tests/interop
-  uv run python relay_diagnostic.py --rust-binary ../../target/debug/rete-linux
+  uv run python relay_diagnostic.py --rust-binary ../../target/debug/rete
 """
 
 import os

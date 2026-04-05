@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Link establishment through a 2-relay chain where rete-linux is the SECOND relay.
+"""Link establishment through a 2-relay chain where rete is the SECOND relay.
 
 Topology:
-  Python_A (initiator) --TCP--> rnsd_1 (relay, port 4296) --TCP--> rete-linux (relay, --transport) --TCP--> rnsd_2 (port 4297) <--TCP-- Python_B (responder)
+  Python_A (initiator) --TCP--> rnsd_1 (relay, port 4296) --TCP--> rete (relay, --transport) --TCP--> rnsd_2 (port 4297) <--TCP-- Python_B (responder)
 
 This tests the same relay configuration as the ESP32 3-node test but purely over TCP.
-rnsd_1 is the first relay (closest to initiator), rete-linux is the second relay
+rnsd_1 is the first relay (closest to initiator), rete is the second relay
 (closest to responder).
 
 Assertions:
@@ -16,7 +16,7 @@ Assertions:
 
 Usage:
   cd tests/interop
-  uv run python link_3node_relay_interop.py --rust-binary ../../target/debug/rete-linux
+  uv run python link_3node_relay_interop.py --rust-binary ../../target/debug/rete
 """
 
 import time
@@ -33,7 +33,7 @@ def main():
         t.start_rnsd(port=port1)
         t.start_rnsd(port=port2)
 
-        # 2. Start rete-linux connecting to BOTH rnsd instances with --transport
+        # 2. Start rete connecting to BOTH rnsd instances with --transport
         rust = t.start_rust(
             port=port1,
             extra_args=[

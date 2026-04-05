@@ -4,14 +4,14 @@
 Uses the diagnostic serial bridge on the serial side and rns_proxy.py
 on the TCP side to capture every HDLC frame in both segments:
 
-  Python RNS <-TCP-> rnsd <-TCP:proxy-> rete-linux <-serial:diag_bridge-> ESP32
+  Python RNS <-TCP-> rnsd <-TCP:proxy-> rete <-serial:diag_bridge-> ESP32
 
 Shows exactly where LINKREQUEST or LRPROOF is lost in the relay chain.
 
 Usage:
     cd tests/interop
     uv run python esp32c6_diag_relay.py \
-        --rust-binary ../../target/debug/rete-linux \
+        --rust-binary ../../target/debug/rete \
         --serial-port /dev/ttyUSB0 --timeout 120
 """
 
@@ -29,7 +29,7 @@ from interop_helpers import InteropTest
 APP_NAME = "rete"
 ASPECTS = ["example", "v1"]
 RNSD_PORT = 4290
-PROXY_PORT = 4292  # proxy sits between rete-linux and rnsd
+PROXY_PORT = 4292  # proxy sits between rete and rnsd
 BRIDGE_PORT = 4294  # diag bridge for serial side
 
 
@@ -80,11 +80,11 @@ def main():
         t._log("=== Starting diagnostic serial bridge ===")
         bridge = t.start_diag_serial_bridge(tcp_port=BRIDGE_PORT)
 
-        # 4. Start TCP proxy between rete-linux and rnsd (TCP side capture)
-        t._log("=== Starting TCP proxy (rete-linux -> rnsd) ===")
+        # 4. Start TCP proxy between rete and rnsd (TCP side capture)
+        t._log("=== Starting TCP proxy (rete -> rnsd) ===")
         proxy = t.start_tcp_proxy(listen_port=PROXY_PORT, target_port=RNSD_PORT)
 
-        # 5. Start rete-linux connecting through proxy + serial bridge
+        # 5. Start rete connecting through proxy + serial bridge
         #    It connects to the proxy (which forwards to rnsd) on TCP side,
         #    and to the diag bridge (which forwards to ESP32) on serial side.
         rust_lines = t.start_rust(
