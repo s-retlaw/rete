@@ -26,11 +26,16 @@ pub fn make_unix_config(name: &str) -> SharedInstanceConfig {
 }
 
 pub fn make_tcp_config(port: u16) -> SharedInstanceConfig {
+    make_tcp_config_with_control(port, port + 1)
+}
+
+pub fn make_tcp_config_with_control(port: u16, control_port: u16) -> SharedInstanceConfig {
     SharedInstanceConfig {
         share_instance: true,
         instance_name: "default".to_string(),
         shared_instance_type: SharedInstanceType::Tcp,
         shared_instance_port: port,
+        instance_control_port: control_port,
         ..Default::default()
     }
 }

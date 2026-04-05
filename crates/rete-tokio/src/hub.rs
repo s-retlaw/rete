@@ -13,6 +13,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
+/// Lifecycle event for a hub client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientEvent {
+    Connected(usize),
+    Disconnected(usize),
+}
+
 /// A connected client tracked by the hub.
 struct ClientEntry {
     id: usize,
@@ -28,6 +35,7 @@ pub struct ClientHub {
     clients: Arc<RwLock<Vec<ClientEntry>>>,
     next_id: Arc<AtomicUsize>,
     channel_capacity: usize,
+    event_tx: Option<Arc<mpsc::Sender<ClientEvent>>>,
 }
 
 impl ClientHub {
@@ -37,7 +45,23 @@ impl ClientHub {
             clients: Arc::new(RwLock::new(Vec::new())),
             next_id: Arc::new(AtomicUsize::new(0)),
             channel_capacity,
+            event_tx: None,
         }
+    }
+
+    /// Create a hub that emits [`ClientEvent`]s on connect/disconnect.
+    pub fn new_with_events(
+        channel_capacity: usize,
+        event_capacity: usize,
+    ) -> (Self, mpsc::Receiver<ClientEvent>) {
+        let (tx, rx) = mpsc::channel(event_capacity);
+        let hub = ClientHub {
+            clients: Arc::new(RwLock::new(Vec::new())),
+            next_id: Arc::new(AtomicUsize::new(0)),
+            channel_capacity,
+            event_tx: Some(Arc::new(tx)),
+        };
+        (hub, rx)
     }
 
     /// Register a new client, returning its unique ID and outbound receiver.
@@ -51,6 +75,9 @@ impl ClientHub {
             let mut clients = self.clients.write().await;
             clients.push(ClientEntry { id, tx });
         }
+        if let Some(ref event_tx) = self.event_tx {
+            let _ = event_tx.send(ClientEvent::Connected(id)).await;
+        }
         (id, rx)
     }
 
@@ -58,12 +85,23 @@ impl ClientHub {
     pub fn broadcaster(&self) -> HubBroadcaster {
         HubBroadcaster {
             clients: Arc::clone(&self.clients),
+            event_tx: self.event_tx.clone(),
         }
     }
 
     /// Current number of connected clients.
     pub async fn client_count(&self) -> usize {
         self.clients.read().await.len()
+    }
+
+    /// Replace this hub with one that emits [`ClientEvent`]s.
+    ///
+    /// Must be called before any clients are registered. Returns a receiver
+    /// for connect/disconnect events.
+    pub fn enable_events(&mut self, event_capacity: usize) -> mpsc::Receiver<ClientEvent> {
+        let (tx, rx) = mpsc::channel(event_capacity);
+        self.event_tx = Some(Arc::new(tx));
+        rx
     }
 }
 
@@ -74,6 +112,7 @@ impl ClientHub {
 #[derive(Clone)]
 pub struct HubBroadcaster {
     clients: Arc<RwLock<Vec<ClientEntry>>>,
+    event_tx: Option<Arc<mpsc::Sender<ClientEvent>>>,
 }
 
 impl HubBroadcaster {
@@ -100,10 +139,31 @@ impl HubBroadcaster {
         }
     }
 
+    /// Send raw packet bytes to a specific client by ID.
+    pub async fn send_to_client(&self, client_id: usize, data: &[u8]) {
+        let sender = {
+            let clients = self.clients.read().await;
+            clients
+                .iter()
+                .find(|c| c.id == client_id)
+                .map(|c| c.tx.clone())
+        };
+        if let Some(tx) = sender {
+            if tx.send(data.to_vec()).await.is_err() {
+                log::debug!("[rete-hub] send_to_client failed (client disconnected or full)");
+            }
+        }
+    }
+
     /// Remove a client by ID (used by spawned tasks on disconnect).
     pub async fn remove_client(&self, client_id: usize) {
-        let mut clients = self.clients.write().await;
-        clients.retain(|c| c.id != client_id);
+        {
+            let mut clients = self.clients.write().await;
+            clients.retain(|c| c.id != client_id);
+        }
+        if let Some(ref event_tx) = self.event_tx {
+            let _ = event_tx.send(ClientEvent::Disconnected(client_id)).await;
+        }
     }
 
     /// Number of currently connected clients.
@@ -178,5 +238,58 @@ mod tests {
             .expect("closed");
         assert_eq!(msg1, b"world");
         assert_eq!(msg2, b"world");
+    }
+
+    #[tokio::test]
+    async fn test_hub_send_to_client() {
+        let hub = ClientHub::new(16);
+        let broadcaster = hub.broadcaster();
+
+        let (id1, mut rx1) = hub.register().await;
+        let (_id2, mut rx2) = hub.register().await;
+
+        // Send only to client 1
+        broadcaster.send_to_client(id1, b"targeted").await;
+
+        let msg = timeout(Duration::from_secs(1), rx1.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(msg, b"targeted");
+
+        // Client 2 should NOT receive
+        let result = timeout(Duration::from_millis(50), rx2.recv()).await;
+        assert!(result.is_err(), "client 2 should not have received targeted message");
+    }
+
+    #[tokio::test]
+    async fn test_hub_client_events() {
+        let (hub, mut event_rx) = ClientHub::new_with_events(16, 64);
+        let broadcaster = hub.broadcaster();
+
+        let (id1, _rx1) = hub.register().await;
+        let (id2, _rx2) = hub.register().await;
+
+        // Should have received Connected events
+        let e1 = timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(e1, ClientEvent::Connected(id1));
+
+        let e2 = timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(e2, ClientEvent::Connected(id2));
+
+        // Remove client 1
+        broadcaster.remove_client(id1).await;
+
+        let e3 = timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(e3, ClientEvent::Disconnected(id1));
     }
 }

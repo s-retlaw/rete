@@ -32,6 +32,11 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         self.announces.len()
     }
 
+    /// Clear all pending announces from the queue.
+    pub fn clear_announces(&mut self) {
+        self.announces.clear();
+    }
+
     pub(super) fn handle_announce<'a>(
         &mut self,
         pkt: &Packet<'a>,
@@ -140,6 +145,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                             .transport_type(TRANSPORT_TYPE_TRANSPORT)
                             .packet_type(pkt.packet_type)
                             .dest_type(pkt.dest_type)
+                            .context_flag(pkt.context_flag)
                             .hops(pkt.hops)
                             .transport_id(local_id.as_ref())
                             .destination_hash(pkt.destination_hash)

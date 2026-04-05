@@ -29,19 +29,22 @@ def rpc_query_raw(sock_path, authkey, request_dict):
     """Connect to a Unix control socket, authenticate, send a pickle RPC
     request, and return the decoded response dict."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(5)
+    s.settimeout(10)
     s.connect(sock_path)
 
     # Read challenge
     challenge = _read_message(s)
     assert challenge.startswith(b"#CHALLENGE#"), f"bad challenge: {challenge[:30]}"
 
-    # Determine hash algorithm from prefix
+    # Python multiprocessing.connection._create_response computes HMAC
+    # over everything after #CHALLENGE# (the "message"), and prefixes
+    # the response with {digest_name}.
+    message = challenge[len(b"#CHALLENGE#"):]
     if b"{sha256}" in challenge:
-        digest = hmac.new(authkey, challenge, "sha256").digest()
+        digest = hmac.new(authkey, message, "sha256").digest()
         prefix = b"{sha256}"
     else:
-        digest = hmac.new(authkey, challenge, "md5").digest()
+        digest = hmac.new(authkey, message, "md5").digest()
         prefix = b""
 
     # Send digest
@@ -67,7 +70,7 @@ def rpc_query_tcp(host, port, authkey, request_dict):
     """Connect to a TCP control port, authenticate, send a pickle RPC
     request, and return the decoded response dict."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(5)
+    s.settimeout(10)
     s.connect((host, port))
 
     # Read challenge
@@ -75,10 +78,12 @@ def rpc_query_tcp(host, port, authkey, request_dict):
     assert challenge.startswith(b"#CHALLENGE#"), f"bad challenge: {challenge[:30]}"
 
     if b"{sha256}" in challenge:
-        digest = hmac.new(authkey, challenge, "sha256").digest()
+        nonce = challenge[challenge.index(b"{sha256}") + len(b"{sha256}"):]
+        digest = hmac.new(authkey, nonce, "sha256").digest()
         prefix = b"{sha256}"
     else:
-        digest = hmac.new(authkey, challenge, "md5").digest()
+        nonce = challenge[len(b"#CHALLENGE#"):]
+        digest = hmac.new(authkey, nonce, "md5").digest()
         prefix = b""
 
     _write_message(s, prefix + digest)
@@ -121,7 +126,7 @@ def _recv_exact(sock, n):
 
 def derive_authkey(identity_file_path):
     """Derive the RPC authkey from the daemon's identity file.
-    authkey = SHA-256(identity_private_key_bytes)"""
+    authkey = SHA-256(identity_private_key_bytes) (matches Python RNS)."""
     with open(identity_file_path, "rb") as f:
         prv_bytes = f.read()
     return hashlib.sha256(prv_bytes).digest()

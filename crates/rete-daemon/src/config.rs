@@ -90,6 +90,40 @@ pub struct SharedInstanceConfig {
     pub rpc_key: Option<String>,
 }
 
+impl SharedInstanceConfig {
+    /// Validate the config for use as a shared-instance daemon.
+    ///
+    /// Returns `Ok(())` if valid, or an error message describing the problem.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.share_instance {
+            return Err(
+                "share_instance must be true for daemon mode".into(),
+            );
+        }
+        if self.instance_name.is_empty() {
+            return Err("instance_name must not be empty".into());
+        }
+        if self.shared_instance_type == SharedInstanceType::Tcp {
+            if self.shared_instance_port == 0 {
+                return Err(
+                    "shared_instance_port must not be 0 in TCP mode".into(),
+                );
+            }
+            if self.instance_control_port == 0 {
+                return Err(
+                    "instance_control_port must not be 0 in TCP mode".into(),
+                );
+            }
+            if self.shared_instance_port == self.instance_control_port {
+                return Err(
+                    "shared_instance_port and instance_control_port must differ in TCP mode".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for SharedInstanceConfig {
     fn default() -> Self {
         SharedInstanceConfig {
@@ -357,6 +391,79 @@ rpc_key = "deadbeef"
         assert_eq!(cfg.shared_instance.shared_instance_port, 40000);
         assert_eq!(cfg.shared_instance.instance_control_port, 40001);
         assert_eq!(cfg.shared_instance.rpc_key.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn validate_default_config_is_valid() {
+        let cfg = SharedInstanceConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_share_instance_false() {
+        let cfg = SharedInstanceConfig {
+            share_instance: false,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("share_instance"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_instance_name() {
+        let cfg = SharedInstanceConfig {
+            instance_name: "".into(),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("instance_name"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_tcp_same_ports() {
+        let cfg = SharedInstanceConfig {
+            shared_instance_type: SharedInstanceType::Tcp,
+            shared_instance_port: 5000,
+            instance_control_port: 5000,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("must differ"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_tcp_data_port_zero() {
+        let cfg = SharedInstanceConfig {
+            shared_instance_type: SharedInstanceType::Tcp,
+            shared_instance_port: 0,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("shared_instance_port"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_tcp_control_port_zero() {
+        let cfg = SharedInstanceConfig {
+            shared_instance_type: SharedInstanceType::Tcp,
+            shared_instance_port: 37428,
+            instance_control_port: 0,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("instance_control_port"), "{err}");
+    }
+
+    #[test]
+    fn validate_unix_mode_ignores_port_values() {
+        // Unix mode doesn't use ports — port 0 is fine.
+        let cfg = SharedInstanceConfig {
+            shared_instance_type: SharedInstanceType::Unix,
+            shared_instance_port: 0,
+            instance_control_port: 0,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

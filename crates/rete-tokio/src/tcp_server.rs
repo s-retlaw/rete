@@ -8,7 +8,7 @@
 //! All connected clients share a single interface index in the transport
 //! layer. Packets routed to this interface are broadcast to all clients.
 
-use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
+use rete_core::hdlc::{self, HdlcDecoder};
 use rete_core::ifac::IfacKey;
 
 use std::io;
@@ -18,13 +18,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
-use crate::hub::{ClientHub, HubBroadcaster};
+use crate::hub::{ClientEvent, ClientHub, HubBroadcaster};
 use crate::InboundMsg;
 
-/// Maximum frame size for TCP interfaces.
+/// Maximum frame size for TCP shared-instance connections.
 ///
-/// Same as rete-iface-tcp: `link_mtu(8192) + header(20) + ifac(16) + margin(64)`.
-const TCP_MAX_FRAME: usize = 8292;
+/// Shared-instance TCP clients negotiate link MTUs up to 262 KB.
+/// Resource transfers and LXMF messages can produce single frames at
+/// the full link MTU. Set large enough to handle these.
+const TCP_MAX_FRAME: usize = 300 * 1024;
+/// Maximum HDLC-encoded size for TCP frames (worst case: every byte escaped + 2 flags).
+const TCP_MAX_ENCODED: usize = TCP_MAX_FRAME * 2 + 2;
 
 /// Configuration for [`TcpServer`].
 pub struct TcpServerConfig {
@@ -87,6 +91,17 @@ impl TcpServer {
         self.listener.local_addr()
     }
 
+    /// Enable [`ClientEvent`] notifications on the internal hub.
+    ///
+    /// Must be called before [`run()`](Self::run). Returns a receiver for
+    /// connect/disconnect events.
+    pub fn enable_client_events(
+        &mut self,
+        event_capacity: usize,
+    ) -> mpsc::Receiver<ClientEvent> {
+        self.hub.enable_events(event_capacity)
+    }
+
     /// Run the accept loop forever, spawning tasks for each connection.
     ///
     /// This should be spawned as a Tokio task.
@@ -129,7 +144,6 @@ impl TcpServer {
                             inbound_tx,
                             iface_idx,
                             client_id,
-                            &broadcaster,
                             ifac_r,
                         );
                         tokio::select! {
@@ -164,7 +178,8 @@ async fn tcp_client_write_task(
     mut rx: mpsc::Receiver<Vec<u8>>,
     ifac: Option<Arc<IfacKey>>,
 ) {
-    let mut encoded = vec![0u8; MAX_ENCODED];
+    let tcp_max_encoded = TCP_MAX_ENCODED;
+    let mut encoded = vec![0u8; tcp_max_encoded];
     let mut ifac_buf = vec![0u8; TCP_MAX_FRAME];
 
     while let Some(data) = rx.recv().await {
@@ -198,14 +213,12 @@ async fn tcp_client_write_task(
 /// Read task for a TCP server client.
 ///
 /// Reads bytes from the TCP stream, HDLC-decodes them, optionally
-/// IFAC-unprotects, forwards to the node inbound channel, and
-/// broadcasts to other clients in the hub.
+/// IFAC-unprotects, and forwards to the node inbound channel.
 async fn tcp_client_read_task(
     mut reader: tokio::net::tcp::OwnedReadHalf,
     inbound_tx: mpsc::Sender<InboundMsg>,
     iface_idx: u8,
     client_id: usize,
-    broadcaster: &HubBroadcaster,
     ifac: Option<Arc<IfacKey>>,
 ) {
     let mut decoder: Box<HdlcDecoder<TCP_MAX_FRAME>> = Box::new(HdlcDecoder::new());
@@ -242,17 +255,15 @@ async fn tcp_client_read_task(
 
                     let data = packet.to_vec();
 
-                    // Forward to node's inbound channel
+                    // Forward to node's inbound channel (node handles dispatch).
                     let msg = InboundMsg {
                         iface_idx,
-                        data: data.clone(),
+                        data,
+                        client_id: Some(client_id),
                     };
                     if inbound_tx.send(msg).await.is_err() {
                         return; // Node shut down
                     }
-
-                    // Broadcast to other clients in hub (not back to sender)
-                    broadcaster.broadcast(&data, Some(client_id)).await;
                 }
             }
         }
@@ -271,7 +282,7 @@ mod tests {
 
     /// Helper: HDLC-encode and write a raw packet over a TCP stream.
     async fn hdlc_write(stream: &mut TcpStream, data: &[u8]) {
-        let mut encoded = [0u8; MAX_ENCODED];
+        let mut encoded = vec![0u8; TCP_MAX_ENCODED];
         let n = hdlc::encode(data, &mut encoded).unwrap();
         stream.write_all(&encoded[..n]).await.unwrap();
         stream.flush().await.unwrap();
@@ -295,7 +306,7 @@ mod tests {
     use crate::test_utils::big_stack_test;
 
     #[test]
-    fn test_tcp_server_accept_and_relay() {
+    fn test_tcp_server_accept_and_forward() {
         big_stack_test(|| {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -315,7 +326,7 @@ mod tests {
 
                     // Connect two clients
                     let mut client1 = TcpStream::connect(addr).await.unwrap();
-                    let mut client2 = TcpStream::connect(addr).await.unwrap();
+                    let _client2 = TcpStream::connect(addr).await.unwrap();
                     tokio::time::sleep(Duration::from_millis(50)).await;
 
                     assert_eq!(broadcaster.client_count().await, 2);
@@ -324,19 +335,14 @@ mod tests {
                     let test_data = b"hello from client1";
                     hdlc_write(&mut client1, test_data).await;
 
-                    // Node inbound should receive it
+                    // Node inbound should receive it with correct iface_idx and client_id
                     let msg = timeout(Duration::from_secs(2), inbound_rx.recv())
                         .await
                         .expect("timeout")
                         .expect("channel closed");
                     assert_eq!(msg.iface_idx, 3);
                     assert_eq!(msg.data, test_data);
-
-                    // Client2 should receive it via intra-hub relay
-                    let relayed = timeout(Duration::from_secs(2), hdlc_read(&mut client2))
-                        .await
-                        .expect("timeout on client2");
-                    assert_eq!(relayed, test_data);
+                    assert!(msg.client_id.is_some(), "client_id should be set for hub clients");
                 });
         });
     }

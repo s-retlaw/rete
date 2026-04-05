@@ -46,6 +46,7 @@ pub enum InterfaceSlot {
 }
 
 impl InterfaceSlot {
+    /// Send to all destinations on this slot (broadcast for Hub, single send for Direct).
     async fn send_packet(&self, data: &[u8]) {
         match self {
             InterfaceSlot::Direct(tx) => {
@@ -53,6 +54,41 @@ impl InterfaceSlot {
             }
             InterfaceSlot::Hub(broadcaster) => {
                 broadcaster.broadcast(data, None).await;
+            }
+        }
+    }
+
+    /// Send only to the source client (Hub: targeted, Direct: normal send).
+    async fn send_to_source(&self, data: &[u8], source_client: Option<usize>) {
+        match self {
+            InterfaceSlot::Direct(tx) => {
+                let _ = tx.send(data.to_vec()).await;
+            }
+            InterfaceSlot::Hub(broadcaster) => {
+                if let Some(client_id) = source_client {
+                    broadcaster.send_to_client(client_id, data).await;
+                }
+            }
+        }
+    }
+
+    /// Send to all except the source client on this same slot.
+    ///
+    /// For Hub: broadcasts to all clients except `source_client`. If
+    /// `source_client` is None we cannot identify who to exclude so this
+    /// is a no-op (preserves the old skip-entire-slot behavior).
+    ///
+    /// For Direct: the single endpoint IS the source, so nothing to send.
+    async fn send_except_source(&self, data: &[u8], source_client: Option<usize>) {
+        match self {
+            InterfaceSlot::Direct(_) => {
+                // Only one endpoint and it is the source — nothing else to send to.
+            }
+            InterfaceSlot::Hub(broadcaster) => {
+                if let Some(client_id) = source_client {
+                    broadcaster.broadcast(data, Some(client_id)).await;
+                }
+                // source_client=None: can't identify who to exclude, skip.
             }
         }
     }
@@ -532,6 +568,8 @@ pub struct InboundMsg {
     pub iface_idx: u8,
     /// Raw packet data.
     pub data: Vec<u8>,
+    /// Client ID within a Hub slot (None for Direct interfaces).
+    pub client_id: Option<usize>,
 }
 
 impl TokioNode {
@@ -581,14 +619,14 @@ impl TokioNode {
         {
             let now = current_time_secs();
             let (announces, cached) = self.core.initial_announce(&mut rng, now);
-            dispatch(&slots, &announces, 0).await;
+            dispatch(&slots, &announces, 0, None).await;
             eprintln!("[rete] sent announce on {} interface slots", slots.len());
             if !cached.is_empty() {
                 eprintln!(
                     "[rete] flushing {} cached announces to interfaces",
                     cached.len()
                 );
-                dispatch(&slots, &cached, 0).await;
+                dispatch(&slots, &cached, 0, None).await;
             }
         }
 
@@ -615,19 +653,19 @@ impl TokioNode {
                     let Some(msg) = msg else { break };
                     let now = current_time_secs();
                     let outcome = self.core.handle_ingest(&msg.data, now, msg.iface_idx, &mut rng);
-                    dispatch(&slots, &outcome.packets, msg.iface_idx).await;
+                    dispatch(&slots, &outcome.packets, msg.iface_idx, msg.client_id).await;
                     for event in outcome.events {
                         let extra = on_event(event, &mut self.core, &mut rng);
-                        dispatch(&slots, &extra, 0).await;
+                        dispatch(&slots, &extra, 0, None).await;
                     }
                 }
                 cmd = cmd_rx.recv() => {
                     if let Some(cmd) = cmd {
                         let (packets, cont, event) = self.handle_command(cmd, &mut rng);
-                        dispatch(&slots, &packets, 0).await;
+                        dispatch(&slots, &packets, 0, None).await;
                         if let Some(e) = event {
                             let extra = on_event(e, &mut self.core, &mut rng);
-                            dispatch(&slots, &extra, 0).await;
+                            dispatch(&slots, &extra, 0, None).await;
                         }
                         if !cont { break; }
                     }
@@ -635,15 +673,15 @@ impl TokioNode {
                 _ = announce_timer.tick() => {
                     let now = current_time_secs();
                     self.core.queue_announce(None, &mut rng, now);
-                    dispatch(&slots, &self.core.flush_announces(now, &mut rng), 0).await;
+                    dispatch(&slots, &self.core.flush_announces(now, &mut rng), 0, None).await;
                 }
                 _ = tick_timer.tick() => {
                     let now = current_time_secs();
                     let outcome = self.core.handle_tick(now, &mut rng);
-                    dispatch(&slots, &outcome.packets, 0).await;
+                    dispatch(&slots, &outcome.packets, 0, None).await;
                     for event in outcome.events {
                         let extra = on_event(event, &mut self.core, &mut rng);
-                        dispatch(&slots, &extra, 0).await;
+                        dispatch(&slots, &extra, 0, None).await;
                     }
                 }
             }
@@ -654,19 +692,31 @@ impl TokioNode {
 /// Dispatch outbound packets across interface slots.
 ///
 /// Handles both point-to-point ([`InterfaceSlot::Direct`]) and multi-client
-/// ([`InterfaceSlot::Hub`]) slots uniformly.
-pub async fn dispatch(slots: &[InterfaceSlot], packets: &[OutboundPacket], source_iface: u8) {
+/// ([`InterfaceSlot::Hub`]) slots. For Hub slots, `source_client` enables
+/// per-client routing: `SourceInterface` sends only to the originating client,
+/// and `AllExceptSource` broadcasts to all Hub clients except the originator
+/// (instead of skipping the entire slot).
+pub async fn dispatch(
+    slots: &[InterfaceSlot],
+    packets: &[OutboundPacket],
+    source_iface: u8,
+    source_client: Option<usize>,
+) {
     for pkt in packets {
         match pkt.routing {
             PacketRouting::SourceInterface => {
                 if let Some(slot) = slots.get(source_iface as usize) {
-                    slot.send_packet(&pkt.data).await;
+                    slot.send_to_source(&pkt.data, source_client).await;
                 }
             }
             PacketRouting::AllExceptSource => {
                 for (i, slot) in slots.iter().enumerate() {
                     if i as u8 != source_iface {
+                        // Different interface: send to all its clients.
                         slot.send_packet(&pkt.data).await;
+                    } else {
+                        // Same interface: send to all clients except the source.
+                        slot.send_except_source(&pkt.data, source_client).await;
                     }
                 }
             }
@@ -703,6 +753,7 @@ where
                             let msg = InboundMsg {
                                 iface_idx,
                                 data: data.to_vec(),
+                                client_id: None,
                             };
                             if inbound_tx.send(msg).await.is_err() {
                                 break;

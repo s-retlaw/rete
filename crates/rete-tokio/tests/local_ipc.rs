@@ -30,8 +30,9 @@ fn make_node(seed: &[u8]) -> Box<TokioNode> {
 }
 
 // ---------------------------------------------------------------------------
-// Test: two clients connected to a server, client1 sends announce, client2
-// receives it via server relay.
+// Test: two clients connected to a server with a running node. Client1 sends
+// an announce, the node processes it canonically, and client2 receives it via
+// the node's AllExceptSource dispatch through the Hub.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -43,35 +44,56 @@ fn two_clients_announce_relay() {
             .unwrap()
             .block_on(async {
                 let name = format!("ipc_announce_{}", std::process::id());
-                let (inbound_tx, _inbound_rx) = mpsc::channel::<InboundMsg>(256);
+                let (inbound_tx, inbound_rx) = mpsc::channel::<InboundMsg>(256);
 
                 let server = LocalServer::bind(&name, inbound_tx, 0).unwrap();
                 let broadcaster = server.broadcaster();
+                let slot = rete_tokio::InterfaceSlot::Hub(broadcaster.clone());
+
                 tokio::spawn(server.run());
-                tokio::time::sleep(Duration::from_millis(50)).await;
 
-                // Connect two clients
-                let mut client1 = LocalClient::connect(&name).await.unwrap();
-                let mut client2 = LocalClient::connect(&name).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                // Start a node to process packets canonically.
+                let mut node = make_node(b"ipc-node-seed");
+                node.core.enable_transport();
+                let (_cmd_tx, cmd_rx) = mpsc::channel(16);
 
-                assert_eq!(broadcaster.client_count().await, 2);
+                let node_fut = node.run_multi_with_commands(
+                    vec![slot],
+                    inbound_rx,
+                    cmd_rx,
+                    |_event, _core, _rng| Vec::new(),
+                );
+                tokio::pin!(node_fut);
 
-                // Client1 builds and sends an announce packet
-                let node1 = make_node(b"ipc-client-1");
-                let announce = node1.build_announce(None).unwrap();
+                tokio::select! {
+                    _ = &mut node_fut => panic!("node exited unexpectedly"),
+                    _ = async {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
 
-                client1.send(&announce).await.unwrap();
+                        // Connect two clients
+                        let mut client1 = LocalClient::connect(&name).await.unwrap();
+                        let mut client2 = LocalClient::connect(&name).await.unwrap();
+                        tokio::time::sleep(Duration::from_millis(50)).await;
 
-                // Client2 should receive the announce
-                let mut buf = [0u8; MTU];
-                let frame = timeout(Duration::from_secs(2), client2.recv(&mut buf))
-                    .await
-                    .expect("timeout waiting for announce")
-                    .unwrap();
+                        assert_eq!(broadcaster.client_count().await, 2);
 
-                let pkt = Packet::parse(frame).expect("invalid packet");
-                assert_eq!(pkt.packet_type, PacketType::Announce);
+                        // Client1 builds and sends an announce packet
+                        let node1 = make_node(b"ipc-client-1");
+                        let announce = node1.build_announce(None).unwrap();
+
+                        client1.send(&announce).await.unwrap();
+
+                        // Client2 should receive the announce via canonical dispatch
+                        let mut buf = [0u8; MTU];
+                        let frame = timeout(Duration::from_secs(3), client2.recv(&mut buf))
+                            .await
+                            .expect("timeout waiting for announce")
+                            .unwrap();
+
+                        let pkt = Packet::parse(frame).expect("invalid packet");
+                        assert_eq!(pkt.packet_type, PacketType::Announce);
+                    } => {},
+                }
             });
     });
 }

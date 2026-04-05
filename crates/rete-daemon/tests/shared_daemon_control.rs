@@ -5,6 +5,8 @@
 //! - S1-UNX-CTRL-001: Unix status query
 //! - S1-TCP-CTRL-001: TCP status query
 //! - S1-TCP-CTRL-003: Auth failure handling
+//! - S2-UNX-OPER-002: Live path_table query (EPIC-07)
+//! - S2-UNX-OPER-003: next_hop query (EPIC-07)
 
 mod common;
 
@@ -31,20 +33,59 @@ async fn client_auth<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         "challenge must start with #CHALLENGE#{{sha256}}"
     );
 
-    // Compute HMAC-SHA256(authkey, challenge).
+    // Compute HMAC-SHA256(authkey, message) — matches Python
+    // multiprocessing.connection._create_response which computes
+    // HMAC over everything after #CHALLENGE# (i.e. {sha256}+nonce).
+    let message = &challenge[control::CHALLENGE_PREFIX.len()..];
     let mut mac = Hmac::<Sha256>::new_from_slice(authkey).unwrap();
-    mac.update(&challenge);
+    mac.update(message);
     let digest = mac.finalize().into_bytes();
 
     // Send digest.
     let mut response = Vec::with_capacity(8 + 32);
-    response.extend_from_slice(b"{sha256}");
+    response.extend_from_slice(control::SHA256_TAG);
     response.extend_from_slice(&digest);
     control::write_message(stream, &response).await.unwrap();
 
     // Read welcome/failure.
     let result = control::read_message(stream).await.unwrap();
-    result == b"#WELCOME#"
+    if result != b"#WELCOME#" {
+        return false;
+    }
+
+    // Phase 2: Mutual auth — client challenges the server.
+    // Python's multiprocessing.connection.Client does:
+    //   answer_challenge(c, authkey)   ← done above
+    //   deliver_challenge(c, authkey)  ← now we challenge the server
+    let mut nonce = [0u8; 40];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+    let nonce_hex = hex::encode(nonce);
+
+    let mut challenge2 = Vec::with_capacity(11 + 8 + 80);
+    challenge2.extend_from_slice(control::CHALLENGE_PREFIX);
+    challenge2.extend_from_slice(control::SHA256_TAG);
+    challenge2.extend_from_slice(nonce_hex.as_bytes());
+    control::write_message(stream, &challenge2).await.unwrap();
+
+    // Read server's response
+    let server_response = control::read_message(stream).await.unwrap();
+    let server_hmac = if server_response.starts_with(control::SHA256_TAG) {
+        &server_response[control::SHA256_TAG.len()..]
+    } else {
+        &server_response[..]
+    };
+
+    // Verify server's HMAC over message (everything after #CHALLENGE#)
+    let msg2 = &challenge2[control::CHALLENGE_PREFIX.len()..];
+    let mut mac2 = Hmac::<Sha256>::new_from_slice(authkey).unwrap();
+    mac2.update(msg2);
+    if mac2.verify_slice(server_hmac).is_err() {
+        return false;
+    }
+
+    // Send welcome
+    control::write_message(stream, b"#WELCOME#").await.unwrap();
+    true
 }
 
 /// Send an RPC request and receive the response (post-auth).
@@ -375,6 +416,330 @@ fn test_tcp_control_multiple_queries() {
                             )]);
                             let resp = rpc_query(&mut stream, &request).await;
                             assert_eq!(resp.as_int().unwrap(), 0);
+                        }
+                    } => {},
+                }
+
+                daemon.shutdown().await;
+                let result = timeout(Duration::from_secs(5), &mut run_future).await;
+                assert!(result.is_ok(), "daemon must shut down within 5s");
+            });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Live path_table after announce injection (EPIC-07)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_unix_path_table_with_announce() {
+    big_stack_test(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use rete_core::Identity;
+                use rete_stack::ReteInterface;
+                use rete_tokio::local::LocalClient;
+                use rete_tokio::TokioNode;
+
+                let name = format!("ctrl-pt-{}", std::process::id());
+                let data_dir = tempfile::tempdir().unwrap();
+
+                let config = make_unix_config(&name);
+                let (daemon, run_future) = SharedDaemonBuilder::new(config)
+                    .data_dir(data_dir.path())
+                    .start()
+                    .await
+                    .expect("daemon must start");
+
+                tokio::pin!(run_future);
+
+                let identity_bytes = std::fs::read(data_dir.path().join("identity")).unwrap();
+                let authkey = control::derive_authkey(&identity_bytes);
+
+                tokio::select! {
+                    _ = &mut run_future => panic!("daemon exited unexpectedly"),
+                    _ = async {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+
+                        // Inject announce via a client.
+                        let mut client = LocalClient::connect(&name)
+                            .await.expect("client connect");
+
+                        let announce_identity = Identity::from_seed(b"path-table-test").unwrap();
+                        let announce_node = Box::new(
+                            TokioNode::new(announce_identity, "testapp", &["aspect1"]).unwrap()
+                        );
+                        let dest_hash = announce_node.core.primary_dest().hash();
+                        let announce = announce_node.build_announce(None).unwrap();
+                        client.send(&announce).await.expect("send announce");
+
+                        // Wait for node to process announce + tick to drain RPC.
+                        tokio::time::sleep(Duration::from_secs(6)).await;
+
+                        // Query path_table via RPC.
+                        let rpc_path = format!("\0rns/{name}/rpc");
+                        let mut stream = tokio::net::UnixStream::connect(&rpc_path)
+                            .await.expect("connect to control socket");
+                        assert!(client_auth(&mut stream, &authkey).await);
+
+                        let request = pickle::PickleValue::Dict(vec![(
+                            pickle::PickleValue::String("get".into()),
+                            pickle::PickleValue::String("path_table".into()),
+                        )]);
+                        let response = rpc_query(&mut stream, &request).await;
+
+                        let dict = response.as_dict().expect("path_table must be dict");
+                        assert!(
+                            !dict.is_empty(),
+                            "path_table must have entries after announce injection"
+                        );
+
+                        // Verify the dest hash is present as a key.
+                        let found = dict.iter().any(|(k, _)| {
+                            k.as_bytes().map_or(false, |b| b == dest_hash.as_bytes())
+                        });
+                        assert!(found, "dest_hash must be in path_table");
+                    } => {},
+                }
+
+                daemon.shutdown().await;
+                let result = timeout(Duration::from_secs(5), &mut run_future).await;
+                assert!(result.is_ok(), "daemon must shut down within 5s");
+            });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: next_hop query for known and unknown destinations (EPIC-07)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_unix_next_hop_query() {
+    big_stack_test(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use rete_core::Identity;
+                use rete_stack::ReteInterface;
+                use rete_tokio::local::LocalClient;
+                use rete_tokio::TokioNode;
+
+                let name = format!("ctrl-nh-{}", std::process::id());
+                let data_dir = tempfile::tempdir().unwrap();
+
+                let config = make_unix_config(&name);
+                let (daemon, run_future) = SharedDaemonBuilder::new(config)
+                    .data_dir(data_dir.path())
+                    .start()
+                    .await
+                    .expect("daemon must start");
+
+                tokio::pin!(run_future);
+
+                let identity_bytes = std::fs::read(data_dir.path().join("identity")).unwrap();
+                let authkey = control::derive_authkey(&identity_bytes);
+
+                tokio::select! {
+                    _ = &mut run_future => panic!("daemon exited unexpectedly"),
+                    _ = async {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+
+                        // Inject announce.
+                        let mut client = LocalClient::connect(&name)
+                            .await.expect("client connect");
+
+                        let announce_identity = Identity::from_seed(b"next-hop-test").unwrap();
+                        let announce_node = Box::new(
+                            TokioNode::new(announce_identity, "testapp", &["aspect1"]).unwrap()
+                        );
+                        let dest_hash = announce_node.core.primary_dest().hash();
+                        let announce = announce_node.build_announce(None).unwrap();
+                        client.send(&announce).await.expect("send announce");
+
+                        // Wait for processing + tick.
+                        tokio::time::sleep(Duration::from_secs(6)).await;
+
+                        let rpc_path = format!("\0rns/{name}/rpc");
+
+                        // Query next_hop for the known destination.
+                        {
+                            let mut stream = tokio::net::UnixStream::connect(&rpc_path)
+                                .await.expect("connect");
+                            assert!(client_auth(&mut stream, &authkey).await);
+
+                            let request = pickle::PickleValue::Dict(vec![
+                                (pickle::PickleValue::String("get".into()),
+                                 pickle::PickleValue::String("next_hop".into())),
+                                (pickle::PickleValue::String("destination_hash".into()),
+                                 pickle::PickleValue::Bytes(dest_hash.as_bytes().to_vec())),
+                            ]);
+                            let response = rpc_query(&mut stream, &request).await;
+                            // Direct path has no via, so next_hop returns None.
+                            assert!(
+                                matches!(response, pickle::PickleValue::None),
+                                "direct path should have no next_hop (None), got: {response:?}"
+                            );
+                        }
+
+                        // Query next_hop for an unknown destination.
+                        {
+                            let mut stream = tokio::net::UnixStream::connect(&rpc_path)
+                                .await.expect("connect");
+                            assert!(client_auth(&mut stream, &authkey).await);
+
+                            let request = pickle::PickleValue::Dict(vec![
+                                (pickle::PickleValue::String("get".into()),
+                                 pickle::PickleValue::String("next_hop".into())),
+                                (pickle::PickleValue::String("destination_hash".into()),
+                                 pickle::PickleValue::Bytes(vec![0xDE; 16])),
+                            ]);
+                            let response = rpc_query(&mut stream, &request).await;
+                            assert!(
+                                matches!(response, pickle::PickleValue::None),
+                                "unknown dest should return None, got: {response:?}"
+                            );
+                        }
+
+                        // Query next_hop_if_name for the known destination.
+                        {
+                            let mut stream = tokio::net::UnixStream::connect(&rpc_path)
+                                .await.expect("connect");
+                            assert!(client_auth(&mut stream, &authkey).await);
+
+                            let request = pickle::PickleValue::Dict(vec![
+                                (pickle::PickleValue::String("get".into()),
+                                 pickle::PickleValue::String("next_hop_if_name".into())),
+                                (pickle::PickleValue::String("destination_hash".into()),
+                                 pickle::PickleValue::Bytes(dest_hash.as_bytes().to_vec())),
+                            ]);
+                            let response = rpc_query(&mut stream, &request).await;
+                            let name_str = response.as_str().expect("next_hop_if_name should return string");
+                            assert!(
+                                name_str.contains("Shared Instance"),
+                                "interface name should contain 'Shared Instance', got: {name_str}"
+                            );
+                        }
+                    } => {},
+                }
+
+                daemon.shutdown().await;
+                let result = timeout(Duration::from_secs(5), &mut run_future).await;
+                assert!(result.is_ok(), "daemon must shut down within 5s");
+            });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Drop path via RPC (EPIC-07)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_unix_drop_path_via_rpc() {
+    big_stack_test(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use rete_core::Identity;
+                use rete_stack::ReteInterface;
+                use rete_tokio::local::LocalClient;
+                use rete_tokio::TokioNode;
+
+                let name = format!("ctrl-dp-{}", std::process::id());
+                let data_dir = tempfile::tempdir().unwrap();
+
+                let config = make_unix_config(&name);
+                let (daemon, run_future) = SharedDaemonBuilder::new(config)
+                    .data_dir(data_dir.path())
+                    .start()
+                    .await
+                    .expect("daemon must start");
+
+                tokio::pin!(run_future);
+
+                let identity_bytes = std::fs::read(data_dir.path().join("identity")).unwrap();
+                let authkey = control::derive_authkey(&identity_bytes);
+
+                tokio::select! {
+                    _ = &mut run_future => panic!("daemon exited unexpectedly"),
+                    _ = async {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+
+                        // Inject announce.
+                        let mut client = LocalClient::connect(&name)
+                            .await.expect("client connect");
+
+                        let announce_identity = Identity::from_seed(b"drop-path-test").unwrap();
+                        let announce_node = Box::new(
+                            TokioNode::new(announce_identity, "testapp", &["aspect1"]).unwrap()
+                        );
+                        let dest_hash = announce_node.core.primary_dest().hash();
+                        let announce = announce_node.build_announce(None).unwrap();
+                        client.send(&announce).await.expect("send announce");
+
+                        // Wait for processing + tick.
+                        tokio::time::sleep(Duration::from_secs(6)).await;
+
+                        let rpc_path = format!("\0rns/{name}/rpc");
+
+                        // Verify path exists.
+                        {
+                            let mut stream = tokio::net::UnixStream::connect(&rpc_path)
+                                .await.expect("connect");
+                            assert!(client_auth(&mut stream, &authkey).await);
+                            let request = pickle::PickleValue::Dict(vec![(
+                                pickle::PickleValue::String("get".into()),
+                                pickle::PickleValue::String("path_table".into()),
+                            )]);
+                            let response = rpc_query(&mut stream, &request).await;
+                            assert!(
+                                !response.as_dict().unwrap().is_empty(),
+                                "path_table must not be empty before drop"
+                            );
+                        }
+
+                        // Drop the path.
+                        {
+                            let mut stream = tokio::net::UnixStream::connect(&rpc_path)
+                                .await.expect("connect");
+                            assert!(client_auth(&mut stream, &authkey).await);
+                            let request = pickle::PickleValue::Dict(vec![
+                                (pickle::PickleValue::String("drop".into()),
+                                 pickle::PickleValue::String("path".into())),
+                                (pickle::PickleValue::String("destination_hash".into()),
+                                 pickle::PickleValue::Bytes(dest_hash.as_bytes().to_vec())),
+                            ]);
+                            let response = rpc_query(&mut stream, &request).await;
+                            assert_eq!(response.as_str().unwrap(), "ok");
+                        }
+
+                        // Wait for drop to be processed.
+                        tokio::time::sleep(Duration::from_secs(6)).await;
+
+                        // Verify path is gone.
+                        {
+                            let mut stream = tokio::net::UnixStream::connect(&rpc_path)
+                                .await.expect("connect");
+                            assert!(client_auth(&mut stream, &authkey).await);
+                            let request = pickle::PickleValue::Dict(vec![(
+                                pickle::PickleValue::String("get".into()),
+                                pickle::PickleValue::String("path_table".into()),
+                            )]);
+                            let response = rpc_query(&mut stream, &request).await;
+                            let dict = response.as_dict().unwrap();
+                            let still_present = dict.iter().any(|(k, _)| {
+                                k.as_bytes().map_or(false, |b| b == dest_hash.as_bytes())
+                            });
+                            assert!(
+                                !still_present,
+                                "dropped dest_hash must not appear in path_table"
+                            );
                         }
                     } => {},
                 }

@@ -17,3 +17,4 @@ pub mod file_store;
 pub mod identity;
 pub mod monitoring;
 pub mod pickle;
+pub mod session;

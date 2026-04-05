@@ -28,6 +28,9 @@ const BINPUT: u8 = b'q';
 const BINGET: u8 = b'h';
 const MEMOIZE: u8 = 0x94;
 const FRAME: u8 = 0x95;
+const GLOBAL: u8 = b'c';
+const TUPLE2: u8 = 0x86;
+const REDUCE: u8 = b'R';
 
 // ── Public value type ───────────────────────────────────────────────────────
 
@@ -77,6 +80,14 @@ impl PickleValue {
                 .find(|(k, _)| k.as_str() == Some(key))
                 .map(|(_, v)| v)
         })
+    }
+
+    /// Get as byte slice reference.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            PickleValue::Bytes(b) => Some(b),
+            _ => None,
+        }
     }
 
     /// Get as list reference.
@@ -263,6 +274,43 @@ pub fn decode(data: &[u8]) -> Result<PickleValue, DecodeError> {
                 }
             }
 
+            // ── Protocol 2 bytes reconstruction ────────────────────────
+            // In proto 2, bytes(b'\x00..') is encoded as:
+            //   GLOBAL '_codecs\nencode\n'
+            //   BINUNICODE <raw string data>
+            //   BINUNICODE 'latin1'
+            //   TUPLE2
+            //   REDUCE
+            // We push a sentinel for GLOBAL, build the tuple, and reduce.
+            GLOBAL => {
+                // Read two newline-terminated strings: module\nname\n
+                let mod_end = data[pos..].iter().position(|&b| b == b'\n')
+                    .ok_or(DecodeError::UnexpectedEof)?;
+                pos += mod_end + 1; // skip module + newline
+                let name_end = data[pos..].iter().position(|&b| b == b'\n')
+                    .ok_or(DecodeError::UnexpectedEof)?;
+                let _func_name = &data[pos..pos + name_end];
+                pos += name_end + 1;
+                // Push a sentinel — the REDUCE handler will interpret it.
+                stack.push(StackItem::Value(PickleValue::String("__global__".into())));
+            }
+            TUPLE2 => {
+                let b = pop_value(&mut stack)?;
+                let a = pop_value(&mut stack)?;
+                stack.push(StackItem::Value(PickleValue::List(vec![a, b])));
+            }
+            REDUCE => {
+                let args = pop_value(&mut stack)?;
+                let callable = pop_value(&mut stack)?;
+                // Recognize _codecs.encode(string, 'latin1') -> bytes
+                let result = if callable.as_str() == Some("__global__") {
+                    decode_latin1_bytes(&args)
+                } else {
+                    None
+                };
+                stack.push(StackItem::Value(result.unwrap_or(PickleValue::None)));
+            }
+
             // ── Memo ────────────────────────────────────────────────────
             BINPUT => {
                 need(data, pos, 1)?;
@@ -292,6 +340,16 @@ pub fn decode(data: &[u8]) -> Result<PickleValue, DecodeError> {
 }
 
 // ── Decoder helpers ─────────────────────────────────────────────────────────
+
+/// Try to decode a `_codecs.encode(string, 'latin1')` REDUCE call as bytes.
+fn decode_latin1_bytes(args: &PickleValue) -> Option<PickleValue> {
+    let items = args.as_list()?;
+    if items.len() != 2 {
+        return None;
+    }
+    let s = items[0].as_str()?;
+    Some(PickleValue::Bytes(s.chars().map(|c| c as u8).collect()))
+}
 
 fn need(data: &[u8], pos: usize, n: usize) -> Result<(), DecodeError> {
     if pos + n > data.len() {

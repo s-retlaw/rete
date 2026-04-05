@@ -4,15 +4,19 @@
 //! [`SharedDaemon`] is a handle to the running daemon for shutdown control.
 
 use crate::config::{SharedInstanceConfig, SharedInstanceType};
-use crate::control::{self, ControlContext, InterfaceInfo};
+use crate::control::{self, ControlContext, InterfaceInfo, RpcQuery};
 use crate::identity::{load_or_create_identity, JsonFileStore};
+use crate::session::SessionRegistry;
+use rete_tokio::InboundMsg;
 
 use rete_stack::OutboundPacket;
+use rete_tokio::hub::ClientEvent;
 use rete_tokio::{InterfaceSlot, NodeCommand, NodeEvent, TokioNode};
 
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -22,6 +26,9 @@ pub const DAEMON_READY: &str = "DAEMON_READY";
 
 /// Emitted to stdout on clean shutdown.
 pub const DAEMON_SHUTDOWN: &str = "DAEMON_SHUTDOWN";
+
+/// Periodic snapshot interval in ticks (~5 min at 5-second tick rate).
+const SNAPSHOT_INTERVAL_TICKS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -94,11 +101,7 @@ impl SharedDaemonBuilder {
     /// Emits [`DAEMON_READY`] to stdout after all listeners are bound.
     /// Emits [`DAEMON_SHUTDOWN`] to stdout before the future resolves.
     pub async fn start(self) -> Result<(SharedDaemon, DaemonFuture), DaemonError> {
-        if !self.config.share_instance {
-            return Err(DaemonError::Config(
-                "share_instance is false — this config is for a client, not a daemon".into(),
-            ));
-        }
+        self.config.validate().map_err(DaemonError::Config)?;
 
         // Ensure data directory exists.
         std::fs::create_dir_all(&self.data_dir).map_err(|e| {
@@ -114,6 +117,8 @@ impl SharedDaemonBuilder {
 
         // Extract private key for authkey derivation before identity is moved.
         let private_key = identity.private_key();
+        let identity_hash = identity.hash();
+        eprintln!("[rete-shared] identity: {}", hex::encode(identity_hash.as_bytes()));
 
         // Create the node.
         let mut node = TokioNode::new_boxed(identity, "rete", &["shared"])
@@ -122,29 +127,33 @@ impl SharedDaemonBuilder {
         // Enable transport mode if requested.
         if self.transport_mode {
             node.core.enable_transport();
+            eprintln!("[rete-shared] transport mode enabled");
         }
 
         // Load snapshot if available.
-        let mut snapshot_store = JsonFileStore::new(self.data_dir.join("snapshot.json"));
+        let snapshot_store = std::cell::RefCell::new(
+            JsonFileStore::new(self.data_dir.join("snapshot.json")),
+        );
         {
             use rete_transport::SnapshotStore;
-            if let Ok(Some(snap)) = snapshot_store.load() {
+            if let Ok(Some(snap)) = snapshot_store.borrow_mut().load() {
                 node.core.load_snapshot(&snap);
             }
         }
 
         // Create channels.
-        let (inbound_tx, inbound_rx) = mpsc::channel(256);
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(256);
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
         // Bind listener based on transport type.
         type ServerFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-        let (slot, server_future): (InterfaceSlot, ServerFuture) = match self
-            .config
-            .shared_instance_type
-        {
+        let (slot, server_future, client_events_rx): (
+            InterfaceSlot,
+            ServerFuture,
+            mpsc::Receiver<ClientEvent>,
+        ) = match self.config.shared_instance_type {
             SharedInstanceType::Unix => {
-                let server =
+                let mut server =
                     rete_tokio::local::LocalServer::bind(&self.config.instance_name, inbound_tx, 0)
                         .map_err(|e| {
                             DaemonError::Bind(format!(
@@ -153,12 +162,17 @@ impl SharedDaemonBuilder {
                                 self.config.instance_name
                             ))
                         })?;
+                let events_rx = server.enable_client_events(64);
                 let broadcaster = server.broadcaster();
-                (InterfaceSlot::Hub(broadcaster), Box::pin(server.run()))
+                (
+                    InterfaceSlot::Hub(broadcaster),
+                    Box::pin(server.run()),
+                    events_rx,
+                )
             }
             SharedInstanceType::Tcp => {
                 let addr = format!("127.0.0.1:{}", self.config.shared_instance_port);
-                let server = rete_tokio::TcpServer::bind(
+                let mut server = rete_tokio::TcpServer::bind(
                     &addr,
                     inbound_tx,
                     0,
@@ -172,20 +186,38 @@ impl SharedDaemonBuilder {
                              (another daemon may be running on the same port)",
                     ))
                 })?;
+                let events_rx = server.enable_client_events(64);
                 let broadcaster = server.broadcaster();
-                (InterfaceSlot::Hub(broadcaster), Box::pin(server.run()))
+                (
+                    InterfaceSlot::Hub(broadcaster),
+                    Box::pin(server.run()),
+                    events_rx,
+                )
             }
         };
+
+        // Create session registry for client lifecycle tracking.
+        let session_registry = SessionRegistry::new();
 
         // Compute authkey for RPC control plane.
         let authkey = match self.config.rpc_key {
             Some(ref rpc_key) if !rpc_key.is_empty() => hex::decode(rpc_key)
                 .map_err(|e| DaemonError::Config(format!("invalid rpc_key (must be hex): {e}")))?,
-            _ => control::derive_authkey(&private_key).to_vec(),
+            _ => control::derive_authkey(&private_key),
         };
 
         let iface_info = InterfaceInfo::from_config(&self.config);
-        let control_ctx = Arc::new(ControlContext::new(authkey, iface_info));
+
+        // Create the RPC query channel and shared client count.
+        let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcQuery>(64);
+        let client_count = Arc::new(AtomicUsize::new(0));
+
+        let control_ctx = Arc::new(ControlContext::new(
+            authkey,
+            iface_info.clone(),
+            rpc_tx,
+            client_count.clone(),
+        ));
 
         // Bind control listener.
         type ControlFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
@@ -230,25 +262,87 @@ impl SharedDaemonBuilder {
                 // Spawn control listener.
                 let control_handle = tokio::spawn(control_future);
 
+                // Spawn session event processor.
+                let session_client_count = client_count.clone();
+                let session_handle = tokio::spawn(async move {
+                    process_client_events(client_events_rx, session_registry, session_client_count).await;
+                });
+
+                // Extract the broadcaster for sending cached announces to new clients.
+                let announce_broadcaster = match &slot {
+                    InterfaceSlot::Hub(b) => Some(b.clone()),
+                    _ => None,
+                };
+
                 let slots = vec![slot];
 
-                // Run the node event loop.
+                // Intercept inbound messages to replay cached announces to
+                // newly-connected clients.  Python rnsd does this implicitly;
+                // without it, clients that connect after an announce miss it.
+                const MAX_CACHED_ANNOUNCES: usize = 256;
+                let (wrapped_tx, wrapped_rx) = tokio::sync::mpsc::channel::<InboundMsg>(256);
+                tokio::spawn(async move {
+                    let mut known_clients: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                    let mut cached_announces: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+                    while let Some(msg) = inbound_rx.recv().await {
+                        if let Some(cid) = msg.client_id {
+                            if known_clients.insert(cid) {
+                                for ann in &cached_announces {
+                                    if let Some(ref bc) = announce_broadcaster {
+                                        bc.send_to_client(cid, ann).await;
+                                    }
+                                }
+                            }
+                        }
+                        if msg.data.len() > 2 && (msg.data[0] & 0x03) == 1 {
+                            cached_announces.push_back(msg.data.clone());
+                            while cached_announces.len() > MAX_CACHED_ANNOUNCES {
+                                cached_announces.pop_front();
+                            }
+                        }
+                        let _ = wrapped_tx.send(msg).await;
+                    }
+                });
+
+                // Run the node event loop with periodic snapshot on tick
+                // and RPC query drain.
+                let rpc_iface_name = iface_info.name.clone();
+                let mut tick_count: u64 = 0;
                 node.run_multi_with_commands(
                     slots,
-                    inbound_rx,
+                    wrapped_rx,
                     cmd_rx,
-                    |_event: NodeEvent,
-                     _core: &mut rete_stack::HostedNodeCore,
+                    |event: NodeEvent,
+                     core: &mut rete_stack::HostedNodeCore,
                      _rng: &mut rand::rngs::ThreadRng|
-                     -> Vec<OutboundPacket> { Vec::new() },
+                     -> Vec<OutboundPacket> {
+                        // Drain pending RPC queries on every event loop iteration.
+                        control::drain_rpc_queries(&mut rpc_rx, core, &rpc_iface_name);
+
+                        if let NodeEvent::Tick { .. } = &event {
+                            tick_count += 1;
+                            if tick_count % SNAPSHOT_INTERVAL_TICKS == 0 && core.path_count() > 0 {
+                                use rete_transport::SnapshotStore;
+                                let snap = core.save_snapshot(
+                                    rete_transport::SnapshotDetail::Standard,
+                                );
+                                if let Err(e) = snapshot_store.borrow_mut().save(&snap) {
+                                    eprintln!("[rete-shared] periodic snapshot failed: {e}");
+                                }
+                            }
+                        }
+                        Vec::new()
+                    },
                 )
                 .await;
 
-                // Abort the server and control accept loops.
+                // Abort the server, control, and session accept loops.
                 server_handle.abort();
                 control_handle.abort();
+                session_handle.abort();
                 let _ = server_handle.await;
                 let _ = control_handle.await;
+                let _ = session_handle.await;
 
                 // Save snapshot on shutdown.
                 {
@@ -256,7 +350,7 @@ impl SharedDaemonBuilder {
                     let snap = node
                         .core
                         .save_snapshot(rete_transport::SnapshotDetail::Standard);
-                    if let Err(e) = snapshot_store.save(&snap) {
+                    if let Err(e) = snapshot_store.borrow_mut().save(&snap) {
                         eprintln!("[rete-shared] failed to save snapshot: {e}");
                     }
                 }
@@ -320,5 +414,35 @@ impl std::future::Future for DaemonFuture {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<()> {
         self.inner.as_mut().poll(cx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session event processor
+// ---------------------------------------------------------------------------
+
+/// Process client connect/disconnect events and update the session registry.
+async fn process_client_events(
+    mut rx: mpsc::Receiver<ClientEvent>,
+    mut registry: SessionRegistry,
+    client_count: Arc<AtomicUsize>,
+) {
+    while let Some(event) = rx.recv().await {
+        match event {
+            ClientEvent::Connected(id) => {
+                registry.register(id);
+                client_count.store(registry.session_count(), Ordering::Relaxed);
+                eprintln!("[rete-session] client {id} connected ({} active)", registry.session_count());
+            }
+            ClientEvent::Disconnected(id) => {
+                let removed = registry.unregister(id);
+                client_count.store(registry.session_count(), Ordering::Relaxed);
+                eprintln!(
+                    "[rete-session] client {id} disconnected, {} dest(s) released ({} active)",
+                    removed.len(),
+                    registry.session_count(),
+                );
+            }
+        }
     }
 }

@@ -132,7 +132,7 @@ fn forward_excludes_source_interface() {
                 node.core.transport.insert_path(dest, path);
 
                 let data = build_header2_data(local_hash.as_bytes(), dest.as_bytes(), b"forward test");
-                let inbound = vec![InboundMsg { iface_idx: 0, data }];
+                let inbound = vec![InboundMsg { iface_idx: 0, data, client_id: None }];
 
                 let outbound = run_multi_with_inbound(&mut node, 2, inbound).await;
 
@@ -207,7 +207,7 @@ fn local_data_not_forwarded() {
                 let node_dest = *node.core.dest_hash();
 
                 let data = build_header1_data(node_dest.as_bytes(), b"local data");
-                let inbound = vec![InboundMsg { iface_idx: 0, data }];
+                let inbound = vec![InboundMsg { iface_idx: 0, data, client_id: None }];
 
                 let outbound = run_multi_with_inbound(&mut node, 2, inbound).await;
 
@@ -251,7 +251,7 @@ fn proof_routed_to_correct_interface() {
                 let data = build_header2_data(local_hash.as_bytes(), dest.as_bytes(), b"proof routing test");
                 let pkt_hash = Packet::parse(&data).unwrap().compute_hash();
 
-                let inbound_data = vec![InboundMsg { iface_idx: 1, data }];
+                let inbound_data = vec![InboundMsg { iface_idx: 1, data, client_id: None }];
                 let _ = run_multi_with_inbound(&mut node, 3, inbound_data).await;
 
                 // Now send a PROOF with dest_hash = truncated packet hash on iface 2
@@ -271,6 +271,7 @@ fn proof_routed_to_correct_interface() {
                 let inbound_proof = vec![InboundMsg {
                     iface_idx: 2,
                     data: proof,
+                    client_id: None,
                 }];
 
                 let outbound = run_multi_with_inbound(&mut node, 3, inbound_proof).await;

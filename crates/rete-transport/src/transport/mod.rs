@@ -621,8 +621,23 @@ impl<S: TransportStorage> Transport<S> {
         // Compute packet hash for dedup
         let pkt_hash = pkt.compute_hash();
 
-        // Dedup check
-        if self.is_duplicate(&pkt_hash) {
+        // Dedup check.
+        //
+        // Skip dedup for link-type traffic on the local Hub interface
+        // (iface 0 when local_identity_hash is set, i.e. transport mode).
+        // In shared-mode daemons, link keepalives are identical packets
+        // that must still be relayed between local clients. Python rnsd
+        // relays to other shared clients before the dedup check, achieving
+        // the same effect. Without this skip, the daemon deduplicates
+        // repeated keepalives, causing remote link endpoints to time out
+        // and breaking resource transfers.
+        // Skip dedup for link traffic transiting through this relay (foreign
+        // links we don't own). Identical keepalives would otherwise be
+        // permanently flagged, causing remote link endpoints to time out.
+        let is_foreign_link_transit = pkt.dest_type == DestType::Link
+            && self.local_identity_hash.is_some()
+            && !self.links.contains_key(&LinkId::from_slice(pkt.destination_hash));
+        if !is_foreign_link_transit && self.is_duplicate(&pkt_hash) {
             relay_log!(
                 "[relay] DEDUP pkt_hash={} type={:?} dest_type={:?}",
                 hex_short(&pkt_hash),

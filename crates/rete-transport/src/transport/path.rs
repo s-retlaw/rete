@@ -3,7 +3,7 @@
 use crate::path::Path;
 use crate::snapshot;
 use crate::storage::StorageMap;
-use rete_core::DestHash;
+use rete_core::{DestHash, IdentityHash};
 
 use super::Transport;
 
@@ -47,9 +47,19 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
         self.paths.remove(dest);
     }
 
+    /// Remove all paths that route via a specific next-hop identity.
+    pub fn remove_paths_via(&mut self, via: &IdentityHash) {
+        self.paths.retain(|_, p| p.via.as_ref() != Some(via));
+    }
+
     /// Number of known paths.
     pub fn path_count(&self) -> usize {
         self.paths.len()
+    }
+
+    /// Iterate over all known paths as `(dest_hash, path)` pairs.
+    pub fn iter_paths(&self) -> impl Iterator<Item = (&DestHash, &Path)> {
+        self.paths.iter()
     }
 
     /// Return cached raw announce packets from the path table.

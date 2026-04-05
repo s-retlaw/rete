@@ -19,6 +19,61 @@ use crate::transport::{AnnounceRateEntry, ChannelReceipt, LinkTableEntry, Revers
 use rete_core::{DestHash, LinkId, TRUNCATED_HASH_LEN};
 
 // ---------------------------------------------------------------------------
+// BoundedVecDeque — VecDeque with a capacity limit (for dedup windows)
+// ---------------------------------------------------------------------------
+
+/// A `VecDeque` that reports `is_full()` when it reaches a fixed capacity.
+///
+/// Matches Python RNS's `Transport.HASHLIST_MAXSIZE = 4096`.
+/// Without this, the hosted dedup window never evicts entries, causing
+/// identical keepalive hashes to be permanently flagged as duplicates.
+#[derive(Debug)]
+pub struct BoundedVecDeque<V> {
+    inner: VecDeque<V>,
+    capacity: usize,
+}
+
+impl<V> Default for BoundedVecDeque<V> {
+    fn default() -> Self {
+        Self {
+            inner: VecDeque::with_capacity(4096),
+            capacity: 4096,
+        }
+    }
+}
+
+impl<V> StorageDeque<V> for BoundedVecDeque<V> {
+    fn push_back(&mut self, value: V) -> Result<(), V> {
+        self.inner.push_back(value);
+        Ok(())
+    }
+    fn pop_front(&mut self) -> Option<V> {
+        self.inner.pop_front()
+    }
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+    fn is_full(&self) -> bool {
+        self.inner.len() >= self.capacity
+    }
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a V>
+    where
+        V: 'a,
+    {
+        self.inner.iter()
+    }
+    fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut V>
+    where
+        V: 'a,
+    {
+        self.inner.iter_mut()
+    }
+    fn clear(&mut self) {
+        self.inner.clear()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // StdStorage — heap-allocated, growable
 // ---------------------------------------------------------------------------
 
@@ -43,7 +98,7 @@ impl TransportStorage for StdStorage {
     type LinkTableMap = HashMap<LinkId, LinkTableEntry>;
 
     type AnnounceDeque = VecDeque<PendingAnnounce>;
-    type DedupDeque = VecDeque<[u8; 32]>;
+    type DedupDeque = BoundedVecDeque<[u8; 32]>;
 }
 
 // ---------------------------------------------------------------------------

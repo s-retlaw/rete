@@ -29,10 +29,11 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     ) -> IngestOutcome {
         let len = raw.len();
 
-        // TCP links can carry packets up to ~8192 bytes (link MTU negotiated
-        // during handshake). Allow up to TCP_MAX_PKT for TCP-capable nodes.
-        const TCP_MAX_PKT: usize = 8292;
-        if len > TCP_MAX_PKT {
+        // Local shared-instance links negotiate MTUs up to 262 KB.
+        // Resource transfers and LXMF messages can produce single packets
+        // at the full link MTU. Allow up to 300 KB for hosted nodes.
+        const MAX_INGEST_PKT: usize = 300 * 1024;
+        if len > MAX_INGEST_PKT {
             return IngestOutcome::empty();
         }
 

@@ -8,8 +8,17 @@
 //! The framing is identical to the TCP interface (HDLC byte-stuffing with
 //! FLAG=0x7E, ESC=0x7D).
 
-use rete_core::hdlc::{self, HdlcDecoder, MAX_ENCODED};
-use rete_core::MTU;
+use rete_core::hdlc::{self, HdlcDecoder};
+
+/// Maximum packet size for local shared-instance connections.
+///
+/// The radio MTU is 500 bytes, but local shared-instance links negotiate
+/// much larger MTUs (up to 262 KB for AES-256-CBC with link MTU upgrade).
+/// Resource transfers and LXMF messages can produce frames well above
+/// the radio MTU. Python RNS uses unbounded buffers on local interfaces.
+const LOCAL_MTU: usize = 300 * 1024;
+/// Maximum HDLC-encoded size for local frames (worst case: every byte escaped + 2 flags).
+const LOCAL_MAX_ENCODED: usize = LOCAL_MTU * 2 + 2;
 use rete_stack::ReteInterface;
 
 use std::io;
@@ -18,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
-use crate::hub::{ClientHub, HubBroadcaster};
+use crate::hub::{ClientEvent, ClientHub, HubBroadcaster};
 use crate::InboundMsg;
 
 // ---------------------------------------------------------------------------
@@ -76,6 +85,17 @@ impl LocalServer {
         })
     }
 
+    /// Enable [`ClientEvent`] notifications on the internal hub.
+    ///
+    /// Must be called before [`run()`](Self::run). Returns a receiver for
+    /// connect/disconnect events.
+    pub fn enable_client_events(
+        &mut self,
+        event_capacity: usize,
+    ) -> mpsc::Receiver<ClientEvent> {
+        self.hub.enable_events(event_capacity)
+    }
+
     /// Get a handle for broadcasting packets to all connected local clients.
     pub fn broadcaster(&self) -> HubBroadcaster {
         self.hub.broadcaster()
@@ -111,7 +131,6 @@ impl LocalServer {
                             inbound_tx,
                             iface_idx,
                             client_id,
-                            &broadcaster,
                         );
                         tokio::select! {
                             _ = read_fut => {},
@@ -143,8 +162,8 @@ async fn client_write_task(
     mut writer: tokio::net::unix::OwnedWriteHalf,
     mut rx: mpsc::Receiver<Vec<u8>>,
 ) {
-    // Box-allocate to avoid 16+ KB stack usage per spawned task.
-    let mut encoded = vec![0u8; MAX_ENCODED];
+    // Box-allocate — local frames can be up to LOCAL_MTU bytes.
+    let mut encoded = vec![0u8; LOCAL_MAX_ENCODED];
     while let Some(data) = rx.recv().await {
         match hdlc::encode(&data, &mut encoded) {
             Ok(n) => {
@@ -164,18 +183,18 @@ async fn client_write_task(
     }
 }
 
-/// Read task for a single local client — reads HDLC-framed packets,
-/// forwards to node inbound and broadcasts to other clients.
+/// Read task for a single local client — reads HDLC-framed packets
+/// and forwards to the node inbound channel.
 async fn client_read_task(
     mut reader: tokio::net::unix::OwnedReadHalf,
     inbound_tx: mpsc::Sender<InboundMsg>,
     iface_idx: u8,
     client_id: usize,
-    broadcaster: &HubBroadcaster,
 ) {
-    // Box-allocate the decoder to avoid ~9 KB stack usage per spawned task.
-    let mut decoder: Box<HdlcDecoder<{ MTU }>> = Box::new(HdlcDecoder::new());
-    let mut read_buf = [0u8; 1024];
+    // Box-allocate the decoder — local shared-instance frames can be up to
+    // LOCAL_MTU bytes (resource transfers, LXMF messages).
+    let mut decoder: Box<HdlcDecoder<{ LOCAL_MTU }>> = Box::new(HdlcDecoder::new());
+    let mut read_buf = [0u8; 4096];
 
     loop {
         let n = match reader.read(&mut read_buf).await {
@@ -188,18 +207,23 @@ async fn client_read_task(
             if decoder.feed(byte) {
                 if let Some(frame) = decoder.frame() {
                     let data = frame.to_vec();
+                    #[cfg(debug_assertions)]
+                    if data.len() > 2 {
+                        let flags = data[0];
+                        let ctx = if data.len() > 18 { data[18] } else { 0 };
+                        let dest_type = (flags >> 2) & 3;
+                        eprintln!("[rete-local] client {} frame: len={} dtype={} ctx=0x{:02x}", client_id, data.len(), dest_type, ctx);
+                    }
 
-                    // Forward to node's inbound channel
+                    // Forward to node's inbound channel (node handles dispatch).
                     let msg = InboundMsg {
                         iface_idx,
-                        data: data.clone(),
+                        data,
+                        client_id: Some(client_id),
                     };
                     if inbound_tx.send(msg).await.is_err() {
                         return; // Node shut down
                     }
-
-                    // Broadcast to other local clients (not back to sender).
-                    broadcaster.broadcast(&data, Some(client_id)).await;
                 }
             }
         }
@@ -243,8 +267,8 @@ impl core::fmt::Display for LocalError {
 /// interface, but over a Unix domain socket.
 pub struct LocalClient {
     stream: UnixStream,
-    decoder: HdlcDecoder<{ MTU }>,
-    read_buf: [u8; 1024],
+    decoder: HdlcDecoder<{ LOCAL_MTU }>,
+    read_buf: [u8; 4096],
     read_pos: usize,
     read_len: usize,
 }
@@ -259,7 +283,7 @@ impl LocalClient {
         Ok(LocalClient {
             stream,
             decoder: HdlcDecoder::new(),
-            read_buf: [0u8; 1024],
+            read_buf: [0u8; 4096],
             read_pos: 0,
             read_len: 0,
         })
@@ -270,7 +294,7 @@ impl ReteInterface for LocalClient {
     type Error = LocalError;
 
     async fn send(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
-        let mut encoded = [0u8; MAX_ENCODED];
+        let mut encoded = vec![0u8; LOCAL_MAX_ENCODED];
         let n = hdlc::encode(frame, &mut encoded).map_err(LocalError::Encode)?;
         self.stream.write_all(&encoded[..n]).await?;
         self.stream.flush().await?;
@@ -449,7 +473,7 @@ mod tests {
 
     /// Helper: encode and write a raw packet over a Unix stream with HDLC framing.
     async fn hdlc_write(stream: &mut UnixStream, data: &[u8]) {
-        let mut encoded = [0u8; MAX_ENCODED];
+        let mut encoded = vec![0u8; LOCAL_MAX_ENCODED];
         let n = hdlc::encode(data, &mut encoded).unwrap();
         stream.write_all(&encoded[..n]).await.unwrap();
         stream.flush().await.unwrap();
@@ -457,7 +481,7 @@ mod tests {
 
     /// Helper: read and decode one HDLC frame from a Unix stream.
     async fn hdlc_read(stream: &mut UnixStream) -> Vec<u8> {
-        let mut decoder: HdlcDecoder<{ MTU }> = HdlcDecoder::new();
+        let mut decoder: HdlcDecoder<{ LOCAL_MTU }> = HdlcDecoder::new();
         let mut buf = [0u8; 1024];
         loop {
             let n = stream.read(&mut buf).await.unwrap();
@@ -581,39 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn test_local_client_to_client_relay() {
-        big_stack_test(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    let (inbound_tx, _inbound_rx) = mpsc::channel(256);
-                    let name = format!("test_c2c_{}", std::process::id());
-                    let server = LocalServer::bind(&name, inbound_tx, 0).unwrap();
-
-                    tokio::spawn(server.run());
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-
-                    // Connect two raw clients
-                    let path = format!("\0rns/{}", name);
-                    let mut client1 = UnixStream::connect(&path).await.unwrap();
-                    let mut client2 = UnixStream::connect(&path).await.unwrap();
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-
-                    // Client1 sends a packet -> Client2 should receive it
-                    let test_data = b"client1 says hello";
-                    hdlc_write(&mut client1, test_data).await;
-
-                    let received = timeout(Duration::from_secs(2), hdlc_read(&mut client2))
-                        .await
-                        .expect("timeout on client2");
-                    assert_eq!(received, test_data);
-                });
-        });
-    }
-
-    #[test]
     fn test_local_client_disconnect_cleanup() {
         big_stack_test(|| {
             tokio::runtime::Builder::new_current_thread()
@@ -662,7 +653,7 @@ mod tests {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    let (inbound_tx, _inbound_rx) = mpsc::channel(256);
+                    let (inbound_tx, mut inbound_rx) = mpsc::channel(256);
                     let name = format!("test_iface_{}", std::process::id());
                     let server = LocalServer::bind(&name, inbound_tx, 0).unwrap();
                     let broadcaster = server.broadcaster();
@@ -674,25 +665,21 @@ mod tests {
                     let mut client = LocalClient::connect(&name).await.unwrap();
                     tokio::time::sleep(Duration::from_millis(50)).await;
 
-                    // Test send: client -> node (read via raw broadcast to a
-                    // second raw client that acts as observer)
-                    let path = format!("\0rns/{}", name);
-                    let mut observer = UnixStream::connect(&path).await.unwrap();
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-
+                    // Test send: client -> node inbound channel
                     let send_data = b"via ReteInterface::send";
                     client.send(send_data).await.unwrap();
 
-                    let received = timeout(Duration::from_secs(2), hdlc_read(&mut observer))
+                    let msg = timeout(Duration::from_secs(2), inbound_rx.recv())
                         .await
-                        .expect("timeout");
-                    assert_eq!(received, send_data);
+                        .expect("timeout")
+                        .expect("channel closed");
+                    assert_eq!(msg.data, send_data);
 
                     // Test recv: node broadcasts -> client receives
                     let recv_data = b"via ReteInterface::recv";
                     broadcaster.broadcast(recv_data, None).await;
 
-                    let mut buf = [0u8; MTU];
+                    let mut buf = [0u8; LOCAL_MTU];
                     let frame = timeout(Duration::from_secs(2), client.recv(&mut buf))
                         .await
                         .expect("timeout")

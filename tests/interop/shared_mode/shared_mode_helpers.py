@@ -16,10 +16,19 @@ import time
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_RUST_BINARY = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "target", "debug", "rete-shared"
+DEFAULT_RUST_BINARY = os.environ.get(
+    "RETE_BINARY",
+    os.path.join(
+        os.path.dirname(__file__), "..", "..", "..", "target", "debug", "rete-shared"
+    ),
 )
 DAEMON_READY = "DAEMON_READY"
+
+# When running inside a container (RETE_CONTAINERIZED=1), each test has its
+# own network namespace so fixed ports are safe — no PID-based offsets needed.
+IS_CONTAINERIZED = os.environ.get("RETE_CONTAINERIZED") == "1"
+CONTAINER_DATA_PORT = 37428
+CONTAINER_CTRL_PORT = 37429
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +220,575 @@ with open(result_file, "w") as f:
 os._exit(0)
 """)
 
+CLIENT_ANNOUNCE_AND_POLL = textwrap.dedent("""\
+import json, os, sys, time
+import RNS
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+app_name = sys.argv[3]
+aspect = sys.argv[4]
+wait_secs = int(sys.argv[5])
+poll_hash_hex = sys.argv[6] if len(sys.argv) > 6 else ""
+
+rns = RNS.Reticulum(configdir=config_dir)
+attached = rns.is_connected_to_shared_instance
+
+identity = RNS.Identity()
+dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE,
+                       app_name, aspect)
+dest.announce()
+
+seen_hash = False
+if poll_hash_hex:
+    target = bytes.fromhex(poll_hash_hex)
+    for _ in range(wait_secs * 10):
+        time.sleep(0.1)
+        if RNS.Transport.has_path(target):
+            seen_hash = True
+            break
+        if hasattr(RNS.Transport, 'announce_table'):
+            if target in RNS.Transport.announce_table:
+                seen_hash = True
+                break
+else:
+    time.sleep(wait_secs)
+
+result = {
+    "attached": attached,
+    "dest_hash": dest.hash.hex(),
+    "identity_hash": identity.hexhash,
+    "seen_target": seen_hash,
+}
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
+
+
+def tcp_ports():
+    """Return (data_port, ctrl_port) for TCP tests.
+
+    Inside a container (RETE_CONTAINERIZED=1), returns fixed ports.
+    On the host, returns PID-offset ports for backward compatibility.
+    """
+    if IS_CONTAINERIZED:
+        return CONTAINER_DATA_PORT, CONTAINER_CTRL_PORT
+    base = 49000 + (os.getpid() % 1000)
+    return base, base + 1
+
+
+# ---------------------------------------------------------------------------
+# EPIC-08 client script templates (two-client peer-to-peer through daemon)
+#
+# Key shared-mode constraint: RNS.Transport.has_path() returns False in
+# shared-mode clients because the daemon owns transport. However,
+# RNS.Identity.recall() works after announce delivery. Scripts poll
+# Identity.recall() instead of has_path().
+#
+# Ready file pattern: receiver scripts write a JSON ready file with their
+# dest_hash immediately after creating the destination and announcing.
+# The test runner reads this file to coordinate sender startup.
+# ---------------------------------------------------------------------------
+
+CLIENT_RECEIVER_SCRIPT = textwrap.dedent("""\
+import json, os, sys, time, threading
+import RNS
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+app_name = sys.argv[3]
+aspect = sys.argv[4]
+wait_secs = int(sys.argv[5])
+ready_file = sys.argv[6] if len(sys.argv) > 6 else ""
+
+received_data = []
+lock = threading.Lock()
+
+def packet_callback(data, packet):
+    with lock:
+        received_data.append(data)
+
+rns = RNS.Reticulum(configdir=config_dir)
+attached = rns.is_connected_to_shared_instance
+
+identity = RNS.Identity()
+dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE,
+                       app_name, aspect)
+dest.set_packet_callback(packet_callback)
+dest.announce()
+
+# Write ready file so the test runner knows our dest_hash
+if ready_file:
+    with open(ready_file, "w") as f:
+        json.dump({"dest_hash": dest.hash.hex(), "identity_hash": identity.hexhash}, f)
+
+time.sleep(wait_secs)
+
+with lock:
+    got = [d.hex() if isinstance(d, bytes) else str(d) for d in received_data]
+
+result = {
+    "attached": attached,
+    "dest_hash": dest.hash.hex(),
+    "identity_hash": identity.hexhash,
+    "received_count": len(got),
+    "received_data": got,
+}
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
+
+CLIENT_SENDER_SCRIPT = textwrap.dedent("""\
+import json, os, sys, time
+import RNS
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+app_name = sys.argv[3]
+aspect = sys.argv[4]
+target_hash_hex = sys.argv[5]
+payload_hex = sys.argv[6]
+wait_secs = int(sys.argv[7])
+
+rns = RNS.Reticulum(configdir=config_dir)
+attached = rns.is_connected_to_shared_instance
+
+target_hash = bytes.fromhex(target_hash_hex)
+
+# In shared mode, has_path() returns False (daemon owns transport).
+# Poll Identity.recall() instead — it works after the daemon relays
+# the announce to us.
+identity_found = False
+target_identity = None
+for _ in range(wait_secs * 10):
+    target_identity = RNS.Identity.recall(target_hash)
+    if target_identity:
+        identity_found = True
+        break
+    time.sleep(0.1)
+
+sent = False
+if identity_found:
+    dest = RNS.Destination(target_identity, RNS.Destination.OUT,
+                           RNS.Destination.SINGLE, app_name, aspect)
+    payload = bytes.fromhex(payload_hex)
+    pkt = RNS.Packet(dest, payload)
+    receipt = pkt.send()
+    sent = receipt is not None
+    time.sleep(1)
+
+result = {
+    "attached": attached,
+    "identity_found": identity_found,
+    "sent": sent,
+}
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
+
+CLIENT_LINK_SERVER_SCRIPT = textwrap.dedent("""\
+import json, os, sys, time, threading
+import RNS
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+app_name = sys.argv[3]
+aspect = sys.argv[4]
+wait_secs = int(sys.argv[5])
+mode = sys.argv[6] if len(sys.argv) > 6 else "echo"
+ready_file = sys.argv[7] if len(sys.argv) > 7 else ""
+
+lock = threading.Lock()
+state = {
+    "link_established": False,
+    "link_data_received": [],
+    "link_closed": False,
+    "request_received": False,
+    "request_path": None,
+    "resource_completed": False,
+    "resource_data_hex": None,
+    "resource_size": 0,
+}
+
+def link_established(link):
+    with lock:
+        state["link_established"] = True
+    link.set_link_closed_callback(link_closed)
+    link.set_packet_callback(link_data_callback)
+    if mode in ("resource", "resource_large"):
+        link.set_resource_strategy(RNS.Link.ACCEPT_ALL)
+        link.set_resource_started_callback(resource_started)
+        link.set_resource_concluded_callback(resource_concluded)
+
+def link_closed(link):
+    with lock:
+        state["link_closed"] = True
+
+def link_data_callback(message, packet):
+    with lock:
+        state["link_data_received"].append(
+            message.hex() if isinstance(message, bytes) else str(message)
+        )
+
+def request_handler(path, data, request_id, link_id, remote_identity, requested_at):
+    with lock:
+        state["request_received"] = True
+        state["request_path"] = path
+    return {"echo": data, "server": "rete-shared"}
+
+def resource_started(resource):
+    pass
+
+def resource_concluded(resource):
+    with lock:
+        if resource.status == RNS.Resource.COMPLETE:
+            data = resource.data.read()
+            state["resource_completed"] = True
+            state["resource_data_hex"] = data.hex()
+            state["resource_size"] = len(data)
+
+rns = RNS.Reticulum(configdir=config_dir)
+attached = rns.is_connected_to_shared_instance
+
+identity = RNS.Identity()
+dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE,
+                       app_name, aspect)
+dest.set_link_established_callback(link_established)
+if mode == "request":
+    dest.register_request_handler("/test", request_handler, allow=RNS.Destination.ALLOW_ALL)
+dest.announce()
+
+# Write ready file so the test runner knows our dest_hash
+if ready_file:
+    with open(ready_file, "w") as f:
+        json.dump({"dest_hash": dest.hash.hex(), "identity_hash": identity.hexhash}, f)
+
+time.sleep(wait_secs)
+
+with lock:
+    result = {
+        "attached": attached,
+        "dest_hash": dest.hash.hex(),
+        "identity_hash": identity.hexhash,
+    }
+    result.update(state)
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
+
+CLIENT_LINK_CLIENT_SCRIPT = textwrap.dedent("""\
+import json, os, sys, time, io, threading
+import RNS
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+app_name = sys.argv[3]
+aspect = sys.argv[4]
+target_hash_hex = sys.argv[5]
+wait_secs = int(sys.argv[6])
+mode = sys.argv[7] if len(sys.argv) > 7 else "echo"
+payload_arg = sys.argv[8] if len(sys.argv) > 8 else "48656c6c6f"
+# Support @filepath for large payloads that exceed command-line limits
+if payload_arg.startswith("@"):
+    with open(payload_arg[1:], "rb") as _pf:
+        payload_hex = _pf.read().hex()
+else:
+    payload_hex = payload_arg
+
+lock = threading.Lock()
+state = {
+    "link_established": False,
+    "link_data_received": [],
+    "link_closed": False,
+    "request_response": None,
+    "resource_sent": False,
+}
+
+rns = RNS.Reticulum(configdir=config_dir)
+attached = rns.is_connected_to_shared_instance
+
+target_hash = bytes.fromhex(target_hash_hex)
+
+# In shared mode, has_path() returns False. Poll Identity.recall() instead.
+identity_found = False
+target_identity = None
+for _ in range(wait_secs * 10):
+    target_identity = RNS.Identity.recall(target_hash)
+    if target_identity:
+        identity_found = True
+        break
+    time.sleep(0.1)
+
+if identity_found:
+    dest = RNS.Destination(target_identity, RNS.Destination.OUT,
+                           RNS.Destination.SINGLE, app_name, aspect)
+    link = RNS.Link(dest)
+
+    def established(lnk):
+        with lock:
+            state["link_established"] = True
+
+    def closed(lnk):
+        with lock:
+            state["link_closed"] = True
+
+    def packet_cb(message, packet):
+        with lock:
+            state["link_data_received"].append(
+                message.hex() if isinstance(message, bytes) else str(message)
+            )
+
+    link.set_link_established_callback(established)
+    link.set_link_closed_callback(closed)
+    link.set_packet_callback(packet_cb)
+
+    # Wait for link establishment
+    for _ in range(wait_secs * 10):
+        with lock:
+            if state["link_established"]:
+                break
+        time.sleep(0.1)
+
+    with lock:
+        is_established = state["link_established"]
+
+    if is_established:
+        payload = bytes.fromhex(payload_hex)
+        if mode == "echo":
+            pkt = RNS.Packet(link, payload)
+            pkt.send()
+            time.sleep(2)
+        elif mode == "request":
+            def response_cb(request_receipt):
+                with lock:
+                    if request_receipt.response is not None:
+                        state["request_response"] = request_receipt.response
+            link.request("/test", data=payload_hex, response_callback=response_cb)
+            for _ in range(wait_secs * 10):
+                with lock:
+                    if state["request_response"] is not None:
+                        break
+                time.sleep(0.1)
+        elif mode in ("resource", "resource_large"):
+            # Brief delay to ensure server's link_established callback
+            # has set ACCEPT_ALL before we send the resource advertisement.
+            time.sleep(1)
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+            tmp.write(payload)
+            tmp.close()
+            resource_file = open(tmp.name, "rb")
+            resource = RNS.Resource(resource_file, link)
+            for _ in range(wait_secs * 10):
+                if resource.status in (RNS.Resource.COMPLETE, RNS.Resource.FAILED):
+                    break
+                time.sleep(0.1)
+            with lock:
+                state["resource_sent"] = (resource.status == RNS.Resource.COMPLETE)
+            resource_file.close()
+            os.unlink(tmp.name)
+
+        # Clean teardown
+        time.sleep(1)
+        link.teardown()
+        time.sleep(1)
+
+with lock:
+    result = {
+        "attached": attached,
+        "identity_found": identity_found,
+    }
+    result.update(state)
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
+
+CLIENT_LXMF_RECEIVER_SCRIPT = textwrap.dedent("""\
+import json, os, sys, time, threading
+import RNS
+import LXMF
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+wait_secs = int(sys.argv[3])
+display_name = sys.argv[4] if len(sys.argv) > 4 else "Receiver"
+mode = sys.argv[5] if len(sys.argv) > 5 else "direct"
+ready_file = sys.argv[6] if len(sys.argv) > 6 else ""
+
+lock = threading.Lock()
+messages_received = []
+
+def delivery_callback(message):
+    with lock:
+        messages_received.append({
+            "title": message.title_as_string() if message.title else "",
+            "content": message.content_as_string() if message.content else "",
+            "source_hash": message.source_hash.hex() if message.source_hash else "",
+        })
+
+rns = RNS.Reticulum(configdir=config_dir)
+attached = rns.is_connected_to_shared_instance
+
+identity = RNS.Identity()
+storage_path = os.path.join(os.path.dirname(result_file), "lxmf_storage")
+os.makedirs(storage_path, exist_ok=True)
+
+router = LXMF.LXMRouter(identity=identity, storagepath=storage_path)
+lxmf_dest = router.register_delivery_identity(identity, display_name=display_name)
+router.register_delivery_callback(delivery_callback)
+
+if mode == "propagation":
+    router.enable_propagation()
+
+lxmf_dest.announce()
+
+# Write ready file so the test runner knows our dest_hash
+if ready_file:
+    with open(ready_file, "w") as f:
+        json.dump({"dest_hash": lxmf_dest.hash.hex(), "identity_hash": identity.hexhash}, f)
+
+time.sleep(wait_secs)
+
+with lock:
+    result = {
+        "attached": attached,
+        "dest_hash": lxmf_dest.hash.hex(),
+        "identity_hash": identity.hexhash,
+        "messages_received": messages_received,
+        "message_count": len(messages_received),
+    }
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
+
+CLIENT_LXMF_SENDER_SCRIPT = textwrap.dedent("""\
+import json, os, sys, time
+import RNS
+import LXMF
+
+config_dir = sys.argv[1]
+result_file = sys.argv[2]
+target_hash_hex = sys.argv[3]
+title = sys.argv[4]
+content = sys.argv[5]
+wait_secs = int(sys.argv[6])
+delivery_method = sys.argv[7] if len(sys.argv) > 7 else "direct"
+
+rns = RNS.Reticulum(configdir=config_dir)
+attached = rns.is_connected_to_shared_instance
+
+# Allow BackboneInterface epoll thread to initialize and receive
+# cached announces from the daemon before starting LXMF operations.
+time.sleep(5)
+
+identity = RNS.Identity()
+storage_path = os.path.join(os.path.dirname(result_file), "lxmf_storage")
+os.makedirs(storage_path, exist_ok=True)
+
+router = LXMF.LXMRouter(identity=identity, storagepath=storage_path)
+sender_dest = router.register_delivery_identity(identity, display_name="Sender")
+
+target_hash = bytes.fromhex(target_hash_hex)
+
+# In shared mode, has_path() returns False. Poll Identity.recall() instead.
+identity_found = False
+target_identity = None
+for _ in range(wait_secs * 10):
+    target_identity = RNS.Identity.recall(target_hash)
+    if target_identity:
+        identity_found = True
+        break
+    time.sleep(0.1)
+
+sent = False
+delivery_status = "unknown"
+if identity_found and target_identity:
+    lxmf_dest = RNS.Destination(target_identity, RNS.Destination.OUT,
+                                RNS.Destination.SINGLE, "lxmf", "delivery")
+    lxm = LXMF.LXMessage(
+        lxmf_dest, sender_dest, content,
+        title=title,
+    )
+    if delivery_method == "opportunistic":
+        lxm.desired_method = LXMF.LXMessage.OPPORTUNISTIC
+    elif delivery_method == "propagated":
+        lxm.desired_method = LXMF.LXMessage.PROPAGATED
+        lxm.propagation_node = target_hash
+    else:
+        lxm.desired_method = LXMF.LXMessage.DIRECT
+
+    router.handle_outbound(lxm)
+
+    # Wait for delivery
+    for _ in range(wait_secs * 10):
+        if lxm.state >= LXMF.LXMessage.SENT:
+            sent = True
+            break
+        if lxm.state == LXMF.LXMessage.FAILED:
+            break
+        time.sleep(0.1)
+
+    delivery_status = {
+        LXMF.LXMessage.GENERATING: "generating",
+        LXMF.LXMessage.OUTBOUND: "outbound",
+        LXMF.LXMessage.SENDING: "sending",
+        LXMF.LXMessage.SENT: "sent",
+        LXMF.LXMessage.DELIVERED: "delivered",
+        LXMF.LXMessage.FAILED: "failed",
+    }.get(lxm.state, f"unknown_{lxm.state}")
+
+result = {
+    "attached": attached,
+    "identity_found": identity_found,
+    "sent": sent,
+    "delivery_status": delivery_status,
+}
+
+with open(result_file, "w") as f:
+    json.dump(result, f)
+
+try:
+    rns.exit_handler()
+except Exception:
+    pass
+""")
+
 
 def run_shared_client(script, args):
     """Run a Python client script in a subprocess. Returns Popen."""
@@ -244,6 +822,23 @@ def read_result(path):
         return None
 
 
+def wait_for_ready_file(path, timeout=10):
+    """Wait for a ready file to appear and return its parsed JSON contents.
+
+    Receiver scripts write a ready file with their dest_hash immediately
+    after creating their destination and announcing. This lets the test
+    runner coordinate sender startup.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            time.sleep(0.2)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Test result reporting
 # ---------------------------------------------------------------------------
@@ -257,6 +852,7 @@ class SharedModeTest:
         self.checks = []
         self.tmpdir = tempfile.mkdtemp(prefix=f"rete_shared_{name}_")
         self.daemon_proc = None
+        self.data_dir = None
 
     def start_daemon(self, instance_name="default", instance_type="unix",
                      transport=False, port=None, control_port=None):
@@ -278,10 +874,40 @@ class SharedModeTest:
         )
         return self.daemon_proc
 
+    def restart_daemon(self, **kwargs):
+        """Stop and restart the daemon with the same data_dir.
+
+        Accepts the same keyword arguments as start_daemon() to override
+        settings, but reuses the data_dir from the original start.
+        """
+        if self.daemon_proc:
+            stop_daemon(self.daemon_proc)
+            self.daemon_proc = None
+        self.daemon_proc = start_rete_shared(
+            data_dir=self.data_dir,
+            rust_binary=self.rust_binary,
+            **kwargs,
+        )
+        self.check(
+            self.daemon_proc.poll() is None,
+            "Daemon restarted and DAEMON_READY received",
+        )
+        return self.daemon_proc
+
     def make_client_dir(self, name, mode="unix", ports=None):
         d = os.path.join(self.tmpdir, name)
         os.makedirs(d, exist_ok=True)
         write_shared_client_config(d, mode=mode, ports=ports)
+        # Share the daemon's transport identity with clients so RPC auth
+        # matches. Python RNS uses storagepath/transport_identity for the
+        # rpc_key derivation; both daemon and client must use the same file.
+        if self.data_dir:
+            daemon_identity = os.path.join(self.data_dir, "identity")
+            client_storage = os.path.join(d, "storage")
+            os.makedirs(client_storage, exist_ok=True)
+            client_identity = os.path.join(client_storage, "transport_identity")
+            if os.path.exists(daemon_identity) and not os.path.exists(client_identity):
+                shutil.copy2(daemon_identity, client_identity)
         return d
 
     def check(self, condition, description):
