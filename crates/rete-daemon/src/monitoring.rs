@@ -7,7 +7,7 @@ pub async fn run_monitoring_server(
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[rete] monitoring: failed to bind {addr}: {e}");
+            tracing::error!(addr = %addr, error = %e, "monitoring: failed to bind");
             return;
         }
     };

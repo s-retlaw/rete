@@ -229,7 +229,7 @@ pub fn list_suitable_interfaces(
     let addrs = match nix::ifaddrs::getifaddrs() {
         Ok(a) => a,
         Err(e) => {
-            log::warn!("Failed to enumerate interfaces: {e}");
+            tracing::warn!("Failed to enumerate interfaces: {e}");
             return result;
         }
     };
@@ -441,7 +441,7 @@ impl AutoInterface {
         }
 
         for iface in &interfaces {
-            log::info!(
+            tracing::info!(
                 "AutoInterface: using {} (index {}, addr {})",
                 iface.name,
                 iface.index,
@@ -493,13 +493,13 @@ impl AutoInterface {
                 SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.discovery_port, 0, 0);
             let std_sock =
                 bind_udp6(mcast_bind, true).or_else(|_| bind_udp6(wildcard_bind, true))?;
-            log::info!(
+            tracing::info!(
                 "AutoInterface: multicast socket bound to {:?}",
                 std_sock.local_addr()
             );
             for iface in &interfaces {
                 join_multicast(&std_sock, &mcast_addr, iface.index)?;
-                log::info!(
+                tracing::info!(
                     "AutoInterface: joined multicast {} on if_index {}",
                     mcast_addr,
                     iface.index
@@ -615,7 +615,7 @@ impl AutoInterface {
                                     }
                                 }
                                 Err(e) => {
-                                    log::debug!("AutoInterface data recv error on scope {scope}: {e}");
+                                    tracing::debug!("AutoInterface data recv error on scope {scope}: {e}");
                                 }
                             }
                         }
@@ -698,7 +698,7 @@ impl ReteInterface for AutoInterface {
             {
                 Some(id) => id,
                 None => {
-                    log::warn!(
+                    tracing::warn!(
                         "AutoInterface: no interface '{}' for peer {}, skipping",
                         peer.ifname,
                         addr,
@@ -715,7 +715,7 @@ impl ReteInterface for AutoInterface {
 
             let dest = SocketAddrV6::new(*addr, self.config.data_port, 0, scope_id);
             if let Err(e) = sock.send_to(frame, dest).await {
-                log::debug!("AutoInterface: send to {} failed: {e}", addr);
+                tracing::debug!("AutoInterface: send to {} failed: {e}", addr);
             }
         }
 
@@ -740,7 +740,7 @@ impl ReteInterface for AutoInterface {
             }
 
             if data.len() > buf.len() {
-                log::warn!(
+                tracing::warn!(
                     "AutoInterface: packet ({} bytes) exceeds buffer ({} bytes), dropping",
                     data.len(),
                     buf.len()
@@ -819,12 +819,12 @@ async fn discovery_loop(
                         }
                     }
                     Err(e) => {
-                        log::debug!("AutoInterface: mcast recv error: {e}");
+                        tracing::debug!("AutoInterface: mcast recv error: {e}");
                         break;
                     }
                 }
             }
-            log::debug!("AutoInterface: mcast recv thread exiting");
+            tracing::debug!("AutoInterface: mcast recv thread exiting");
         })
         .expect("failed to spawn mcast recv thread");
 
@@ -853,12 +853,12 @@ async fn discovery_loop(
                         }
                     }
                     Err(e) => {
-                        log::debug!("AutoInterface: ucast recv error: {e}");
+                        tracing::debug!("AutoInterface: ucast recv error: {e}");
                         break;
                     }
                 }
             }
-            log::debug!("AutoInterface: ucast recv thread exiting");
+            tracing::debug!("AutoInterface: ucast recv thread exiting");
         })
         .expect("failed to spawn ucast recv thread");
 
@@ -871,7 +871,7 @@ async fn discovery_loop(
                         let dest = SocketAddrV6::new(mcast_addr, discovery_port, 0, iface.index);
                         for token in tokens {
                             if let Err(e) = sock.send_to(token.as_slice(), dest).await {
-                                log::debug!("AutoInterface: announce on {} failed: {e}", iface.name);
+                                tracing::debug!("AutoInterface: announce on {} failed: {e}", iface.name);
                             }
                         }
                     }
@@ -919,7 +919,7 @@ async fn discovery_loop(
             // Shutdown signal
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
-                    log::info!("AutoInterface: discovery loop shutting down");
+                    tracing::info!("AutoInterface: discovery loop shutting down");
                     // Dropping mcast_rx and ucast_rx closes channels,
                     // which causes the blocking threads to exit on their
                     // next send attempt (after the 1s read timeout).
@@ -943,7 +943,7 @@ async fn handle_discovery_packet(
     let expected = compute_discovery_token(group_id, &src_str);
 
     if data.len() < 32 || data[..32] != expected {
-        log::debug!("AutoInterface: invalid discovery token from {}", src_ip);
+        tracing::debug!("AutoInterface: invalid discovery token from {}", src_ip);
         return;
     }
 
@@ -968,7 +968,7 @@ async fn handle_discovery_packet(
         peer.last_heard = now;
     } else {
         // New peer discovered
-        log::info!("AutoInterface: new peer discovered: {}", src_ip);
+        tracing::info!("AutoInterface: new peer discovered: {}", src_ip);
         state.peers.insert(
             src_ip,
             Peer {
@@ -1002,7 +1002,7 @@ async fn peer_jobs_loop(
             _ = tick.tick() => {},
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
-                    log::info!("AutoInterface: peer jobs loop shutting down");
+                    tracing::info!("AutoInterface: peer jobs loop shutting down");
                     return;
                 }
             }
@@ -1024,7 +1024,7 @@ async fn peer_jobs_loop(
 
             // Remove timed-out peers
             for addr in &timed_out {
-                log::info!("AutoInterface: peer timed out: {}", addr);
+                tracing::info!("AutoInterface: peer timed out: {}", addr);
                 state.peers.remove(addr);
             }
 
@@ -1047,7 +1047,7 @@ async fn peer_jobs_loop(
                     let dest = SocketAddrV6::new(*peer_addr, discovery_port + 1, 0, iface.index);
                     for token in tokens {
                         if let Err(e) = sock.send_to(token.as_slice(), dest).await {
-                            log::debug!(
+                            tracing::debug!(
                                 "AutoInterface: reverse announce to {} failed: {e}",
                                 peer_addr
                             );

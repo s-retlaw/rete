@@ -145,17 +145,17 @@ pub fn load_config(path: &Path) -> Result<Option<Config>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => match toml::from_str(&text) {
             Ok(cfg) => {
-                eprintln!("[rete] loaded config from {}", path.display());
+                tracing::info!(path = %path.display(), "loaded config");
                 Ok(Some(cfg))
             }
             Err(e) => Err(format!(
-                "[rete] failed to parse config {}: {e}",
+                "failed to parse config {}: {e}",
                 path.display()
             )),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!(
-            "[rete] failed to read config {}: {e}",
+            "failed to read config {}: {e}",
             path.display()
         )),
     }

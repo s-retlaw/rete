@@ -111,19 +111,13 @@ impl TcpServer {
                 Ok((stream, addr)) => {
                     // Check max clients
                     if self.max_clients > 0 && self.hub.client_count().await >= self.max_clients {
-                        eprintln!(
-                            "[rete-tcp-server] max clients ({}) reached, rejecting {}",
-                            self.max_clients, addr
-                        );
+                        tracing::warn!("tcp-server: max clients ({}) reached, rejecting {}", self.max_clients, addr);
                         drop(stream);
                         continue;
                     }
 
                     let (client_id, client_rx) = self.hub.register().await;
-                    eprintln!(
-                        "[rete-tcp-server] client {} connected from {}",
-                        client_id, addr
-                    );
+                    tracing::info!("tcp-server: client {} connected from {}", client_id, addr);
 
                     let (read_half, write_half) = stream.into_split();
 
@@ -149,7 +143,7 @@ impl TcpServer {
                         tokio::select! {
                             _ = read_fut => {},
                             _ = write_handle => {
-                                log::debug!(
+                                tracing::debug!(
                                     "[rete-tcp-server] write task exited for client {}",
                                     client_id,
                                 );
@@ -157,11 +151,11 @@ impl TcpServer {
                         }
 
                         broadcaster.remove_client(client_id).await;
-                        eprintln!("[rete-tcp-server] client {} disconnected", client_id);
+                        tracing::info!("tcp-server: client {} disconnected", client_id);
                     });
                 }
                 Err(e) => {
-                    eprintln!("[rete-tcp-server] accept error: {}", e);
+                    tracing::error!("tcp-server: accept error: {}", e);
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             }
@@ -195,11 +189,11 @@ async fn tcp_client_write_task(
         match hdlc::encode(to_encode, &mut encoded) {
             Ok(n) => {
                 if let Err(e) = writer.write_all(&encoded[..n]).await {
-                    log::debug!("[rete-tcp-server] client write failed: {e}");
+                    tracing::debug!("[rete-tcp-server] client write failed: {e}");
                     break;
                 }
                 if let Err(e) = writer.flush().await {
-                    log::debug!("[rete-tcp-server] client flush failed: {e}");
+                    tracing::debug!("[rete-tcp-server] client flush failed: {e}");
                     break;
                 }
             }

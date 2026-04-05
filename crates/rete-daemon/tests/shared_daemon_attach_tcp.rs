@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{big_stack_test, make_tcp_config};
+use common::{big_stack_async_test, make_tcp_config};
 use rete_daemon::daemon::SharedDaemonBuilder;
 
 use rete_core::hdlc::{self, HdlcDecoder};
@@ -47,12 +47,7 @@ async fn hdlc_read(stream: &mut TcpStream) -> Vec<u8> {
 
 #[test]
 fn test_daemon_tcp_canonical_announce_routing() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let port = 48800 + (std::process::id() % 100) as u16;
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -100,7 +95,6 @@ fn test_daemon_tcp_canonical_announce_routing() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -110,12 +104,7 @@ fn test_daemon_tcp_canonical_announce_routing() {
 
 #[test]
 fn test_daemon_tcp_client_disconnect_no_crash() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let port = 48800 + (std::process::id() % 100) as u16 + 1;
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -154,7 +143,6 @@ fn test_daemon_tcp_client_disconnect_no_crash() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -164,12 +152,7 @@ fn test_daemon_tcp_client_disconnect_no_crash() {
 
 #[test]
 fn test_daemon_tcp_ingests_packet_without_crash() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let port = 48800 + (std::process::id() % 100) as u16 + 2;
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -216,6 +199,5 @@ fn test_daemon_tcp_ingests_packet_without_crash() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }

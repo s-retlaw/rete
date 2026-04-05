@@ -12,6 +12,7 @@ use rete_daemon::identity::default_data_dir;
 use std::path::PathBuf;
 
 fn main() {
+    rete_daemon::init_tracing();
     let args: Vec<String> = std::env::args().collect();
 
     if has_flag(&args, "--help") || has_flag(&args, "-h") {
@@ -38,7 +39,7 @@ fn main() {
         Ok(Some(c)) => c,
         Ok(None) => Default::default(),
         Err(e) => {
-            eprintln!("[rete-shared] {e}");
+            eprintln!("rete-shared: {e}");
             std::process::exit(1);
         }
     };
@@ -53,7 +54,7 @@ fn main() {
             "unix" => SharedInstanceType::Unix,
             "tcp" => SharedInstanceType::Tcp,
             other => {
-                eprintln!("[rete-shared] invalid shared_instance_type: {other}");
+                eprintln!("rete-shared: invalid shared_instance_type: {other}");
                 std::process::exit(1);
             }
         };
@@ -84,7 +85,7 @@ async fn run(config: SharedInstanceConfig, data_dir: PathBuf, transport: bool) {
     let (daemon, run_future) = match builder.start().await {
         Ok(pair) => pair,
         Err(e) => {
-            eprintln!("[rete-shared] fatal: {e}");
+            eprintln!("rete-shared: fatal: {e}");
             std::process::exit(1);
         }
     };

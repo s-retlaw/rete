@@ -569,10 +569,7 @@ pub async fn run_unix_control_listener(
 
     let socket_path = format!("\0rns/{}/rpc", instance_name);
     let listener = UnixListener::bind(&socket_path)?;
-    eprintln!(
-        "[rete-shared] control listener bound (unix: rns/{}/rpc)",
-        instance_name
-    );
+    tracing::info!(socket = %format_args!("rns/{}/rpc", instance_name), "control listener bound (unix)");
 
     loop {
         let (stream, _addr) = listener.accept().await?;
@@ -580,7 +577,7 @@ pub async fn run_unix_control_listener(
         tokio::spawn(async move {
             let mut stream = stream;
             if let Err(e) = handle_control_connection(&mut stream, &ctx).await {
-                eprintln!("[rete-shared] control connection error: {e}");
+                tracing::debug!(error = %e, "control connection error");
             }
         });
     }
@@ -592,14 +589,14 @@ pub async fn run_tcp_control_listener(port: u16, ctx: Arc<ControlContext>) -> io
 
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr).await?;
-    eprintln!("[rete-shared] control listener bound (tcp: {addr})");
+    tracing::info!(addr = %addr, "control listener bound (tcp)");
 
     loop {
         let (mut stream, _addr) = listener.accept().await?;
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_control_connection(&mut stream, &ctx).await {
-                eprintln!("[rete-shared] control connection error: {e}");
+                tracing::debug!(error = %e, "control connection error");
             }
         });
     }
@@ -653,7 +650,7 @@ async fn handle_control_connection<S: AsyncRead + AsyncWrite + Unpin>(
     // Phase 1: Server challenges client (deliver_challenge).
     let authed = server_auth(stream, &ctx.authkey).await?;
     if !authed {
-        eprintln!("[rete-shared] control auth failed (phase 1)");
+        tracing::warn!("control auth failed (phase 1)");
         return Ok(());
     }
 
@@ -663,7 +660,7 @@ async fn handle_control_connection<S: AsyncRead + AsyncWrite + Unpin>(
     //   deliver_challenge(c, authkey)  ← phase 2 (client challenges us)
     let mutual = answer_client_challenge(stream, &ctx.authkey).await?;
     if !mutual {
-        eprintln!("[rete-shared] control auth failed (phase 2 mutual)");
+        tracing::warn!("control auth failed (phase 2 mutual)");
         return Ok(());
     }
 

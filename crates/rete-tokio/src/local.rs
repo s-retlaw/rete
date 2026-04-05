@@ -109,7 +109,7 @@ impl LocalServer {
             match self.listener.accept().await {
                 Ok((stream, _addr)) => {
                     let (client_id, client_rx) = self.hub.register().await;
-                    eprintln!("[rete-local] client {} connected", client_id);
+                    tracing::info!("local: client {} connected", client_id);
 
                     // Spawn read/write tasks for this client
                     let (read_half, write_half) = stream.into_split();
@@ -135,7 +135,7 @@ impl LocalServer {
                         tokio::select! {
                             _ = read_fut => {},
                             _ = write_handle => {
-                                log::debug!(
+                                tracing::debug!(
                                     "[rete-local] write task exited, terminating read for client {}",
                                     client_id,
                                 );
@@ -144,11 +144,11 @@ impl LocalServer {
 
                         // Client disconnected — remove from hub
                         broadcaster.remove_client(client_id).await;
-                        eprintln!("[rete-local] client {} disconnected", client_id);
+                        tracing::info!("local: client {} disconnected", client_id);
                     });
                 }
                 Err(e) => {
-                    eprintln!("[rete-local] accept error: {}", e);
+                    tracing::error!("local: accept error: {}", e);
                     // Brief pause to avoid spinning on persistent errors
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
@@ -168,11 +168,11 @@ async fn client_write_task(
         match hdlc::encode(&data, &mut encoded) {
             Ok(n) => {
                 if let Err(e) = writer.write_all(&encoded[..n]).await {
-                    log::debug!("[rete-local] client write failed: {e}");
+                    tracing::debug!("[rete-local] client write failed: {e}");
                     break;
                 }
                 if let Err(e) = writer.flush().await {
-                    log::debug!("[rete-local] client flush failed: {e}");
+                    tracing::debug!("[rete-local] client flush failed: {e}");
                     break;
                 }
             }
@@ -212,7 +212,7 @@ async fn client_read_task(
                         let flags = data[0];
                         let ctx = if data.len() > 18 { data[18] } else { 0 };
                         let dest_type = (flags >> 2) & 3;
-                        eprintln!("[rete-local] client {} frame: len={} dtype={} ctx=0x{:02x}", client_id, data.len(), dest_type, ctx);
+                        tracing::debug!("local: client {} frame: len={} dtype={} ctx=0x{:02x}", client_id, data.len(), dest_type, ctx);
                     }
 
                     // Forward to node's inbound channel (node handles dispatch).
@@ -374,7 +374,7 @@ impl ReconnectingLocalClient {
         loop {
             match LocalClient::connect(&self.instance_name).await {
                 Ok(client) => {
-                    log::info!(
+                    tracing::info!(
                         "[rete-local] connected to shared instance '{}'",
                         self.instance_name,
                     );
@@ -383,7 +383,7 @@ impl ReconnectingLocalClient {
                 }
                 Err(e) => {
                     if tokio::time::Instant::now() + delay > deadline {
-                        log::warn!(
+                        tracing::warn!(
                             "[rete-local] connect to '{}' timed out after {:?}",
                             self.instance_name,
                             self.connect_timeout,
@@ -396,7 +396,7 @@ impl ReconnectingLocalClient {
                             ),
                         )));
                     }
-                    log::debug!(
+                    tracing::debug!(
                         "[rete-local] reconnect to '{}' failed: {e}, retrying in {:?}",
                         self.instance_name,
                         delay,
@@ -418,7 +418,7 @@ impl ReteInterface for ReconnectingLocalClient {
         match client.send(frame).await {
             Ok(()) => Ok(()),
             Err(e) => {
-                log::debug!("[rete-local] send failed, will reconnect: {e}");
+                tracing::debug!("[rete-local] send failed, will reconnect: {e}");
                 self.inner = None;
                 Err(e)
             }
@@ -435,7 +435,7 @@ impl ReteInterface for ReconnectingLocalClient {
                     return Ok(&buf[..len]);
                 }
                 Err(e) => {
-                    log::debug!("[rete-local] recv failed, will reconnect: {e}");
+                    tracing::debug!("[rete-local] recv failed, will reconnect: {e}");
                     self.inner = None;
                     // Loop back to reconnect
                 }

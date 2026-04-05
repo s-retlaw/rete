@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{big_stack_test, make_tcp_config_with_control, make_unix_config};
+use common::{big_stack_async_test, make_tcp_config_with_control, make_unix_config};
 use rete_daemon::daemon::SharedDaemonBuilder;
 
 use rete_core::Identity;
@@ -20,12 +20,7 @@ use tokio::time::{timeout, Duration};
 
 #[test]
 fn test_restart_state_restore() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let name = format!("test_rst_{}", std::process::id());
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -115,7 +110,6 @@ fn test_restart_state_restore() {
                 // Identity must be the same across restarts.
                 let id_bytes = std::fs::read(data_dir.path().join("identity")).unwrap();
                 assert_eq!(id_bytes.len(), 64, "identity file must be 64 bytes");
-            });
     });
 }
 
@@ -125,12 +119,7 @@ fn test_restart_state_restore() {
 
 #[test]
 fn test_multi_instance_isolation_unix() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let pid = std::process::id();
                 let name_a = format!("iso_a_{pid}");
                 let name_b = format!("iso_b_{pid}");
@@ -178,7 +167,6 @@ fn test_multi_instance_isolation_unix() {
                 daemon_b.shutdown().await;
                 let _ = timeout(Duration::from_secs(5), &mut run_a).await;
                 let _ = timeout(Duration::from_secs(5), &mut run_b).await;
-            });
     });
 }
 
@@ -188,12 +176,7 @@ fn test_multi_instance_isolation_unix() {
 
 #[test]
 fn test_multi_instance_isolation_tcp() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let base = 49700 + (std::process::id() % 50) as u16;
                 let data_dir_a = tempfile::tempdir().unwrap();
                 let data_dir_b = tempfile::tempdir().unwrap();
@@ -238,6 +221,5 @@ fn test_multi_instance_isolation_tcp() {
                 daemon_b.shutdown().await;
                 let _ = timeout(Duration::from_secs(5), &mut run_a).await;
                 let _ = timeout(Duration::from_secs(5), &mut run_b).await;
-            });
     });
 }

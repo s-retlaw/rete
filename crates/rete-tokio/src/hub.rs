@@ -134,7 +134,7 @@ impl HubBroadcaster {
         let payload = data.to_vec();
         for tx in senders {
             if tx.send(payload.clone()).await.is_err() {
-                log::debug!("[rete-hub] broadcast send failed (client disconnected or full)");
+                tracing::debug!("hub: broadcast send failed (client disconnected or full)");
             }
         }
     }
@@ -150,7 +150,7 @@ impl HubBroadcaster {
         };
         if let Some(tx) = sender {
             if tx.send(data.to_vec()).await.is_err() {
-                log::debug!("[rete-hub] send_to_client failed (client disconnected or full)");
+                tracing::debug!("hub: send_to_client failed (client disconnected or full)");
             }
         }
     }

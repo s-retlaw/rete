@@ -73,6 +73,11 @@ heapless          = { version = "0.8", default-features = false }
 # Embedded I/O abstraction
 embedded-io-async = { version = "0.6", default-features = false }
 
+# Logging / tracing (tracing-core is no_std; tracing-subscriber is std-only)
+tracing            = { version = "0.1", default-features = false }
+tracing-core       = { version = "0.1", default-features = false }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
 # Hosted only
 serde      = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1" }

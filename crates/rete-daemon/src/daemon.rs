@@ -118,7 +118,7 @@ impl SharedDaemonBuilder {
         // Extract private key for authkey derivation before identity is moved.
         let private_key = identity.private_key();
         let identity_hash = identity.hash();
-        eprintln!("[rete-shared] identity: {}", hex::encode(identity_hash.as_bytes()));
+        tracing::info!(identity = %hex::encode(identity_hash.as_bytes()), "loaded identity");
 
         // Create the node.
         let mut node = TokioNode::new_boxed(identity, "rete", &["shared"])
@@ -127,7 +127,7 @@ impl SharedDaemonBuilder {
         // Enable transport mode if requested.
         if self.transport_mode {
             node.core.enable_transport();
-            eprintln!("[rete-shared] transport mode enabled");
+            tracing::info!("transport mode enabled");
         }
 
         // Load snapshot if available.
@@ -141,11 +141,9 @@ impl SharedDaemonBuilder {
             }
         }
 
-        // Create channels.
         let (inbound_tx, mut inbound_rx) = mpsc::channel(256);
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
-        // Bind listener based on transport type.
         type ServerFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
         let (slot, server_future, client_events_rx): (
             InterfaceSlot,
@@ -227,7 +225,7 @@ impl SharedDaemonBuilder {
                 let ctx = control_ctx.clone();
                 Box::pin(async move {
                     if let Err(e) = control::run_unix_control_listener(&name, ctx).await {
-                        eprintln!("[rete-shared] control listener error: {e}");
+                        tracing::error!(error = %e, "control listener error");
                     }
                 })
             }
@@ -236,14 +234,13 @@ impl SharedDaemonBuilder {
                 let ctx = control_ctx.clone();
                 Box::pin(async move {
                     if let Err(e) = control::run_tcp_control_listener(port, ctx).await {
-                        eprintln!("[rete-shared] control listener error: {e}");
+                        tracing::error!(error = %e, "control listener error");
                     }
                 })
             }
         };
 
-        // Signal readiness.
-        println!("{DAEMON_READY}");
+        tracing::info!(target: "rete::test_event", event = "DAEMON_READY");
         let _ = std::io::stdout().flush();
 
         let daemon = SharedDaemon {
@@ -254,7 +251,6 @@ impl SharedDaemonBuilder {
         // Build the run future.
         let run_future = DaemonFuture {
             inner: Box::pin(async move {
-                // Spawn server accept loop.
                 let server_handle = tokio::spawn(async move {
                     server_future.await;
                 });
@@ -327,7 +323,7 @@ impl SharedDaemonBuilder {
                                     rete_transport::SnapshotDetail::Standard,
                                 );
                                 if let Err(e) = snapshot_store.borrow_mut().save(&snap) {
-                                    eprintln!("[rete-shared] periodic snapshot failed: {e}");
+                                    tracing::error!(error = %e, "periodic snapshot failed");
                                 }
                             }
                         }
@@ -351,11 +347,11 @@ impl SharedDaemonBuilder {
                         .core
                         .save_snapshot(rete_transport::SnapshotDetail::Standard);
                     if let Err(e) = snapshot_store.borrow_mut().save(&snap) {
-                        eprintln!("[rete-shared] failed to save snapshot: {e}");
+                        tracing::error!(error = %e, "failed to save snapshot on shutdown");
                     }
                 }
 
-                println!("{DAEMON_SHUTDOWN}");
+                tracing::info!(target: "rete::test_event", event = "DAEMON_SHUTDOWN");
                 let _ = std::io::stdout().flush();
             }),
         };
@@ -432,15 +428,16 @@ async fn process_client_events(
             ClientEvent::Connected(id) => {
                 registry.register(id);
                 client_count.store(registry.session_count(), Ordering::Relaxed);
-                eprintln!("[rete-session] client {id} connected ({} active)", registry.session_count());
+                tracing::info!(client_id = id, active = registry.session_count(), "client connected");
             }
             ClientEvent::Disconnected(id) => {
                 let removed = registry.unregister(id);
                 client_count.store(registry.session_count(), Ordering::Relaxed);
-                eprintln!(
-                    "[rete-session] client {id} disconnected, {} dest(s) released ({} active)",
-                    removed.len(),
-                    registry.session_count(),
+                tracing::info!(
+                    client_id = id,
+                    released = removed.len(),
+                    active = registry.session_count(),
+                    "client disconnected",
                 );
             }
         }

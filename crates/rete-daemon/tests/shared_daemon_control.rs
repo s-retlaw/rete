@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{big_stack_test, make_tcp_config, make_unix_config};
+use common::{big_stack_async_test, make_tcp_config, make_unix_config};
 use rete_daemon::control;
 use rete_daemon::daemon::SharedDaemonBuilder;
 use rete_daemon::pickle;
@@ -108,12 +108,7 @@ async fn rpc_query<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
 #[test]
 fn test_unix_control_status_query() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let name = format!("ctrl-test-{}", std::process::id());
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -186,7 +181,6 @@ fn test_unix_control_status_query() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -196,12 +190,7 @@ fn test_unix_control_status_query() {
 
 #[test]
 fn test_tcp_control_status_query() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let port = 49800 + (std::process::id() % 100) as u16;
                 let control_port = port + 1;
                 let data_dir = tempfile::tempdir().unwrap();
@@ -267,7 +256,6 @@ fn test_tcp_control_status_query() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -277,12 +265,7 @@ fn test_tcp_control_status_query() {
 
 #[test]
 fn test_tcp_control_auth_failure() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let port = 49800 + (std::process::id() % 100) as u16 + 2;
                 let control_port = port + 1;
                 let data_dir = tempfile::tempdir().unwrap();
@@ -331,7 +314,6 @@ fn test_tcp_control_auth_failure() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -341,12 +323,7 @@ fn test_tcp_control_auth_failure() {
 
 #[test]
 fn test_tcp_control_multiple_queries() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let port = 49800 + (std::process::id() % 100) as u16 + 4;
                 let control_port = port + 1;
                 let data_dir = tempfile::tempdir().unwrap();
@@ -423,7 +400,6 @@ fn test_tcp_control_multiple_queries() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -433,12 +409,7 @@ fn test_tcp_control_multiple_queries() {
 
 #[test]
 fn test_unix_path_table_with_announce() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 use rete_core::Identity;
                 use rete_stack::ReteInterface;
                 use rete_tokio::local::LocalClient;
@@ -508,7 +479,6 @@ fn test_unix_path_table_with_announce() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -518,12 +488,7 @@ fn test_unix_path_table_with_announce() {
 
 #[test]
 fn test_unix_next_hop_query() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 use rete_core::Identity;
                 use rete_stack::ReteInterface;
                 use rete_tokio::local::LocalClient;
@@ -630,7 +595,6 @@ fn test_unix_next_hop_query() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -640,12 +604,7 @@ fn test_unix_next_hop_query() {
 
 #[test]
 fn test_unix_drop_path_via_rpc() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 use rete_core::Identity;
                 use rete_stack::ReteInterface;
                 use rete_tokio::local::LocalClient;
@@ -747,6 +706,5 @@ fn test_unix_drop_path_via_rpc() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }

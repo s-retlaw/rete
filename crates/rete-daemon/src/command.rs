@@ -24,7 +24,7 @@ pub fn parse_link_id(hex_str: &str) -> Option<LinkId> {
 fn parse_link_and_text(line: &str, cmd: &str) -> Option<(LinkId, Vec<u8>)> {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     if parts.len() < 3 {
-        eprintln!("[rete] usage: {cmd} <link_id_hex> <text>");
+        eprintln!("usage: {cmd} <link_id_hex> <text>");
         return None;
     }
     let link_id = parse_link_id(parts[1])?;
@@ -50,7 +50,7 @@ pub fn parse_command(line: &str) -> Option<NodeCommand> {
         "channel" => {
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
             if parts.len() < 4 {
-                eprintln!("[rete] usage: channel <link_id_hex> <msg_type_hex> <text>");
+                eprintln!("usage: channel <link_id_hex> <msg_type_hex> <text>");
                 return None;
             }
             let link_id = parse_link_id(parts[1])?;
@@ -102,7 +102,7 @@ pub fn parse_command(line: &str) -> Option<NodeCommand> {
         "request" => {
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
             if parts.len() < 4 {
-                eprintln!("[rete] usage: request <link_id_hex> <path> <data>");
+                eprintln!("usage: request <link_id_hex> <path> <data>");
                 return None;
             }
             let link_id = parse_link_id(parts[1])?;
@@ -115,7 +115,7 @@ pub fn parse_command(line: &str) -> Option<NodeCommand> {
         "lxmf" => {
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
             if parts.len() < 3 {
-                eprintln!("[rete] usage: lxmf <dest_hash_hex> <message>");
+                eprintln!("usage: lxmf <dest_hash_hex> <message>");
                 return None;
             }
             Some(NodeCommand::AppCommand {
@@ -128,7 +128,7 @@ pub fn parse_command(line: &str) -> Option<NodeCommand> {
         "lxmf-link" => {
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
             if parts.len() < 4 {
-                eprintln!("[rete] usage: lxmf-link <link_id_hex> <dest_hash_hex> <message>");
+                eprintln!("usage: lxmf-link <link_id_hex> <dest_hash_hex> <message>");
                 return None;
             }
             Some(NodeCommand::AppCommand {
@@ -158,8 +158,8 @@ pub fn parse_command(line: &str) -> Option<NodeCommand> {
         }),
         "quit" => Some(NodeCommand::Shutdown),
         _ => {
-            eprintln!("[rete] unknown command: {line}");
-            eprintln!("[rete] commands: send <dest_hex> <text> | link <dest_hex> | close <link_id> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | request <link_id> <path> <data> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | lxmf-prop-announce | stats | quit");
+            tracing::warn!(command = %line, "unknown command");
+            eprintln!("commands: send <dest_hex> <text> | link <dest_hex> | close <link_id> | linkdata <link_id> <text> | channel <link_id> <msg_type> <text> | resource <link_id> <text> | request <link_id> <path> <data> | path <dest_hex> | announce [data] | lxmf <dest_hex> <msg> | lxmf-link <link_id> <dest_hex> <msg> | lxmf-prop-announce | stats | quit");
             None
         }
     }

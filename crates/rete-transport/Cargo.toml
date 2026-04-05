@@ -11,7 +11,7 @@ categories.workspace = true
 [features]
 std = []
 hosted = ["dep:hashbrown"]
-relay-debug = ["std"]
+relay-debug = ["std", "dep:tracing"]
 serde = ["dep:serde", "rete-core/serde"]
 
 [dependencies]
@@ -24,6 +24,7 @@ hkdf          = { workspace = true }
 zeroize       = { workspace = true }
 hashbrown     = { version = "0.16", default-features = false, features = ["default-hasher"], optional = true }
 serde         = { workspace = true, optional = true }
+tracing       = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

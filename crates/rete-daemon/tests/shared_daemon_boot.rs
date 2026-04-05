@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{big_stack_test, make_tcp_config, make_unix_config};
+use common::{big_stack_async_test, make_tcp_config, make_unix_config};
 use rete_daemon::daemon::{DaemonError, SharedDaemonBuilder};
 
 use rete_tokio::local::LocalClient;
@@ -15,12 +15,7 @@ use tokio::time::{timeout, Duration};
 
 #[test]
 fn test_daemon_starts_from_shared_config() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let name = format!("test_boot_{}", std::process::id());
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -46,7 +41,6 @@ fn test_daemon_starts_from_shared_config() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -56,12 +50,7 @@ fn test_daemon_starts_from_shared_config() {
 
 #[test]
 fn test_duplicate_daemon_bind_fails_unix() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let name = format!("test_dup_{}", std::process::id());
                 let data_dir1 = tempfile::tempdir().unwrap();
                 let data_dir2 = tempfile::tempdir().unwrap();
@@ -90,18 +79,12 @@ fn test_duplicate_daemon_bind_fails_unix() {
 
                 daemon1.shutdown().await;
                 let _ = timeout(Duration::from_secs(5), &mut run1).await;
-            });
     });
 }
 
 #[test]
 fn test_duplicate_daemon_bind_fails_tcp() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let data_dir1 = tempfile::tempdir().unwrap();
                 let data_dir2 = tempfile::tempdir().unwrap();
 
@@ -133,7 +116,6 @@ fn test_duplicate_daemon_bind_fails_tcp() {
 
                 daemon1.shutdown().await;
                 let _ = timeout(Duration::from_secs(5), &mut run1).await;
-            });
     });
 }
 
@@ -143,12 +125,7 @@ fn test_duplicate_daemon_bind_fails_tcp() {
 
 #[test]
 fn test_daemon_shutdown_clean() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let name = format!("test_shut_{}", std::process::id());
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -187,6 +164,5 @@ fn test_daemon_shutdown_clean() {
                 tokio::pin!(run2);
                 daemon2.shutdown().await;
                 let _ = timeout(Duration::from_secs(5), &mut run2).await;
-            });
     });
 }

@@ -910,7 +910,7 @@ impl Resource {
 
         #[cfg(feature = "relay-debug")]
         if !matched {
-            std::eprintln!(
+            tracing::debug!(
                 "resource receive_part: no hash match, computed={:02x}{:02x}{:02x}{:02x} len={} cursor={} total={}",
                 part_hash[0], part_hash[1], part_hash[2], part_hash[3],
                 part_data.len(), self.hashmap_cursor, self.total_segments,

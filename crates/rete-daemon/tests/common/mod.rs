@@ -16,6 +16,27 @@ pub fn big_stack_test(f: fn()) {
         .unwrap();
 }
 
+/// Run an async test on a thread with 16 MB stack using a single-threaded
+/// Tokio runtime.  Eliminates the 8-line boilerplate pattern used in all
+/// daemon integration tests.
+pub fn big_stack_async_test<F>(f: impl FnOnce() -> F + Send + 'static)
+where
+    F: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(f())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 pub fn make_unix_config(name: &str) -> SharedInstanceConfig {
     SharedInstanceConfig {
         share_instance: true,

@@ -180,11 +180,18 @@ print("PY_DONE", flush=True)
         )
 
         # --- Assertion 8: Self-announce filtering ---
+        # Extract Rust dest hash from IDENTITY line on stdout (preferred)
+        # or fall back to parsing stderr.
         rust_dest_hex = None
-        for line in rust_stderr.split("\n"):
-            if "destination hash:" in line:
-                rust_dest_hex = line.strip().split("destination hash: ")[-1]
+        for line in rust:
+            if line.startswith("IDENTITY:"):
+                rust_dest_hex = line.partition(":")[2].strip()
                 break
+        if not rust_dest_hex:
+            for line in rust_stderr.split("\n"):
+                if "destination hash:" in line:
+                    rust_dest_hex = line.strip().split("destination hash: ")[-1]
+                    break
 
         if rust_dest_hex:
             self_announce_lines = [l for l in announce_lines

@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{big_stack_test, make_unix_config};
+use common::{big_stack_async_test, make_unix_config};
 use rete_daemon::daemon::SharedDaemonBuilder;
 
 use rete_core::{Identity, Packet, PacketType};
@@ -20,12 +20,7 @@ use tokio::time::{timeout, Duration};
 
 #[test]
 fn test_daemon_canonical_announce_routing() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let name = format!("test_annc_{}", std::process::id());
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -75,7 +70,6 @@ fn test_daemon_canonical_announce_routing() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -85,12 +79,7 @@ fn test_daemon_canonical_announce_routing() {
 
 #[test]
 fn test_daemon_client_disconnect_no_crash() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let name = format!("test_disc_{}", std::process::id());
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -130,7 +119,6 @@ fn test_daemon_client_disconnect_no_crash() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }
 
@@ -140,12 +128,7 @@ fn test_daemon_client_disconnect_no_crash() {
 
 #[test]
 fn test_daemon_ingests_packet_without_crash() {
-    big_stack_test(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
+    big_stack_async_test(|| async {
                 let name = format!("test_pkt_{}", std::process::id());
                 let data_dir = tempfile::tempdir().unwrap();
 
@@ -191,6 +174,5 @@ fn test_daemon_ingests_packet_without_crash() {
                 daemon.shutdown().await;
                 let result = timeout(Duration::from_secs(5), &mut run_future).await;
                 assert!(result.is_ok(), "daemon must shut down within 5s");
-            });
     });
 }

@@ -12,6 +12,9 @@ path = "src/main.rs"
 name = "rete-serial-bridge"
 path = "src/bin/serial_bridge.rs"
 
+[features]
+test-output = ["rete-daemon/test-output"]
+
 [dependencies]
 rete-core         = { workspace = true }
 rete-transport    = { workspace = true, features = ["serde", "relay-debug"] }
@@ -22,6 +25,7 @@ rete-iface-serial = { workspace = true }
 rete-iface-auto   = { workspace = true }
 rete-lxmf         = { workspace = true }
 rete-daemon       = { workspace = true }
+tracing            = { workspace = true, features = ["std"] }
 tokio             = { workspace = true }
 serde_json        = { workspace = true }
 serde             = { workspace = true, features = ["derive"] }

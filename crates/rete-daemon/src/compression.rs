@@ -83,11 +83,11 @@ pub fn log_packet(raw: &[u8], direction: &str, iface_idx: u8) {
     let pkt = match Packet::parse(raw) {
         Ok(p) => p,
         Err(_) => {
-            eprintln!(
-                "[pkt] {} iface={} PARSE_ERROR len={}",
+            tracing::warn!(
                 direction,
-                iface_idx,
-                raw.len()
+                iface = iface_idx,
+                len = raw.len(),
+                "packet parse error",
             );
             return;
         }
@@ -118,19 +118,19 @@ pub fn log_packet(raw: &[u8], direction: &str, iface_idx: u8) {
         _ => "?",
     };
 
-    eprintln!(
-        "[pkt] {} iface={} {}/{:?}/{:?} hops={} dest={} ctx={:#04x}({}) plen={} raw={}",
+    tracing::debug!(
         direction,
-        iface_idx,
-        hdr,
-        pkt.packet_type,
-        pkt.dest_type,
-        pkt.hops,
-        hex::encode(pkt.destination_hash),
-        pkt.context,
-        ctx_name,
-        pkt.payload.len(),
-        hex::encode(&raw[..raw.len().min(64)])
+        iface = iface_idx,
+        header = hdr,
+        packet_type = ?pkt.packet_type,
+        dest_type = ?pkt.dest_type,
+        hops = pkt.hops,
+        dest = %hex::encode(pkt.destination_hash),
+        context = ctx_name,
+        context_byte = format_args!("{:#04x}", pkt.context),
+        payload_len = pkt.payload.len(),
+        raw = %hex::encode(&raw[..raw.len().min(64)]),
+        "packet",
     );
 }
 

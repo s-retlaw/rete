@@ -244,11 +244,11 @@ impl TokioNode {
             NodeCommand::SendData { dest_hash, payload } => {
                 match self.core.build_data_packet(&dest_hash, &payload, rng, now) {
                     Ok(pkt) => {
-                        eprintln!("[rete] cmd: sent DATA to {}", hex::encode(dest_hash));
+                        tracing::debug!("cmd: sent DATA to {}", hex::encode(dest_hash));
                         (vec![OutboundPacket::broadcast(pkt)], true, None)
                     }
                     Err(e) => {
-                        eprintln!("[rete] cmd: send failed: {e}");
+                        tracing::warn!("cmd: send failed: {e}");
                         (vec![], true, None)
                     }
                 }
@@ -256,15 +256,11 @@ impl TokioNode {
             NodeCommand::InitiateLink { dest_hash } => {
                 match self.core.initiate_link(dest_hash, now, rng) {
                     Ok((outbound, link_id)) => {
-                        eprintln!(
-                            "[rete] cmd: initiated link {} to {}",
-                            hex::encode(link_id),
-                            hex::encode(dest_hash)
-                        );
+                        tracing::debug!("cmd: initiated link {} to {}", hex::encode(link_id), hex::encode(dest_hash));
                         (vec![outbound], true, None)
                     }
                     Err(e) => {
-                        eprintln!("[rete] cmd: link initiation failed: {e}");
+                        tracing::warn!("cmd: link initiation failed: {e}");
                         (vec![], true, None)
                     }
                 }
@@ -280,26 +276,23 @@ impl TokioNode {
                 {
                     Ok(outbound) => (vec![outbound], true, None),
                     Err(e) => {
-                        eprintln!("[rete] cmd: channel send failed: {e}");
+                        tracing::warn!("cmd: channel send failed: {e}");
                         (vec![], true, None)
                     }
                 }
             }
             NodeCommand::RequestPath { dest_hash } => {
-                eprintln!("[rete] cmd: requesting path to {}", hex::encode(dest_hash));
+                tracing::debug!("cmd: requesting path to {}", hex::encode(dest_hash));
                 (vec![self.core.request_path(&dest_hash)], true, None)
             }
             NodeCommand::SendLinkData { link_id, payload } => {
                 match self.core.send_link_data(&link_id, &payload, rng) {
                     Ok(outbound) => {
-                        eprintln!("[rete] cmd: sent link data on {}", hex::encode(link_id));
+                        tracing::debug!("cmd: sent link data on {}", hex::encode(link_id));
                         (vec![outbound], true, None)
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[rete] cmd: link data send failed (link {}): {e}",
-                            hex::encode(link_id)
-                        );
+                        tracing::warn!("cmd: link data send failed (link {}): {e}", hex::encode(link_id));
                         (vec![], true, None)
                     }
                 }
@@ -307,17 +300,11 @@ impl TokioNode {
             NodeCommand::SendResource { link_id, data } => {
                 match self.core.start_resource(&link_id, &data, rng) {
                     Ok(pkt) => {
-                        eprintln!(
-                            "[rete] cmd: started resource transfer on link {}",
-                            hex::encode(link_id)
-                        );
+                        tracing::debug!("cmd: started resource transfer on link {}", hex::encode(link_id));
                         (vec![pkt], true, None)
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[rete] cmd: resource send failed (link {}): {e}",
-                            hex::encode(link_id)
-                        );
+                        tracing::warn!("cmd: resource send failed (link {}): {e}", hex::encode(link_id));
                         (vec![], true, None)
                     }
                 }
@@ -327,11 +314,7 @@ impl TokioNode {
                 resource_hash,
             } => {
                 let packets = self.core.accept_resource(&link_id, &resource_hash, rng);
-                eprintln!(
-                    "[rete] cmd: accepted resource {} on link {}",
-                    hex::encode(resource_hash),
-                    hex::encode(link_id)
-                );
+                tracing::debug!("cmd: accepted resource {} on link {}", hex::encode(resource_hash), hex::encode(link_id));
                 (packets, true, None)
             }
             NodeCommand::RejectResource {
@@ -339,20 +322,16 @@ impl TokioNode {
                 resource_hash,
             } => {
                 let packets = self.core.reject_resource(&link_id, &resource_hash, rng);
-                eprintln!(
-                    "[rete] cmd: rejected resource {} on link {}",
-                    hex::encode(resource_hash),
-                    hex::encode(link_id)
-                );
+                tracing::debug!("cmd: rejected resource {} on link {}", hex::encode(resource_hash), hex::encode(link_id));
                 (packets, true, None)
             }
             NodeCommand::CloseLink { link_id } => {
                 let (pkt, event) = self.core.close_link(&link_id, rng);
                 let packets = pkt.into_iter().collect();
                 if event.is_some() {
-                    eprintln!("[rete] cmd: closed link {}", hex::encode(link_id));
+                    tracing::debug!("cmd: closed link {}", hex::encode(link_id));
                 } else {
-                    eprintln!("[rete] cmd: close failed (link {})", hex::encode(link_id));
+                    tracing::warn!("cmd: close failed (link {})", hex::encode(link_id));
                 }
                 (packets, true, event)
             }
@@ -362,31 +341,25 @@ impl TokioNode {
                 payload,
             } => match self.core.send_request(&link_id, &path, &payload, now, rng) {
                 Ok((outbound, request_id)) => {
-                    eprintln!(
-                        "[rete] cmd: sent request on link {} (req_id={})",
-                        hex::encode(link_id),
-                        hex::encode(request_id)
-                    );
+                    tracing::debug!("cmd: sent request on link {} (req_id={})", hex::encode(link_id), hex::encode(request_id));
                     (vec![outbound], true, None)
                 }
                 Err(e) => {
-                    eprintln!("[rete] cmd: request send failed: {e}");
+                    tracing::warn!("cmd: request send failed: {e}");
                     (vec![], true, None)
                 }
             },
             NodeCommand::Announce { app_data } => {
                 self.core.queue_announce(app_data.as_deref(), rng, now);
-                eprintln!("[rete] cmd: queued announce");
+                tracing::debug!("cmd: queued announce");
                 (self.core.flush_announces(now, rng), true, None)
             }
             NodeCommand::AppCommand { name, .. } => {
-                eprintln!(
-                    "[rete] cmd: app command '{name}' not handled (no app handler installed)"
-                );
+                tracing::warn!("cmd: app command '{name}' not handled (no app handler installed)");
                 (vec![], true, None)
             }
             NodeCommand::Shutdown => {
-                eprintln!("[rete] cmd: shutdown requested");
+                tracing::info!("cmd: shutdown requested");
                 (vec![], false, None)
             }
         }
@@ -462,15 +435,9 @@ impl TokioNode {
             let now = current_time_secs();
             let (announces, cached) = self.core.initial_announce(&mut rng, now);
             dispatch_single(iface, &announces).await;
-            eprintln!(
-                "[rete] sent announce for dest {}",
-                hex::encode(self.core.dest_hash())
-            );
+            tracing::info!("sent announce for dest {}", hex::encode(self.core.dest_hash()));
             if !cached.is_empty() {
-                eprintln!(
-                    "[rete] flushing {} cached announces to new interface",
-                    cached.len()
-                );
+                tracing::debug!("flushing {} cached announces to new interface", cached.len());
                 dispatch_single(iface, &cached).await;
             }
         }
@@ -480,21 +447,13 @@ impl TokioNode {
             let now = current_time_secs();
             if let Ok(pkt) = self.core.build_data_packet(&dest, &data, &mut rng, now) {
                 if let Err(e) = iface.send(&pkt).await {
-                    eprintln!("[rete] initial send failed: {:?}", e);
+                    tracing::warn!("initial send failed: {:?}", e);
                 } else {
-                    eprintln!(
-                        "[rete] sent initial DATA to {}: {}",
-                        hex::encode(dest),
-                        String::from_utf8_lossy(&data)
-                    );
-                    println!(
-                        "DATA_SENT:{}:{}",
-                        hex::encode(dest),
-                        String::from_utf8_lossy(&data)
-                    );
+                    tracing::debug!("sent initial DATA to {}: {}", hex::encode(dest), String::from_utf8_lossy(&data));
+                    tracing::info!(target: "rete::test_event", event = "DATA_SENT", dest = %hex::encode(dest), payload = %String::from_utf8_lossy(&data));
                 }
             } else {
-                eprintln!("[rete] initial send failed: peer not registered");
+                tracing::warn!("initial send failed: peer not registered");
             }
         }
 
@@ -521,7 +480,7 @@ impl TokioNode {
                             }
                         }
                         Err(e) => {
-                            eprintln!("[rete] recv error: {:?}", e);
+                            tracing::error!("recv error: {:?}", e);
                             break;
                         }
                     }
@@ -620,12 +579,9 @@ impl TokioNode {
             let now = current_time_secs();
             let (announces, cached) = self.core.initial_announce(&mut rng, now);
             dispatch(&slots, &announces, 0, None).await;
-            eprintln!("[rete] sent announce on {} interface slots", slots.len());
+            tracing::info!("sent announce on {} interface slots", slots.len());
             if !cached.is_empty() {
-                eprintln!(
-                    "[rete] flushing {} cached announces to interfaces",
-                    cached.len()
-                );
+                tracing::debug!("flushing {} cached announces to interfaces", cached.len());
                 dispatch(&slots, &cached, 0, None).await;
             }
         }

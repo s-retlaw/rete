@@ -17,39 +17,39 @@ pub fn load_or_create_identity(path: &Path) -> Result<Identity, String> {
         Ok(data) => {
             if data.len() != 64 {
                 return Err(format!(
-                    "[rete] invalid identity file (expected 64 bytes, got {})",
+                    "invalid identity file (expected 64 bytes, got {})",
                     data.len()
                 ));
             }
-            eprintln!("[rete] loaded identity from {}", path.display());
+            tracing::info!(path = %path.display(), "loaded identity");
             Identity::from_private_key(&data)
-                .map_err(|e| format!("[rete] invalid identity file: {e}"))
+                .map_err(|e| format!("invalid identity file: {e}"))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let mut rng = rand::thread_rng();
             let mut prv = [0u8; 64];
             rand::RngCore::fill_bytes(&mut rng, &mut prv);
             let identity = Identity::from_private_key(&prv)
-                .map_err(|e| format!("[rete] failed to generate identity: {e}"))?;
+                .map_err(|e| format!("failed to generate identity: {e}"))?;
 
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("[rete] failed to create identity directory: {e}"))?;
+                    .map_err(|e| format!("failed to create identity directory: {e}"))?;
             }
             std::fs::write(path, identity.private_key())
-                .map_err(|e| format!("[rete] failed to write identity file: {e}"))?;
+                .map_err(|e| format!("failed to write identity file: {e}"))?;
 
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                    .map_err(|e| format!("[rete] failed to set identity file permissions: {e}"))?;
+                    .map_err(|e| format!("failed to set identity file permissions: {e}"))?;
             }
 
-            eprintln!("[rete] created new identity at {}", path.display());
+            tracing::info!(path = %path.display(), "created new identity");
             Ok(identity)
         }
-        Err(e) => Err(format!("[rete] failed to read identity file: {e}")),
+        Err(e) => Err(format!("failed to read identity file: {e}")),
     }
 }
 
@@ -85,7 +85,7 @@ impl rete_transport::SnapshotStore for JsonFileStore {
             Ok(json) => {
                 let snap: rete_transport::Snapshot = serde_json::from_str(&json)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                eprintln!("[rete] loaded snapshot from {}", self.path.display());
+                tracing::info!(path = %self.path.display(), "loaded snapshot");
                 Ok(Some(snap))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
