@@ -364,10 +364,9 @@ test-all:
     #!/usr/bin/env bash
     set -o pipefail
 
-    # --- Build everything upfront ---
+    # --- Build rete-linux upfront (E2E interop tests need it) ---
     echo "Building..."
     cargo build -p rete-example-linux --features test-output 2>&1
-    cargo build -p rete-daemon --bin rete-shared --features test-output 2>&1
     echo ""
 
     # --- Prune stale Docker resources from prior runs ---
@@ -561,7 +560,10 @@ test-all:
     run_e2e MIXSTRESS mixed_stress_interop.py
     run_e2e PROOFCHAIN proof_chain_interop.py
 
-    # Shared-mode daemon (6)
+    # Shared-mode daemon (6) — build rete-shared AFTER cargo test to avoid
+    # feature flag clobbering (cargo test --workspace recompiles without test-output)
+    echo "Building rete-shared with test-output..."
+    cargo build -p rete-daemon --bin rete-shared --features test-output 2>&1
     run_shared_e2e SMUNXROBUST unix/robustness.py
     run_shared_e2e SMTCPROBUST tcp/robustness.py
     run_shared_e2e SMUNXSOAK unix/soak.py
