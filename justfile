@@ -314,6 +314,18 @@ test-e2e-stats:
     cargo build -p rete-example-linux
     cd tests/interop && uv run python stats_interop.py
 
+# All E2E tests in isolated Docker containers (no port conflicts)
+test-e2e-containerized:
+    cargo build -p rete-example-linux
+    cargo build -p rete-daemon --bin rete-shared 2>/dev/null || true
+    cd tests/interop && uv run python container_runner.py --all
+
+# Parallel E2E tests in containers (4 concurrent)
+test-e2e-containerized-parallel:
+    cargo build -p rete-example-linux
+    cargo build -p rete-daemon --bin rete-shared 2>/dev/null || true
+    cd tests/interop && uv run python container_runner.py --all --parallel 4
+
 # All software tests (unit + E2E, no hardware)
 test-all:
     #!/usr/bin/env bash

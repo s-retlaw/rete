@@ -12,6 +12,14 @@ import threading
 import time
 
 
+# ---------------------------------------------------------------------------
+# Container-per-test support
+# ---------------------------------------------------------------------------
+
+IS_CONTAINERIZED = os.environ.get("RETE_CONTAINERIZED") == "1"
+CONTAINER_PORT = 4242  # Fixed base port inside containers (isolated namespace)
+
+
 def write_rnsd_config(
     config_dir: str,
     port: int,
@@ -124,6 +132,15 @@ class InteropTest:
             help="Serial port for ESP32 tests (default: /dev/ttyUSB0)",
         )
         self.args = parser.parse_args()
+
+        # When running inside a container, override port and binary from env
+        # so that every test uses fixed internal ports (no host conflicts).
+        if IS_CONTAINERIZED:
+            if "--port" not in sys.argv:
+                self.args.port = CONTAINER_PORT
+            env_binary = os.environ.get("RETE_BINARY")
+            if env_binary and "--rust-binary" not in sys.argv:
+                self.args.rust_binary = env_binary
 
         self.rust_binary = os.path.abspath(self.args.rust_binary)
         if not os.path.exists(self.rust_binary):
