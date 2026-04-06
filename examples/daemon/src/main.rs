@@ -68,10 +68,58 @@ fn main() {
 }
 
 async fn async_main() {
-    // init_tracing installs the tracing subscriber (stderr + TestEventLayer).
-    // Temporarily testing: skip it to see if tracing overhead causes resource failures.
     rete_daemon::init_tracing();
     let args: Vec<String> = std::env::args().collect();
+
+    // --help / -h
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        eprintln!("rete — Reticulum Network Stack daemon");
+        eprintln!();
+        eprintln!("Usage: rete [OPTIONS]");
+        eprintln!();
+        eprintln!("Modes:");
+        eprintln!("  --connect <ADDR>              Connect to peer via TCP (repeatable)");
+        eprintln!("  --listen <ADDR>               Listen for inbound TCP connections");
+        eprintln!("  --serial <PATH>               Connect via serial port");
+        eprintln!("  --auto                        Enable AutoInterface (mDNS peer discovery)");
+        eprintln!("  --shared-instance             Run as shared-instance daemon (replaces rnsd)");
+        eprintln!("  --local-server <NAME>         Start local IPC server for shared clients");
+        eprintln!("  --local-client <NAME>         Attach to a local shared instance");
+        eprintln!();
+        eprintln!("General:");
+        eprintln!("  --data-dir <PATH>             Data directory (default: ~/.rete)");
+        eprintln!("  --transport                   Enable transport mode (relay packets)");
+        eprintln!("  --generate-config             Print default config.toml to stdout and exit");
+        eprintln!();
+        eprintln!("Shared-instance (with --shared-instance):");
+        eprintln!("  --shared-instance-type <T>    \"unix\" or \"tcp\" (default: unix)");
+        eprintln!("  --shared-instance-port <P>    TCP data port (default: 37428)");
+        eprintln!("  --instance-control-port <P>   RPC control port (default: 37429)");
+        eprintln!("  --instance-name <NAME>        Instance name (default: \"default\")");
+        eprintln!();
+        eprintln!("Network:");
+        eprintln!("  --auto-group <NAME>           AutoInterface group name");
+        eprintln!("  --ifac-netname <NAME>         IFAC network name");
+        eprintln!("  --ifac-netkey <KEY>           IFAC network key");
+        eprintln!("  --baud <RATE>                 Serial baud rate (default: 115200)");
+        eprintln!();
+        eprintln!("LXMF:");
+        eprintln!("  --propagation                 Enable LXMF propagation node");
+        eprintln!("  --lxmf-name <NAME>            LXMF display name");
+        eprintln!("  --lxmf-announce               Announce LXMF delivery on startup");
+        eprintln!("  --stamp-cost <N>              Require stamp cost for inbound LXMF");
+        eprintln!("  --enforce-stamps              Reject LXMF without valid stamp");
+        eprintln!();
+        eprintln!("Other:");
+        eprintln!("  --monitoring <ADDR>           Prometheus metrics endpoint");
+        eprintln!("  --resource-strategy <S>       \"none\", \"app\", or \"all\" (default: all)");
+        eprintln!("  --auto-reply <TEXT>           Auto-reply to DATA packets");
+        eprintln!("  --auto-reply-ping             Auto-reply with \"pong\"");
+        eprintln!("  --packet-log                  Log raw packet bytes");
+        eprintln!("  --send-data <DEST:TEXT>       Send data on startup");
+        eprintln!("  --help, -h                    Show this help");
+        std::process::exit(0);
+    }
 
     // --generate-config: print default config to stdout and exit
     if args.iter().any(|a| a == "--generate-config") {
