@@ -721,6 +721,12 @@ test-all:
     echo "═══════════════════════════════════════════════════"
     exit $((UNIT_RC + E2E_ANY_FAIL))
 
+# Build release binary
+build-release:
+    cargo build -p rete --release
+    @ls -lh target/release/rete
+    @echo "Binary: target/release/rete"
+
 # Check all workspace crates compile
 check:
     cargo check --workspace
