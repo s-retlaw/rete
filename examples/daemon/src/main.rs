@@ -81,7 +81,7 @@ async fn async_main() {
         eprintln!("  --connect <ADDR>              Connect to peer via TCP (repeatable)");
         eprintln!("  --listen <ADDR>               Listen for inbound TCP connections");
         eprintln!("  --serial <PATH>               Connect via serial port");
-        eprintln!("  --auto                        Enable AutoInterface (mDNS peer discovery)");
+        eprintln!("  --auto                        Enable AutoInterface (IPv6 multicast peer discovery)");
         eprintln!("  --shared-instance             Run as shared-instance daemon (replaces rnsd)");
         eprintln!("  --local-server <NAME>         Start local IPC server for shared clients");
         eprintln!("  --local-client <NAME>         Attach to a local shared instance");
