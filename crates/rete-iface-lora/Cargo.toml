@@ -1,0 +1,25 @@
+[package]
+name        = "rete-iface-lora"
+description = "LoRa radio interface for rete — SX1261/62/76/78 via lora-phy"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+keywords.workspace   = true
+categories.workspace = true
+
+[dependencies]
+rete-core  = { workspace = true }
+rete-stack = { workspace = true }
+
+# LoRa PHY driver (no_std, Embassy-compatible)
+lora-phy = "3"
+
+# Async traits
+embedded-hal-async = "1"
+
+# Timer (for CAD/TX delays)
+embassy-time = { workspace = true }
+
+# RNG for split sequence numbers
+rand_core = { workspace = true }

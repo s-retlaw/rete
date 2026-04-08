@@ -10,6 +10,7 @@ members = [
     "crates/rete-iface-serial",
     "crates/rete-iface-tcp",
     "crates/rete-iface-auto",
+    "crates/rete-iface-lora",
     "crates/rete-lxmf-core",
     "crates/rete-lxmf",
     "crates/rete-daemon",
@@ -46,6 +47,7 @@ rete-iface-kiss   = { path = "crates/rete-iface-kiss" }
 rete-iface-serial = { path = "crates/rete-iface-serial" }
 rete-iface-tcp    = { path = "crates/rete-iface-tcp" }
 rete-iface-auto   = { path = "crates/rete-iface-auto" }
+rete-iface-lora   = { path = "crates/rete-iface-lora" }
 rete-lxmf-core    = { path = "crates/rete-lxmf-core" }
 rete-lxmf         = { path = "crates/rete-lxmf" }
 rete-daemon       = { path = "crates/rete-daemon" }

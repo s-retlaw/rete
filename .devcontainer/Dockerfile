@@ -50,3 +50,8 @@ RUN curl -L "https://github.com/esp-rs/espflash/releases/latest/download/espflas
     && unzip /tmp/espflash.zip -d "$HOME/.cargo/bin/" \
     && chmod +x "$HOME/.cargo/bin/espflash" \
     && rm /tmp/espflash.zip
+
+# Install rust-analyzer LSP server (works with any editor — nvim, VS Code, etc.)
+RUN curl -L "https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz" \
+      | gunzip > "$HOME/.cargo/bin/rust-analyzer" \
+    && chmod +x "$HOME/.cargo/bin/rust-analyzer"

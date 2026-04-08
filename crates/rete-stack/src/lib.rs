@@ -326,3 +326,43 @@ pub async fn dispatch_single<I: ReteInterface>(iface: &mut I, packets: &[Outboun
         let _ = iface.send(&pkt.data).await;
     }
 }
+
+/// Dispatch outbound packets across two interfaces.
+///
+/// Routes packets based on [`PacketRouting`]:
+/// - `SourceInterface` -- send on interface `source_iface` only
+/// - `AllExceptSource` -- send on the other interface
+/// - `All` -- send on both
+#[cfg(feature = "alloc")]
+pub async fn dispatch_dual<I0: ReteInterface, I1: ReteInterface>(
+    iface0: &mut I0,
+    iface1: &mut I1,
+    packets: &[OutboundPacket],
+    source_iface: u8,
+) {
+    for pkt in packets {
+        match pkt.routing {
+            PacketRouting::SourceInterface => match source_iface {
+                0 => {
+                    let _ = iface0.send(&pkt.data).await;
+                }
+                1 => {
+                    let _ = iface1.send(&pkt.data).await;
+                }
+                _ => {}
+            },
+            PacketRouting::AllExceptSource => {
+                if source_iface != 0 {
+                    let _ = iface0.send(&pkt.data).await;
+                }
+                if source_iface != 1 {
+                    let _ = iface1.send(&pkt.data).await;
+                }
+            }
+            PacketRouting::All => {
+                let _ = iface0.send(&pkt.data).await;
+                let _ = iface1.send(&pkt.data).await;
+            }
+        }
+    }
+}

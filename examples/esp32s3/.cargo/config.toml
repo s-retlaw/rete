@@ -1,0 +1,19 @@
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor"
+rustflags = [
+  "-C", "link-arg=-Tlinkall.x",
+]
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[env]
+ESP_LOG = "info"
+# Override at build time: LORA_FREQ="868200000" cargo +esp run --release
+LORA_FREQ = { value = "915000000", force = false }
+LORA_SF = { value = "8", force = false }
+LORA_BW = { value = "125000", force = false }
+LORA_TX_POWER = { value = "14", force = false }
+
+[unstable]
+build-std = ["alloc", "core"]

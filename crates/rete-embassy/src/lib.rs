@@ -23,7 +23,7 @@ pub use rete_stack::NodeEvent;
 pub use rete_stack::OutboundPacket;
 pub use rete_stack::PacketRouting;
 pub use rete_stack::ProofStrategy;
-use rete_stack::{dispatch_single, ReteInterface};
+use rete_stack::{dispatch_dual, dispatch_single, ReteInterface};
 use rete_transport::{ANNOUNCE_INTERVAL_SECS, TICK_INTERVAL_SECS};
 
 // ---------------------------------------------------------------------------
@@ -248,6 +248,165 @@ impl EmbassyNode {
     {
         self.run_until_with_handler(iface, rng, on_event, core::future::pending::<()>())
             .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Dual-interface (multi-2) run methods
+    // -----------------------------------------------------------------------
+
+    /// Run the dual-interface event loop forever.
+    ///
+    /// Drives two interfaces simultaneously, routing packets between them
+    /// according to [`PacketRouting`] rules. This is the production entry
+    /// point for embedded targets with two radios (e.g., LoRa + USB serial).
+    pub async fn run_multi_2<I0, I1, R, F>(
+        &mut self,
+        iface0: &mut I0,
+        iface1: &mut I1,
+        rng: &mut R,
+        on_event: F,
+    ) where
+        I0: ReteInterface,
+        I1: ReteInterface,
+        R: RngCore + CryptoRng,
+        F: FnMut(NodeEvent),
+    {
+        self.run_multi_2_until(iface0, iface1, rng, on_event, core::future::pending::<()>())
+            .await;
+    }
+
+    /// Run the dual-interface event loop until a shutdown signal resolves.
+    pub async fn run_multi_2_until<I0, I1, R, F, S>(
+        &mut self,
+        iface0: &mut I0,
+        iface1: &mut I1,
+        rng: &mut R,
+        mut on_event: F,
+        shutdown: S,
+    ) where
+        I0: ReteInterface,
+        I1: ReteInterface,
+        R: RngCore + CryptoRng,
+        F: FnMut(NodeEvent),
+        S: Future<Output = ()>,
+    {
+        self.run_multi_2_until_with_handler(
+            iface0,
+            iface1,
+            rng,
+            |event, _, _| {
+                on_event(event);
+                Vec::new()
+            },
+            shutdown,
+        )
+        .await;
+    }
+
+    /// Run the dual-interface event loop with handler callback until shutdown.
+    ///
+    /// This is the most general dual-interface entry point. Routes packets
+    /// between two interfaces using [`dispatch_dual`].
+    pub async fn run_multi_2_until_with_handler<I0, I1, R, F, S>(
+        &mut self,
+        iface0: &mut I0,
+        iface1: &mut I1,
+        rng: &mut R,
+        mut on_event: F,
+        shutdown: S,
+    ) where
+        I0: ReteInterface,
+        I1: ReteInterface,
+        R: RngCore + CryptoRng,
+        F: FnMut(NodeEvent, &mut EmbeddedNodeCore, &mut R) -> Vec<OutboundPacket>,
+        S: Future<Output = ()>,
+    {
+        // Queue initial announce through transport — send on BOTH interfaces.
+        {
+            let now = self.announce_time();
+            let (announces, _cached) = self.core.initial_announce(rng, now);
+            dispatch_dual(iface0, iface1, &announces, 0).await;
+        }
+
+        let mut recv_buf0 = [0u8; MTU];
+        let mut recv_buf1 = [0u8; MTU];
+        let announce_interval = self.effective_announce_interval();
+        let mut next_announce = Instant::now() + Duration::from_secs(announce_interval);
+        let mut next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
+
+        const REANNOUNCE_IDLE_SECS: u64 = 3;
+        let mut last_recv = Instant::from_secs(0);
+
+        let mut shutdown = core::pin::pin!(shutdown);
+
+        loop {
+            // Multiplex recv from both interfaces.
+            // We erase error types into Option<usize> (the received length)
+            // so that the two arms have a common type.
+            let recv_either = async {
+                match embassy_futures::select::select(
+                    iface0.recv(&mut recv_buf0),
+                    iface1.recv(&mut recv_buf1),
+                )
+                .await
+                {
+                    embassy_futures::select::Either::First(r) => (0u8, r.ok().map(|d| d.len())),
+                    embassy_futures::select::Either::Second(r) => (1u8, r.ok().map(|d| d.len())),
+                }
+            };
+
+            match select4(recv_either, Timer::at(next_announce), Timer::at(next_tick), &mut shutdown).await {
+                Either4::First((iface_idx, recv_len)) => match recv_len {
+                    Some(len) => {
+                        let data = match iface_idx {
+                            0 => &recv_buf0[..len],
+                            _ => &recv_buf1[..len],
+                        };
+                        let now_inst = Instant::now();
+
+                        if now_inst.duration_since(last_recv).as_secs() >= REANNOUNCE_IDLE_SECS {
+                            let reannounce_at = now_inst + Duration::from_secs(2);
+                            if reannounce_at < next_announce {
+                                next_announce = reannounce_at;
+                            }
+                        }
+                        last_recv = now_inst;
+
+                        let now = now_inst.as_secs();
+                        let outcome = self.core.handle_ingest(data, now, iface_idx, rng);
+                        dispatch_dual(iface0, iface1, &outcome.packets, iface_idx).await;
+                        for event in outcome.events {
+                            let extra = on_event(event, &mut self.core, rng);
+                            dispatch_dual(iface0, iface1, &extra, iface_idx).await;
+                        }
+                    }
+                    None => {
+                        continue;
+                    }
+                },
+                Either4::Second(()) => {
+                    next_announce = Instant::now() + Duration::from_secs(announce_interval);
+                    let now = Instant::now().as_secs();
+                    self.core.queue_announce(None, rng, self.announce_time());
+                    let announces = self.core.flush_announces(now, rng);
+                    dispatch_dual(iface0, iface1, &announces, 0).await;
+                }
+                Either4::Third(()) => {
+                    next_tick = Instant::now() + Duration::from_secs(TICK_INTERVAL_SECS);
+                    let now = Instant::now().as_secs();
+                    let outcome = self.core.handle_tick(now, rng);
+                    // Tick packets go to All — source_iface 0 is fine since All ignores it.
+                    dispatch_dual(iface0, iface1, &outcome.packets, 0).await;
+                    for event in outcome.events {
+                        let extra = on_event(event, &mut self.core, rng);
+                        dispatch_dual(iface0, iface1, &extra, 0).await;
+                    }
+                }
+                Either4::Fourth(()) => {
+                    break;
+                }
+            }
+        }
     }
 
     /// Run the main event loop with handler callback until shutdown.
