@@ -35,9 +35,22 @@ use lora_phy::LoRa;
 use rete_embassy::{EmbassyNode, NodeEvent};
 use rete_iface_lora::{CsmaConfig, LoRaConfig, LoRaInterface};
 
+mod config;
+mod dhcp;
 mod display;
 mod rng;
+mod status;
+mod web;
 use rng::EspRng;
+
+macro_rules! mk_static {
+    ($t:ty, $val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit().write(($val));
+        x
+    }};
+}
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -62,20 +75,43 @@ const ASPECTS: &[&str] = &["lora", "v1"];
 //   Control: RESET=GPIO12, BUSY=GPIO13, DIO1=GPIO14
 
 #[esp_rtos::main]
-async fn main(_spawner: Spawner) -> ! {
+async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    esp_alloc::heap_allocator!(size: 64 * 1024);
+    esp_alloc::heap_allocator!(size: 128 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
     println!("[rete] Heltec LoRa V3/V4 — standalone Reticulum node");
+
+    // -----------------------------------------------------------------------
+    // Load or generate persistent config
+    // -----------------------------------------------------------------------
+
+    let node_config = match config::load_config() {
+        Some(cfg) => {
+            println!("[rete] loaded config from flash");
+            cfg
+        }
+        None => {
+            println!("[rete] no config found — generating defaults");
+            let cfg = config::NodeConfig::generate_default(&mut esp_hal::rng::Rng::new());
+            config::save_config(&cfg);
+            println!("[rete] config saved to flash");
+            cfg
+        }
+    };
+
+    // Cache config in memory so web handlers never touch flash (avoids stack overflow)
+    config::init_cache(&node_config);
+
     println!(
         "[rete] LoRa config: freq={}Hz SF={} BW={}Hz TX={}dBm",
-        LORA_FREQ, LORA_SF, LORA_BW, LORA_TX_POWER
+        node_config.lora_freq, node_config.lora_sf, node_config.lora_bw, node_config.lora_tx_power
     );
+    println!("[rete] admin password: {}", node_config.admin_pass_str());
 
     // -----------------------------------------------------------------------
     // OLED display (I2C, SDA=GPIO17, SCL=GPIO18, Vext power=GPIO21)
@@ -99,8 +135,84 @@ async fn main(_spawner: Spawner) -> ! {
 
     let i2c_di = ssd1306::I2CDisplayInterface::new(i2c);
     let mut oled = display::init_display(i2c_di);
-    display::draw_splash(&mut oled, LORA_FREQ, LORA_SF);
+    display::draw_splash(&mut oled, node_config.lora_freq, node_config.lora_sf);
     println!("[rete] OLED display initialized");
+
+    // -----------------------------------------------------------------------
+    // WiFi Access Point (+ optional STA upstream bridge)
+    // -----------------------------------------------------------------------
+
+    let esp_radio_ctrl =
+        &*mk_static!(esp_radio::Controller<'static>, esp_radio::init().unwrap());
+    let (mut controller, interfaces) =
+        esp_radio::wifi::new(esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
+
+    let sta_enabled = node_config.sta_enabled && node_config.sta_ssid_len > 0;
+
+    // Configure WiFi mode: AP-only or AP+STA
+    if sta_enabled {
+        let sta_ssid = ::core::str::from_utf8(&node_config.sta_ssid[..node_config.sta_ssid_len as usize]).unwrap_or("");
+        let sta_pass = ::core::str::from_utf8(&node_config.sta_pass[..node_config.sta_pass_len as usize]).unwrap_or("");
+        let mode = esp_radio::wifi::ModeConfig::ApSta(
+            esp_radio::wifi::ClientConfig::default()
+                .with_ssid(sta_ssid.into())
+                .with_password(sta_pass.into()),
+            esp_radio::wifi::AccessPointConfig::default()
+                .with_ssid(node_config.ap_ssid_str().into())
+                .with_channel(6),
+        );
+        controller.set_config(&mode).unwrap();
+        println!("[rete] WiFi AP+STA mode: AP={}, STA={}", node_config.ap_ssid_str(), sta_ssid);
+    } else {
+        let mode = esp_radio::wifi::ModeConfig::AccessPoint(
+            esp_radio::wifi::AccessPointConfig::default()
+                .with_ssid(node_config.ap_ssid_str().into())
+                .with_channel(6),
+        );
+        controller.set_config(&mode).unwrap();
+        println!("[rete] WiFi AP-only mode: {}", node_config.ap_ssid_str());
+    }
+
+    controller.start_async().await.unwrap();
+
+    // AP network stack (always active): static 192.168.4.1
+    let ap_net_config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
+        address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(192, 168, 4, 1), 24),
+        gateway: None,
+        dns_servers: Default::default(),
+    });
+    let hw_rng = esp_hal::rng::Rng::new();
+    let seed1 = (hw_rng.random() as u64) << 32 | hw_rng.random() as u64;
+    let (ap_stack, ap_runner) = embassy_net::new(
+        interfaces.ap,
+        ap_net_config,
+        mk_static!(embassy_net::StackResources<12>, embassy_net::StackResources::<12>::new()),
+        seed1,
+    );
+
+    spawner.spawn(net_task_ap(ap_runner)).ok();
+    spawner.spawn(dhcp_task(ap_stack)).ok();
+    spawner.spawn(reboot_task()).ok();
+    spawner.spawn(web::http_listener(0, ap_stack)).ok();
+    spawner.spawn(web::http_listener(1, ap_stack)).ok();
+    spawner.spawn(web::http_listener(2, ap_stack)).ok();
+
+    // STA network stack (optional): DHCP client to upstream
+    if sta_enabled {
+        let sta_net_config = embassy_net::Config::dhcpv4(Default::default());
+        let seed2 = (hw_rng.random() as u64) << 32 | hw_rng.random() as u64;
+        let (sta_stack, sta_runner) = embassy_net::new(
+            interfaces.sta,
+            sta_net_config,
+            mk_static!(embassy_net::StackResources<3>, embassy_net::StackResources::<3>::new()),
+            seed2,
+        );
+        spawner.spawn(net_task_sta(sta_runner)).ok();
+        spawner.spawn(sta_connection_task(controller)).ok();
+        spawner.spawn(sta_ip_monitor_task(sta_stack)).ok();
+    }
+
+    println!("[rete] WiFi started");
 
     // -----------------------------------------------------------------------
     // SPI + GPIO setup for SX1262 (Heltec V3/V4 pin mapping)
@@ -148,11 +260,11 @@ async fn main(_spawner: Spawner) -> ! {
     // -----------------------------------------------------------------------
 
     let lora_config = LoRaConfig {
-        frequency: LORA_FREQ,
-        spreading_factor: sf_from_u8(LORA_SF),
-        bandwidth: bw_from_hz(LORA_BW),
+        frequency: node_config.lora_freq,
+        spreading_factor: sf_from_u8(node_config.lora_sf),
+        bandwidth: bw_from_hz(node_config.lora_bw),
         coding_rate: CodingRate::_4_5,
-        tx_power: LORA_TX_POWER,
+        tx_power: node_config.lora_tx_power,
         preamble_len: 18,
         tx_timeout_ms: 10_000,
         csma: CsmaConfig::default(),
@@ -165,16 +277,11 @@ async fn main(_spawner: Spawner) -> ! {
     println!("[rete] LoRa interface ready");
 
     // -----------------------------------------------------------------------
-    // Generate identity and create node
+    // Create identity from persistent key
     // -----------------------------------------------------------------------
 
     let mut rng = EspRng(esp_hal::rng::Rng::new());
-
-    println!("[rete] generating identity from hardware RNG");
-    let mut prv = [0u8; 64];
-    use rand_core::RngCore;
-    rng.0.fill_bytes(&mut prv);
-    let identity = rete_core::Identity::from_private_key(&prv).expect("invalid key");
+    let identity = rete_core::Identity::from_private_key(&node_config.identity_key).expect("invalid key");
 
     let id_hash = identity.hash();
     let ih = id_hash.as_bytes();
@@ -222,7 +329,8 @@ async fn main(_spawner: Spawner) -> ! {
                     println!("[rete] tick: expired {} paths", expired_paths);
                 }
                 let now = embassy_time::Instant::now().as_secs();
-                disp_state.update(&mut oled, node_core, now, LORA_FREQ, LORA_SF);
+                disp_state.update(&mut oled, node_core, now, node_config.lora_freq, node_config.lora_sf, node_config.admin_pass_str());
+                status::update_status(node_core, now, node_config.lora_freq, node_config.lora_sf, node_config.lora_bw, node_config.lora_tx_power);
             }
             _ => {}
         }
@@ -234,6 +342,72 @@ async fn main(_spawner: Spawner) -> ! {
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Spawned tasks
+// ---------------------------------------------------------------------------
+
+#[embassy_executor::task]
+async fn net_task_ap(mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>) {
+    runner.run().await
+}
+
+#[embassy_executor::task]
+async fn net_task_sta(mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>) {
+    runner.run().await
+}
+
+#[embassy_executor::task]
+async fn sta_connection_task(mut controller: esp_radio::wifi::WifiController<'static>) {
+    use esp_radio::wifi::{WifiEvent, WifiStaState};
+    loop {
+        if matches!(esp_radio::wifi::sta_state(), WifiStaState::Connected) {
+            controller.wait_for_event(WifiEvent::StaDisconnected).await;
+            println!("[wifi] STA disconnected, reconnecting...");
+            status::STA_IP.store(0, core::sync::atomic::Ordering::Relaxed);
+            embassy_time::Timer::after(embassy_time::Duration::from_secs(3)).await;
+        }
+        println!("[wifi] STA connecting...");
+        match controller.connect_async().await {
+            Ok(_) => println!("[wifi] STA connected!"),
+            Err(e) => {
+                println!("[wifi] STA connect failed: {:?}", e);
+                embassy_time::Timer::after(embassy_time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn sta_ip_monitor_task(stack: embassy_net::Stack<'static>) {
+    loop {
+        if let Some(config) = stack.config_v4() {
+            let addr = config.address.address();
+            let octets = addr.octets();
+            let packed = u32::from_be_bytes(octets);
+            let prev = status::STA_IP.swap(packed, core::sync::atomic::Ordering::Relaxed);
+            if prev != packed {
+                println!("[wifi] STA IP: {}", addr);
+            }
+        } else {
+            status::STA_IP.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(2)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn dhcp_task(stack: embassy_net::Stack<'static>) {
+    dhcp::run(stack).await;
+}
+
+#[embassy_executor::task]
+async fn reboot_task() {
+    crate::status::REBOOT_SIGNAL.wait().await;
+    println!("[rete] reboot signal received — resetting in 1s");
+    embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;
+    esp_hal::system::software_reset();
 }
 
 // ---------------------------------------------------------------------------

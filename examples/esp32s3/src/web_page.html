@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RETE Node</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:monospace;background:#111;color:#0f0;padding:16px;max-width:480px;margin:0 auto}
+h1{font-size:2em;text-align:center;margin-bottom:4px;letter-spacing:0.2em}
+.sub{text-align:center;color:#080;margin-bottom:16px;font-size:0.9em}
+.card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:12px}
+.card h2{font-size:1em;color:#0a0;margin-bottom:8px;border-bottom:1px solid #333;padding-bottom:4px}
+.row{display:flex;justify-content:space-between;padding:2px 0;font-size:0.85em}
+.label{color:#080}
+.val{color:#0f0;font-weight:bold}
+.hash{font-size:0.75em;word-break:break-all}
+.status{text-align:center;font-size:0.75em;color:#555;margin-top:8px}
+</style>
+</head>
+<body>
+<h1>RETE</h1>
+<p class="sub">Reticulum Node</p>
+
+<div class="card">
+<h2>Identity</h2>
+<div class="row"><span class="label">ID</span><span class="val hash" id="identity">-</span></div>
+<div class="row"><span class="label">Dest</span><span class="val hash" id="dest_hash">-</span></div>
+<div class="row"><span class="label">Uptime</span><span class="val" id="uptime">-</span></div>
+</div>
+
+<div class="card">
+<h2>LoRa Radio</h2>
+<div class="row"><span class="label">Frequency</span><span class="val" id="freq">-</span></div>
+<div class="row"><span class="label">Spreading Factor</span><span class="val" id="sf">-</span></div>
+<div class="row"><span class="label">Bandwidth</span><span class="val" id="bw">-</span></div>
+<div class="row"><span class="label">TX Power</span><span class="val" id="txpwr">-</span></div>
+</div>
+
+<div class="card">
+<h2>Transport</h2>
+<div class="row"><span class="label">Packets RX</span><span class="val" id="rx">0</span></div>
+<div class="row"><span class="label">Packets TX</span><span class="val" id="tx">0</span></div>
+<div class="row"><span class="label">Forwarded</span><span class="val" id="fwd">0</span></div>
+<div class="row"><span class="label">Announces RX</span><span class="val" id="arx">0</span></div>
+<div class="row"><span class="label">Announces TX</span><span class="val" id="atx">0</span></div>
+<div class="row"><span class="label">Paths</span><span class="val" id="paths">0</span></div>
+<div class="row"><span class="label">Links</span><span class="val" id="links">0</span></div>
+</div>
+
+<p class="status" id="status">Connecting...</p>
+<p style="text-align:center;margin-top:12px;font-size:0.85em"><a href="/admin" style="color:#0a0">Admin</a></p>
+
+<script>
+function fmt(s){var h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0')}
+function up(){
+fetch('/api/status').then(r=>r.json()).then(d=>{
+document.getElementById('identity').textContent=d.identity;
+document.getElementById('dest_hash').textContent=d.dest_hash;
+document.getElementById('uptime').textContent=fmt(d.uptime_secs);
+document.getElementById('freq').textContent=d.lora.freq_mhz+' MHz';
+document.getElementById('sf').textContent='SF'+d.lora.sf;
+document.getElementById('bw').textContent=d.lora.bw_khz+' kHz';
+document.getElementById('txpwr').textContent=d.lora.tx_dbm+' dBm';
+document.getElementById('rx').textContent=d.transport.rx;
+document.getElementById('tx').textContent=d.transport.tx;
+document.getElementById('fwd').textContent=d.transport.fwd;
+document.getElementById('arx').textContent=d.transport.announces_rx;
+document.getElementById('atx').textContent=d.transport.announces_tx;
+document.getElementById('paths').textContent=d.transport.paths;
+document.getElementById('links').textContent=d.transport.links;
+document.getElementById('status').textContent='Updated '+new Date().toLocaleTimeString();
+}).catch(()=>{document.getElementById('status').textContent='Connection lost'})
+}
+up();var iv=setInterval(up,10000);document.addEventListener('visibilitychange',function(){if(document.hidden)clearInterval(iv);else iv=setInterval(up,10000)});
+</script>
+</body>
+</html>

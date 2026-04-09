@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RETE Admin</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:monospace;background:#111;color:#0f0;padding:16px;max-width:480px;margin:0 auto}
+h1{font-size:1.8em;text-align:center;margin-bottom:4px;letter-spacing:0.2em}
+.sub{text-align:center;color:#080;margin-bottom:16px;font-size:0.9em}
+.card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:12px}
+.card h2{font-size:1em;color:#0a0;margin-bottom:8px;border-bottom:1px solid #333;padding-bottom:4px}
+label{display:block;color:#080;font-size:0.85em;margin:6px 0 2px}
+input,select{width:100%;padding:6px 8px;background:#222;border:1px solid #444;color:#0f0;font-family:monospace;font-size:0.9em;border-radius:4px;margin-bottom:4px}
+input:focus,select:focus{border-color:#0f0;outline:none}
+button{width:100%;padding:10px;margin-top:8px;background:#0a0;color:#111;border:none;font-family:monospace;font-weight:bold;font-size:1em;border-radius:4px;cursor:pointer}
+button:hover{background:#0c0}
+button.danger{background:#a00;color:#fff}
+button.danger:hover{background:#c00}
+a{color:#0a0}
+.nav{text-align:center;margin-bottom:12px;font-size:0.85em}
+input[type=checkbox]{width:auto;margin-right:6px}
+.msg{color:#ff0;text-align:center;margin-top:8px;font-size:0.85em;display:none}
+</style>
+</head>
+<body>
+<h1>RETE</h1>
+<p class="sub">Node Admin</p>
+<p class="nav"><a href="/">&#8592; Status Page</a></p>
+
+<div class="card">
+<h2>LoRa Radio</h2>
+<form method="POST" action="/admin/lora">
+<label>Frequency (Hz)</label>
+<input name="freq" type="number" value="{{freq}}">
+<label>Spreading Factor</label>
+<select name="sf">
+<option value="7">SF7</option>
+<option value="8">SF8</option>
+<option value="9">SF9</option>
+<option value="10">SF10</option>
+<option value="11">SF11</option>
+<option value="12">SF12</option>
+</select>
+<label>Bandwidth (Hz)</label>
+<select name="bw">
+<option value="125000">125 kHz</option>
+<option value="250000">250 kHz</option>
+<option value="500000">500 kHz</option>
+</select>
+<label>TX Power (dBm)</label>
+<input name="tx" type="number" value="{{tx}}" min="-9" max="22">
+<button type="submit">Save LoRa Config</button>
+</form>
+</div>
+
+<div class="card">
+<h2>WiFi Access Point</h2>
+<form method="POST" action="/admin/wifi">
+<label>SSID</label>
+<input name="ssid" value="{{ap_ssid}}" maxlength="32">
+<label>Password (empty = open)</label>
+<input name="pass" type="password" maxlength="64">
+<button type="submit">Save WiFi AP</button>
+</form>
+</div>
+
+<div class="card">
+<h2>Upstream WiFi (STA)</h2>
+<form method="POST" action="/admin/sta">
+<label><input type="checkbox" name="enabled" value="on" {{sta_enabled}}> Enable upstream WiFi</label>
+<label>SSID</label>
+<input name="ssid" value="{{sta_ssid}}" maxlength="32">
+<label>Password</label>
+<input name="pass" type="password" maxlength="64">
+<button type="submit">Save STA Config</button>
+</form>
+</div>
+
+<div class="card">
+<h2>System</h2>
+<button type="button" class="danger" onclick="doReboot()">Reboot Node</button>
+<p class="msg" id="reboot-msg">Reboot scheduled. Reconnect to WiFi in a few seconds...</p>
+</div>
+
+<script>
+function doReboot(){
+document.getElementById('reboot-msg').style.display='block';
+fetch('/api/reboot',{method:'POST'}).catch(function(){});
+}
+</script>
+</body>
+</html>

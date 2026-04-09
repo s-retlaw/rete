@@ -17,7 +17,7 @@ rete-iface-lora = { path = "../../crates/rete-iface-lora" }
 
 # ESP-HAL ecosystem (pinned to esp-hal v1.0.0 release)
 esp-hal = { version = "1.0.0", default-features = false, features = ["esp32s3", "unstable"] }
-esp-rtos = { version = "0.2.0", default-features = false, features = ["esp32s3", "embassy"] }
+esp-rtos = { version = "0.2.0", default-features = false, features = ["esp32s3", "embassy", "esp-radio"] }
 esp-alloc = "0.9.0"
 esp-backtrace = { version = "0.18.1", default-features = false, features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.4.0", default-features = false, features = ["esp32s3"] }
@@ -26,6 +26,11 @@ esp-println = { version = "0.16.1", default-features = false, features = ["esp32
 # Embassy
 embassy-executor = "0.9.0"
 embassy-time = "0.5.0"
+embassy-net = { version = "0.8.0", features = ["dhcpv4", "medium-ethernet", "tcp", "udp"] }
+embassy-sync = "0.6"
+
+# WiFi (esp-radio + embassy-net share smoltcp 0.12 — no version conflicts)
+esp-radio = { version = "0.17.0", default-features = false, features = ["wifi", "esp32s3", "unstable", "smoltcp"] }
 
 # LoRa
 lora-phy = "3"
@@ -34,11 +39,16 @@ lora-phy = "3"
 embedded-hal = "1"
 embedded-hal-async = "1"
 embedded-hal-bus = { version = "0.3", features = ["async"] }
+embedded-io-async = "0.7"
 
 # Display
 ssd1306 = { version = "0.10", default-features = false, features = ["graphics"] }
 embedded-graphics = "0.8"
 profont = "0.7"
+
+# Flash storage
+esp-storage = { version = "0.8", default-features = false, features = ["esp32s3"] }
+embedded-storage = "0.3"
 
 # Misc
 static_cell = "2.1.0"

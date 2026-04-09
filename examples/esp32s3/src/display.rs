@@ -39,6 +39,7 @@ impl DisplayState {
         now: u64,
         freq_hz: u32,
         sf: u8,
+        admin_pw: &str,
     ) {
         self.tick_count += 1;
 
@@ -48,7 +49,7 @@ impl DisplayState {
 
         let page = (self.tick_count - 3) % 2;
         match page {
-            0 => draw_identity_page(display, node_core, now, freq_hz, sf),
+            0 => draw_identity_page(display, node_core, now, freq_hz, sf, admin_pw),
             _ => draw_stats_page(display, node_core, now),
         }
     }
@@ -102,8 +103,8 @@ pub fn draw_splash<DI: WriteOnlyDataCommand>(display: &mut OledDisplay<DI>, freq
     .ok();
 
     let freq_mhz = freq_hz / 1_000_000;
-    let lora_line = format!("LoRa {}MHz SF{}", freq_mhz, sf);
-    Text::with_alignment(&lora_line, Point::new(64, 60), style_small(), Alignment::Center)
+    let info_line = format!("LoRa {}MHz SF{}  WiFi AP", freq_mhz, sf);
+    Text::with_alignment(&info_line, Point::new(64, 60), style_small(), Alignment::Center)
         .draw(display)
         .ok();
 
@@ -117,6 +118,7 @@ pub fn draw_identity_page<DI: WriteOnlyDataCommand>(
     now: u64,
     freq_hz: u32,
     sf: u8,
+    admin_pw: &str,
 ) {
     display.clear_buffer();
 
@@ -143,14 +145,17 @@ pub fn draw_identity_page<DI: WriteOnlyDataCommand>(
 
     let paths = node_core.path_count();
     let links = stats.transport.links_established;
-    let pl_line = format!("Paths:{} Links:{}", paths, links);
+    let freq_mhz = freq_hz / 1_000_000;
+    let pl_line = format!("P:{} L:{} {}MHz SF{}", paths, links, freq_mhz, sf);
     Text::new(&pl_line, Point::new(0, 51), style_small())
         .draw(display)
         .ok();
 
-    let freq_mhz = freq_hz / 1_000_000;
-    let lora_line = format!("LoRa {}MHz SF{}", freq_mhz, sf);
-    Text::new(&lora_line, Point::new(0, 62), style_small())
+    let wifi_line = match crate::status::sta_ip_str() {
+        Some(ip) => format!("PW:{} STA:{}", admin_pw, ip),
+        None => format!("PW:{} 192.168.4.1", admin_pw),
+    };
+    Text::new(&wifi_line, Point::new(0, 62), style_small())
         .draw(display)
         .ok();
 
@@ -183,13 +188,16 @@ pub fn draw_stats_page<DI: WriteOnlyDataCommand>(
         .draw(display)
         .ok();
 
-    let ann = format!("ANN r:{} t:{}", t.announces_received, t.announces_sent);
+    let ann = format!("ANN r:{} t:{} Lnk:{}", t.announces_received, t.announces_sent, t.links_established);
     Text::new(&ann, Point::new(0, 51), style_small())
         .draw(display)
         .ok();
 
-    let links = format!("Lnk:{}", t.links_established);
-    Text::new(&links, Point::new(0, 62), style_small())
+    let wifi_line = match crate::status::sta_ip_str() {
+        Some(ip) => format!("STA:{}", ip),
+        None => format!("AP: 192.168.4.1"),
+    };
+    Text::new(&wifi_line, Point::new(0, 62), style_small())
         .draw(display)
         .ok();
 
@@ -235,7 +243,7 @@ fn format_uptime(buf: &mut [u8; 8], secs: u64) {
 }
 
 /// Encode `bytes` as lowercase hex into `out`. `out.len()` must be `2 * bytes.len()`.
-fn format_hex(bytes: &[u8], out: &mut [u8]) {
+pub fn format_hex(bytes: &[u8], out: &mut [u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for (i, &b) in bytes.iter().enumerate() {
         out[i * 2] = HEX[(b >> 4) as usize];
