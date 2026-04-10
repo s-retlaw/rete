@@ -346,7 +346,15 @@ async fn main(spawner: Spawner) -> ! {
                             println!("[rete] tick: expired {} paths", expired_paths);
                         }
                         let now = embassy_time::Instant::now().as_secs();
-                        disp_state.update(&mut oled, node_core, now, node_config.lora_freq, node_config.lora_sf, node_config.admin_pass_str());
+                        disp_state.update(&mut oled, node_core, now, &display::DispConfig {
+                            freq_hz: node_config.lora_freq,
+                            sf: node_config.lora_sf,
+                            bw_hz: node_config.lora_bw,
+                            tx_power: node_config.lora_tx_power,
+                            admin_pw: node_config.admin_pass_str(),
+                            ap_ssid: node_config.ap_ssid_str(),
+                            sta_enabled,
+                        });
                         status::update_status(node_core, now, node_config.lora_freq, node_config.lora_sf, node_config.lora_bw, node_config.lora_tx_power);
                     }
                     _ => {}
