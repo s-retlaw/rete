@@ -289,6 +289,18 @@ The following are not yet implemented:
 - LXMF client on ESP32 (using rete-lxmf-core)
 - Build variants via Cargo features (wifi-only, ble-only, full)
 - Additional board targets: RAK4631 (nRF52840), T-Deck (ESP32-S3), T-Beam S3
+- WSS transport interface (`rete-iface-wss`)
+  - WebSocket over TLS on port 443 — punches through restrictive firewalls
+  - HDLC frames inside WSS, same framing as TCP interface
+  - Server side: `WSSServerInterface` on a gateway/VPS (tokio-tungstenite)
+  - Client side: `WSSClientInterface` for daemons behind firewalls
+  - Config: `type = WSSClientInterface`, `target_host`, `target_port = 443`
+- WASM rete node (browser-based, zero-install)
+  - rete-core + rete-transport compile to WASM today (no_std + alloc)
+  - Connect to network via WSS back to same origin (ReteWebHost)
+  - Or via Web Serial API to a local USB RNode (fully serverless)
+  - rete-lxmf-core also WASM-compatible — browser-based mesh messaging
+  - Deployment: user opens a URL, WASM loads, connects to mesh. No install.
 
 ---
 
