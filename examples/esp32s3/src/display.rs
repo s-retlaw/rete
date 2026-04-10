@@ -151,10 +151,7 @@ pub fn draw_identity_page<DI: WriteOnlyDataCommand>(
         .draw(display)
         .ok();
 
-    let wifi_line = match crate::status::sta_ip_str() {
-        Some(ip) => format!("PW:{} STA:{}", admin_pw, ip),
-        None => format!("PW:{} 192.168.4.1", admin_pw),
-    };
+    let wifi_line = format!("PW:{}", admin_pw);
     Text::new(&wifi_line, Point::new(0, 62), style_small())
         .draw(display)
         .ok();
@@ -193,8 +190,9 @@ pub fn draw_stats_page<DI: WriteOnlyDataCommand>(
         .draw(display)
         .ok();
 
+    let tcp = if crate::status::TCP_CONNECTED.load(core::sync::atomic::Ordering::Relaxed) { " TCP" } else { "" };
     let wifi_line = match crate::status::sta_ip_str() {
-        Some(ip) => format!("STA:{}", ip),
+        Some(ip) => format!("STA:{}{}", ip, tcp),
         None => format!("AP: 192.168.4.1"),
     };
     Text::new(&wifi_line, Point::new(0, 62), style_small())

@@ -40,8 +40,17 @@ mod dhcp;
 mod display;
 mod rng;
 mod status;
+mod tcp_iface;
 mod web;
 use rng::EspRng;
+
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+
+/// Packets received from TCP peer → main node loop.
+static TCP_INBOUND: Channel<CriticalSectionRawMutex, tcp_iface::PacketBuf, { tcp_iface::CHANNEL_DEPTH }> = Channel::new();
+/// Packets from main node loop → TCP peer.
+static TCP_OUTBOUND: Channel<CriticalSectionRawMutex, tcp_iface::PacketBuf, { tcp_iface::CHANNEL_DEPTH }> = Channel::new();
 
 macro_rules! mk_static {
     ($t:ty, $val:expr) => {{
@@ -79,7 +88,7 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    esp_alloc::heap_allocator!(size: 128 * 1024);
+    esp_alloc::heap_allocator!(size: 72 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
@@ -90,7 +99,7 @@ async fn main(spawner: Spawner) -> ! {
     // Load or generate persistent config
     // -----------------------------------------------------------------------
 
-    let node_config = match config::load_config() {
+    let node_config = mk_static!(config::NodeConfig, match config::load_config() {
         Some(cfg) => {
             println!("[rete] loaded config from flash");
             cfg
@@ -102,10 +111,10 @@ async fn main(spawner: Spawner) -> ! {
             println!("[rete] config saved to flash");
             cfg
         }
-    };
+    });
 
     // Cache config in memory so web handlers never touch flash (avoids stack overflow)
-    config::init_cache(&node_config);
+    config::init_cache(node_config);
 
     println!(
         "[rete] LoRa config: freq={}Hz SF={} BW={}Hz TX={}dBm",
@@ -204,12 +213,17 @@ async fn main(spawner: Spawner) -> ! {
         let (sta_stack, sta_runner) = embassy_net::new(
             interfaces.sta,
             sta_net_config,
-            mk_static!(embassy_net::StackResources<3>, embassy_net::StackResources::<3>::new()),
+            mk_static!(embassy_net::StackResources<4>, embassy_net::StackResources::<4>::new()),
             seed2,
         );
         spawner.spawn(net_task_sta(sta_runner)).ok();
         spawner.spawn(sta_connection_task(controller)).ok();
         spawner.spawn(sta_ip_monitor_task(sta_stack)).ok();
+        spawner.spawn(tcp_iface::tcp_rete_task(
+            sta_stack,
+            TCP_INBOUND.sender(),
+            TCP_OUTBOUND.receiver(),
+        )).ok();
     }
 
     println!("[rete] WiFi started");
@@ -291,6 +305,8 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     let mut node = EmbassyNode::new(identity, APP_NAME, ASPECTS).expect("valid app name");
+    node.core.enable_transport();
+    println!("[rete] transport mode ENABLED (forwarding between interfaces)");
     let dh = node.core.dest_hash();
     let dhb = dh.as_bytes();
     println!(
@@ -302,41 +318,64 @@ async fn main(spawner: Spawner) -> ! {
     // Run the rete event loop
     // -----------------------------------------------------------------------
 
-    println!("[rete] entering main loop — listening on LoRa");
-
     let mut disp_state = display::DisplayState::new();
 
-    node.run_with_handler(&mut iface, &mut rng, |event, node_core, _rng| {
-        match event {
-            NodeEvent::AnnounceReceived {
-                dest_hash, hops, ..
-            } => {
-                let d = dest_hash.as_bytes();
-                println!(
-                    "[rete] ANNOUNCE dest={:02x}{:02x}{:02x}{:02x}... hops={}",
-                    d[0], d[1], d[2], d[3], hops,
-                );
-            }
-            NodeEvent::DataReceived { payload, .. } => {
-                if let Ok(text) = ::core::str::from_utf8(&payload) {
-                    println!("[rete] DATA: {}", text);
-                } else {
-                    println!("[rete] DATA: {} bytes", payload.len());
+    // Macro to avoid duplicating the event handler closure across branches.
+    macro_rules! event_handler {
+        () => {
+            |event, node_core: &mut rete_embassy::EmbeddedNodeCore, _rng: &mut EspRng| {
+                match event {
+                    NodeEvent::AnnounceReceived {
+                        dest_hash, hops, ..
+                    } => {
+                        let d = dest_hash.as_bytes();
+                        println!(
+                            "[rete] ANNOUNCE dest={:02x}{:02x}{:02x}{:02x}... hops={}",
+                            d[0], d[1], d[2], d[3], hops,
+                        );
+                    }
+                    NodeEvent::DataReceived { payload, .. } => {
+                        if let Ok(text) = ::core::str::from_utf8(&payload) {
+                            println!("[rete] DATA: {}", text);
+                        } else {
+                            println!("[rete] DATA: {} bytes", payload.len());
+                        }
+                    }
+                    NodeEvent::Tick { expired_paths, .. } => {
+                        if expired_paths > 0 {
+                            println!("[rete] tick: expired {} paths", expired_paths);
+                        }
+                        let now = embassy_time::Instant::now().as_secs();
+                        disp_state.update(&mut oled, node_core, now, node_config.lora_freq, node_config.lora_sf, node_config.admin_pass_str());
+                        status::update_status(node_core, now, node_config.lora_freq, node_config.lora_sf, node_config.lora_bw, node_config.lora_tx_power);
+                    }
+                    _ => {}
                 }
+                Vec::new()
             }
-            NodeEvent::Tick { expired_paths, .. } => {
-                if expired_paths > 0 {
-                    println!("[rete] tick: expired {} paths", expired_paths);
-                }
-                let now = embassy_time::Instant::now().as_secs();
-                disp_state.update(&mut oled, node_core, now, node_config.lora_freq, node_config.lora_sf, node_config.admin_pass_str());
-                status::update_status(node_core, now, node_config.lora_freq, node_config.lora_sf, node_config.lora_bw, node_config.lora_tx_power);
-            }
-            _ => {}
-        }
-        Vec::new()
-    })
-    .await;
+        };
+    }
+
+    if sta_enabled {
+        // Dual interface: LoRa + TCP over WiFi
+        println!("[rete] entering main loop — LoRa + TCP (dual interface)");
+        let mut tcp_iface = tcp_iface::ChannelInterface::new(
+            TCP_INBOUND.receiver(),
+            TCP_OUTBOUND.sender(),
+        );
+        node.run_multi_2_until_with_handler(
+            &mut iface,
+            &mut tcp_iface,
+            &mut rng,
+            event_handler!(),
+            core::future::pending::<()>(),
+        )
+        .await;
+    } else {
+        // Single interface: LoRa only
+        println!("[rete] entering main loop — listening on LoRa");
+        node.run_with_handler(&mut iface, &mut rng, event_handler!()).await;
+    }
 
     println!("[rete] loop exited (unexpected)");
     loop {

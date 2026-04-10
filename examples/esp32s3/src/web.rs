@@ -393,12 +393,14 @@ fn format_json(s: &StatusSnapshot) -> String {
         concat!(
             "{{\"identity\":\"{}\",\"dest_hash\":\"{}\",\"uptime_secs\":{},",
             "\"lora\":{{\"freq_mhz\":{},\"sf\":{},\"bw_khz\":{},\"tx_dbm\":{}}},",
-            "\"transport\":{{\"rx\":{},\"tx\":{},\"fwd\":{},\"announces_rx\":{},\"announces_tx\":{},\"paths\":{},\"links\":{}}}}}"
+            "\"transport\":{{\"rx\":{},\"tx\":{},\"fwd\":{},\"announces_rx\":{},\"announces_tx\":{},\"paths\":{},\"links\":{}}},",
+            "\"tcp_connected\":{}}}"
         ),
         ih_str, dh_str, s.uptime_secs,
         s.freq_hz / 1_000_000, s.sf, s.bw_hz / 1_000, s.tx_power,
         s.packets_rx, s.packets_tx, s.packets_fwd,
         s.announces_rx, s.announces_tx, s.paths, s.links,
+        s.tcp_connected,
     )
 }
 

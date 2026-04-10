@@ -1645,6 +1645,7 @@ name = "rete-example-esp32s3"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",
+ "embassy-futures",
  "embassy-net",
  "embassy-sync 0.6.2",
  "embassy-time",
@@ -1668,6 +1669,7 @@ dependencies = [
  "rete-core",
  "rete-embassy",
  "rete-iface-lora",
+ "rete-stack",
  "ssd1306",
  "static_cell",
 ]

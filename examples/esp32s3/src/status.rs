@@ -1,12 +1,15 @@
 //! Shared node status snapshot — updated by the node tick, read by the HTTP server.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use rete_embassy::EmbeddedNodeCore;
 
 /// STA IP address as a packed u32 (0 = not connected). Updated by the STA monitor task.
 pub static STA_IP: AtomicU32 = AtomicU32::new(0);
+
+/// TCP rete interface connected. Updated by tcp_rete_task.
+pub static TCP_CONNECTED: AtomicBool = AtomicBool::new(false);
 
 /// Signal for requesting a reboot. Web handler signals, reboot task waits.
 pub static REBOOT_SIGNAL: embassy_sync::signal::Signal<CriticalSectionRawMutex, ()> =
@@ -40,6 +43,7 @@ pub struct StatusSnapshot {
     pub paths: usize,
     pub links: u64,
     pub sta_ip: u32,
+    pub tcp_connected: bool,
 }
 
 pub static NODE_STATUS: Mutex<CriticalSectionRawMutex, StatusSnapshot> =
@@ -59,6 +63,7 @@ pub static NODE_STATUS: Mutex<CriticalSectionRawMutex, StatusSnapshot> =
         paths: 0,
         links: 0,
         sta_ip: 0,
+        tcp_connected: false,
     });
 
 /// Update the shared snapshot from node core state. Called on each tick.
@@ -82,5 +87,6 @@ pub fn update_status(core: &EmbeddedNodeCore, now: u64, freq_hz: u32, sf: u8, bw
         snap.paths = core.path_count();
         snap.links = t.links_established;
         snap.sta_ip = STA_IP.load(Ordering::Relaxed);
+        snap.tcp_connected = TCP_CONNECTED.load(Ordering::Relaxed);
     }
 }
