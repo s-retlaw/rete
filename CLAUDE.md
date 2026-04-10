@@ -277,6 +277,18 @@ Start here — do not skip ahead:
 The following are not yet implemented:
 
 - I2P interface
+- Web-based firmware flasher (ESP Web Tools)
+  - Use https://esphome.github.io/esp-web-tools/ — browser-based flashing via Web Serial API
+  - Needs: pre-built .bin files, manifest.json, hosted HTML page (GitHub Pages)
+  - Extract bootloader + partition table via `espflash save-image`
+  - GitHub Actions workflow to build release binaries and publish flasher page
+  - Supports ESP32-S3, ESP32-C6, and future ESP32 targets
+- BLE configuration interface (for nRF52/ESP32 boards without WiFi)
+- Multiple simultaneous TCP peers (hub pattern)
+- TCP client mode (ESP32 connecting out to a remote rete node)
+- LXMF client on ESP32 (using rete-lxmf-core)
+- Build variants via Cargo features (wifi-only, ble-only, full)
+- Additional board targets: RAK4631 (nRF52840), T-Deck (ESP32-S3), T-Beam S3
 
 ---
 
