@@ -70,11 +70,19 @@ rete/
 │   ├── rete-iface-kiss/   KISS TNC serial interface
 │   ├── rete-iface-serial/ Raw serial interface
 │   └── rete-iface-tcp/    TCP interface
-└── examples/
-    ├── linux/              Hosted — Tokio or embassy-std
-    ├── esp32s3/            ESP32-S3 bare metal
-    ├── esp32c6/            ESP32-C6 bare metal
-    └── rp2040/             Raspberry Pi Pico 2W bare metal
+├── examples/
+│   ├── linux/              Hosted — Tokio or embassy-std
+│   ├── esp32s3/            ESP32-S3 bare metal
+│   ├── esp32c6/            ESP32-C6 bare metal
+│   └── rp2040/             Raspberry Pi Pico 2W bare metal
+├── tools/                  CLI utility applications
+│   ├── rete-ping/          Ping/echo over rete
+│   ├── rete-echo/          LXMF echo server
+│   ├── rete-sh/            Remote shell
+│   └── rete-cp/            Remote file copy
+└── web/                    Browser-based rete access
+    ├── rete-wasm/          rete-core compiled to WASM, browser interface
+    └── rete-webhost/       Server: static files + WSS bridge to rete network
 ```
 
 ## Runtime agnosticism — critical design principle
