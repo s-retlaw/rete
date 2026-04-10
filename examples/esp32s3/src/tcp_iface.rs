@@ -115,11 +115,16 @@ pub async fn tcp_rete_task(
 
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
-        socket.set_timeout(Some(Duration::from_secs(60)));
+        // No timeout during accept — wait indefinitely for a peer.
+        // Timeout is set after connection is established.
+        socket.set_timeout(None);
 
         match socket.accept(TCP_PORT).await {
             Ok(()) => {
                 println!("[tcp-rete] peer connected");
+                // No timeout — rete traffic can be bursty with long idle periods.
+                // Dead peers are detected when a write fails.
+                socket.set_timeout(None);
                 crate::status::TCP_CONNECTED.store(true, Ordering::Relaxed);
             }
             Err(e) => {
@@ -179,8 +184,8 @@ pub async fn tcp_rete_task(
         }
 
         crate::status::TCP_CONNECTED.store(false, Ordering::Relaxed);
-        socket.close();
+        socket.abort(); // Immediate release — don't wait for FIN handshake
         println!("[tcp-rete] peer disconnected");
-        Timer::after(Duration::from_millis(500)).await;
+        Timer::after(Duration::from_secs(1)).await;
     }
 }
