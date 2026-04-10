@@ -16,6 +16,9 @@
 //!   cargo run -p rete -- --listen 0.0.0.0:4242 --transport
 //!   cargo run -p rete -- --connect 127.0.0.1:4242 --monitoring 127.0.0.1:9100
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use rete_daemon::{
     command::{spawn_signal_handler, spawn_stdin_reader},
     compression::AppHooks,

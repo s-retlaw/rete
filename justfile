@@ -727,6 +727,13 @@ build-release:
     @ls -lh target/release/rete
     @echo "Binary: target/release/rete"
 
+# Build static musl binary (no shared library dependencies, runs on any Linux)
+build-static:
+    cargo build -p rete --release --target x86_64-unknown-linux-musl
+    strip target/x86_64-unknown-linux-musl/release/rete
+    @ls -lh target/x86_64-unknown-linux-musl/release/rete
+    @echo "Static binary: target/x86_64-unknown-linux-musl/release/rete"
+
 # Check all workspace crates compile
 check:
     cargo check --workspace
