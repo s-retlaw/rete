@@ -116,8 +116,13 @@ class InteropTest:
         self._rust_proc = None
 
         parser = argparse.ArgumentParser(description=f"rete {name} interop test")
+        # Default binary path: prefer musl target (default build target),
+        # fall back to target/debug for backwards compatibility.
+        default_binary = "../../target/x86_64-unknown-linux-musl/debug/rete"
+        if not os.path.exists(default_binary):
+            default_binary = "../../target/debug/rete"
         parser.add_argument(
-            "--rust-binary", default="../../target/debug/rete",
+            "--rust-binary", default=default_binary,
             help="Path to the rete binary",
         )
         parser.add_argument(

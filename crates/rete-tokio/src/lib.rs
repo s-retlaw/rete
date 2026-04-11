@@ -5,6 +5,7 @@
 
 pub mod hub;
 pub mod local;
+pub mod reconnect;
 pub mod tcp_server;
 
 #[cfg(test)]

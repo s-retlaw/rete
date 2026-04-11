@@ -1214,6 +1214,8 @@ dependencies = [
  "rand",
  "rand_core",
  "rete-core",
+ "rete-iface-serial",
+ "rete-iface-tcp",
  "rete-stack",
  "rete-transport",
  "tokio",

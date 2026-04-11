@@ -68,8 +68,9 @@ pub const PATH_REQUEST_GRACE: u64 = 1;
 pub const PATH_REQUEST_MI: u64 = 20;
 
 /// Default announce rate target (seconds between announces per destination).
-/// Python: interface-configurable, typically 3600s.
-pub const ANNOUNCE_RATE_TARGET: u64 = 3600;
+/// Python: interface-configurable, defaults to None (disabled).
+/// Set to 0 to disable rate limiting (matches Python default).
+pub const ANNOUNCE_RATE_TARGET: u64 = 0;
 
 /// Number of rate violations allowed before blocking.
 /// Python: interface-configurable, typically 10.

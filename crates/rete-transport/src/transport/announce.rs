@@ -67,8 +67,12 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                 }
                 let dh = dh_check;
 
-                // Announce rate limiting
-                let rate_blocked = {
+                // Announce rate limiting (disabled when ANNOUNCE_RATE_TARGET == 0,
+                // matching Python RNS default which only rate-limits when
+                // explicitly configured per-interface).
+                let rate_blocked = if ANNOUNCE_RATE_TARGET == 0 {
+                    false
+                } else {
                     let entry = self.announce_rate.get_mut(&dh);
                     match entry {
                         Some(re) => {
@@ -105,6 +109,11 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                     }
                 };
                 if rate_blocked {
+                    #[cfg(feature = "relay-debug")]
+                    tracing::trace!(
+                        "[relay] RATE_LIMITED dest={}",
+                        super::hex_short(dh.as_ref()),
+                    );
                     self.stats.announces_rate_limited += 1;
                     return IngestResult::Duplicate;
                 }

@@ -34,11 +34,10 @@ use rete_daemon::{
 };
 
 use rete_iface_auto::{AutoInterface, AutoInterfaceConfig};
-use rete_iface_serial::SerialInterface;
-use rete_iface_tcp::TcpInterface;
 use rete_lxmf::LxmfRouter;
 use rete_stack::{handler_fn, RequestHandler, RequestPolicy, ResponseCompressionPolicy};
 use rete_tokio::local::{LocalServer, ReconnectingLocalClient};
+use rete_tokio::reconnect::{ReconnectingSerial, ReconnectingTcpClient};
 use rete_tokio::tcp_server::TcpServer;
 use rete_tokio::{interface_task, InboundMsg, InterfaceSlot, NodeCommand, TokioNode};
 use rete_transport::SnapshotStore as _;
@@ -350,12 +349,8 @@ async fn async_main() {
     } else if let Some(path) = c.serial_path.as_deref()
         .filter(|_| c.addrs.is_empty() && c.local_server_name.is_none())
     {
-        tracing::info!("opening serial port {} at {} baud ...", path, c.baud);
-        let mut iface = match SerialInterface::open(path, c.baud) {
-            Ok(i) => i,
-            Err(e) => { tracing::error!("failed to open serial port: {e}"); std::process::exit(1); }
-        };
-        tracing::info!("serial port open");
+        let mut iface = ReconnectingSerial::new(path, c.baud);
+        tracing::info!("serial port {} at {} baud (auto-reconnect)", path, c.baud);
         node.run_with_app_handler(&mut iface, cmd_rx,
             |e, core, rng| on_event(e, &lxmf_router, &snapshot_store, &stats_tx, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
@@ -373,17 +368,11 @@ async fn async_main() {
 
         for addr in &c.addrs {
             let idx = next_idx; next_idx += 1;
-            tracing::info!("connecting to {} (iface {}) ...", addr, idx);
-            let mut iface = match TcpInterface::connect(addr).await {
-                Ok(i) => i,
-                Err(e) => { tracing::error!("failed to connect to {}: {e}", addr); std::process::exit(1); }
-            };
+            let mut iface = ReconnectingTcpClient::new(addr);
             if c.ifac_netname.is_some() || c.ifac_netkey.is_some() {
-                let key = rete_core::IfacKey::derive(c.ifac_netname.as_deref(), c.ifac_netkey.as_deref())
-                    .expect("failed to derive IFAC key");
-                iface.set_ifac(key);
+                iface.set_ifac(c.ifac_netname.as_deref(), c.ifac_netkey.as_deref());
             }
-            tracing::info!("connected to {} (iface {})", addr, idx);
+            tracing::info!("TCP client to {} (iface {}, auto-reconnect)", addr, idx);
             let (tx, driver) = interface_task(iface, idx, inbound_tx.clone());
             slots.push(InterfaceSlot::Direct(tx));
             tokio::spawn(driver);
@@ -410,15 +399,11 @@ async fn async_main() {
 
         if let Some(ref path) = c.serial_path {
             let idx = next_idx; next_idx += 1;
-            tracing::info!("opening serial port {} (iface {}) ...", path, idx);
-            let iface = match SerialInterface::open(path, c.baud) {
-                Ok(i) => i,
-                Err(e) => { tracing::error!("failed to open serial port: {e}"); std::process::exit(1); }
-            };
+            let iface = ReconnectingSerial::new(path, c.baud);
+            tracing::info!("serial port {} (iface {}, auto-reconnect)", path, idx);
             let (tx, driver) = interface_task(iface, idx, inbound_tx.clone());
             slots.push(InterfaceSlot::Direct(tx));
             tokio::spawn(driver);
-            tracing::info!("serial port open (iface {})", idx);
         }
 
         if let Some(ref server_name) = c.local_server_name {
@@ -456,15 +441,11 @@ async fn async_main() {
         ).await;
     } else {
         let addr = c.addrs.first().map(|s| s.as_str()).unwrap_or(DEFAULT_ADDR);
-        tracing::info!("connecting to {} ...", addr);
-        let mut iface = match TcpInterface::connect(addr).await {
-            Ok(i) => i,
-            Err(e) => { tracing::error!("failed to connect: {e}"); std::process::exit(1); }
-        };
-        if let Some(key) = ifac_key {
-            iface.set_ifac(key);
+        let mut iface = ReconnectingTcpClient::new(addr);
+        if c.ifac_netname.is_some() || c.ifac_netkey.is_some() {
+            iface.set_ifac(c.ifac_netname.as_deref(), c.ifac_netkey.as_deref());
         }
-        tracing::info!("connected");
+        tracing::info!("TCP client to {} (auto-reconnect)", addr);
         node.run_with_app_handler(&mut iface, cmd_rx,
             |e, core, rng| on_event(e, &lxmf_router, &snapshot_store, &stats_tx, core, rng),
             |cmd, core, rng| handle_lxmf_command(cmd, core, &lxmf_router, rng),
