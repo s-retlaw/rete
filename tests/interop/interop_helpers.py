@@ -222,6 +222,52 @@ class InteropTest:
         t.start()
         return lines
 
+    def start_rust_listen(self, listen_addr=None, extra_args=None):
+        """Start rete with --listen (TCP server mode) and return its stdout line list.
+
+        Unlike ``start_rust`` which uses ``--connect``, this starts the daemon
+        as a TCP server that accepts incoming connections.
+
+        Args:
+            listen_addr: Address to listen on (defaults to ``127.0.0.1:{self.port}``).
+            extra_args: Additional CLI args (e.g. ``["--transport"]``).
+
+        Returns:
+            list[str]: A live-updated list of stdout lines.
+        """
+        listen_addr = listen_addr or f"127.0.0.1:{self.port}"
+        data_dir = os.path.join(self.tmpdir, f"rete_data_{len(self._procs)}")
+        os.makedirs(data_dir, exist_ok=True)
+        cmd = [
+            self.rust_binary,
+            "--data-dir", data_dir,
+            "--listen", listen_addr,
+        ]
+        if extra_args:
+            cmd.extend(extra_args)
+
+        self._log(f"starting Rust node (--listen {listen_addr})...")
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self._procs.append(proc)
+        self._rust_proc = proc
+
+        lines = []
+        t = threading.Thread(target=read_stdout_lines, args=(proc, lines, self._stop), daemon=True)
+        t.start()
+
+        # Wait for the TCP server to start accepting connections
+        host, port_str = listen_addr.rsplit(":", 1)
+        if not wait_for_port(host, int(port_str), timeout=15.0):
+            self._log(f"FAIL: Rust --listen did not start on {listen_addr} within 15s")
+            if proc.poll() is not None:
+                err = proc.stderr.read().decode(errors="replace")
+                print(f"  rete stderr:\n{err}")
+            sys.exit(1)
+        self._log("Rust TCP server is listening")
+        return lines
+
     def start_py_helper(self, script: str):
         """Write *script* to a temp file, run it, and return its stdout line list."""
         path = os.path.join(self.tmpdir, f"py_helper_{len(self._procs)}.py")

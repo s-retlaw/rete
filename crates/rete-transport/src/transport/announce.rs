@@ -117,28 +117,13 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                     }
                 };
 
-                if should_update {
-                    let mut path = match pkt.transport_id {
-                        Some(tid) => {
-                            Path::via_repeater(IdentityHash::from_slice(tid), pkt.hops, now)
-                        }
-                        None => Path {
-                            hops: pkt.hops,
-                            ..Path::direct(now)
-                        },
-                    };
-                    path.announce_raw = Some(raw.to_vec());
-                    path.received_on = Some(iface);
-                    let _ = self.insert_path(dh, path);
-                    self.stats.paths_learned += 1;
-                }
-
-                let mut pk = [0u8; 64];
-                pk.copy_from_slice(info.pub_key);
-                self.insert_identity(dh, pk);
-
-                if pkt.hops < PATHFINDER_M {
-                    let retransmit_raw = if let Some(local_id) = self.local_identity_hash {
+                // Build the retransmit version first — in transport mode this
+                // is a HEADER_2 with our own identity as transport_id, replacing
+                // any upstream transport_id.  We also use it as the cached
+                // announce_raw so that path-request responses point back through
+                // us (not through an upstream relay the requester can't reach).
+                let retransmit_raw = if pkt.hops < PATHFINDER_M {
+                    if let Some(local_id) = self.local_identity_hash {
                         let mut rebuild_buf = [0u8; rete_core::MTU];
                         let result = PacketBuilder::new(&mut rebuild_buf)
                             .header_type(HeaderType::Header2)
@@ -158,8 +143,38 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                         }
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    None
+                };
 
+                if should_update {
+                    let mut path = match pkt.transport_id {
+                        Some(tid) => {
+                            Path::via_repeater(IdentityHash::from_slice(tid), pkt.hops, now)
+                        }
+                        None => Path {
+                            hops: pkt.hops,
+                            ..Path::direct(now)
+                        },
+                    };
+                    // Cache the retransmit version (our H2) so path-request
+                    // responses identify us as the relay, not the upstream node.
+                    // Fall back to the original raw bytes when not in transport
+                    // mode or when the rebuild failed.
+                    path.announce_raw = Some(
+                        retransmit_raw.clone().unwrap_or_else(|| raw.to_vec()),
+                    );
+                    path.received_on = Some(iface);
+                    let _ = self.insert_path(dh, path);
+                    self.stats.paths_learned += 1;
+                }
+
+                let mut pk = [0u8; 64];
+                pk.copy_from_slice(info.pub_key);
+                self.insert_identity(dh, pk);
+
+                if pkt.hops < PATHFINDER_M {
                     let ann_raw = match retransmit_raw {
                         Some(v) => v,
                         None => raw.to_vec(),
