@@ -29,7 +29,7 @@ tracing            = { workspace = true, features = ["std"] }
 tokio             = { workspace = true }
 serde_json        = { workspace = true }
 serde             = { workspace = true, features = ["derive"] }
-rand              = "0.8"
+rand              = "0.9"
 hex               = "0.4"
 tokio-serial      = "5.4"
 mimalloc          = { version = "0.1", default-features = false }
