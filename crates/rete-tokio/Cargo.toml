@@ -16,6 +16,6 @@ rete-iface-tcp    = { path = "../rete-iface-tcp" }
 rete-iface-serial = { path = "../rete-iface-serial" }
 tokio             = { workspace = true }
 rand_core         = { version = "0.6", features = ["std"] }
-rand              = "0.8"
+rand              = "0.9"
 tracing           = { workspace = true, features = ["std"] }
 hex               = "0.4"
